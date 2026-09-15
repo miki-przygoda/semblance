@@ -1,9 +1,15 @@
 [package]
 name = "semblance-codec"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 description = "The compress/uncompress round-trip: encode a connectome to a compact latent code and decode it back. The heart of the project."
 
 [lib]

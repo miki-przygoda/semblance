@@ -1,9 +1,15 @@
 [package]
 name = "semblance-sim"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 description = "Neuron dynamics (LIF baseline) and the simulation engine that couples a connectome to sensory input and motor readout."
 
 [lib]

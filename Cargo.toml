@@ -10,17 +10,23 @@ members = [
 ]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
+authors = ["Mikolaj Mikuliszyn"]
+repository = "https://github.com/miki-przygoda/semblance"
+homepage = "https://github.com/miki-przygoda/semblance"
+keywords = ["connectome", "neuroevolution", "compression", "neuroscience"]
+categories = ["science", "simulation"]
 
 # Shared dependency versions. Individual crates opt in under [dependencies].
 [workspace.dependencies]
-semblance-connectome = { path = "crates/connectome" }
-semblance-sim = { path = "crates/sim" }
-semblance-codec = { path = "crates/codec" }
-semblance-evo = { path = "crates/evo" }
-semblance-fidelity = { path = "crates/fidelity" }
+semblance-connectome = { path = "crates/connectome", version = "0.1.0" }
+semblance-sim = { path = "crates/sim", version = "0.1.0" }
+semblance-codec = { path = "crates/codec", version = "0.1.0" }
+semblance-evo = { path = "crates/evo", version = "0.1.0" }
+semblance-fidelity = { path = "crates/fidelity", version = "0.1.0" }
 rand = "0.10"
 
 # A release profile tuned for the tick loop / evolution inner loops.
