@@ -19,7 +19,7 @@
 
 use semblance_codec::Latent;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// A candidate solution — just a latent code.
 #[derive(Clone, Debug)]
@@ -115,7 +115,7 @@ impl Population {
         let elite = self.cfg.elite.max(1).min(self.individuals.len());
         let mut next: Vec<Individual> = self.individuals[..elite].to_vec();
         while next.len() < self.cfg.pop_size {
-            let parent = &self.individuals[self.rng.gen_range(0..elite)];
+            let parent = &self.individuals[self.rng.random_range(0..elite)];
             let mut child = parent.genome.z.clone();
             perturb(&mut child, self.cfg.mutation_rate, self.cfg.mutation_std, &mut self.rng);
             next.push(Individual {
@@ -133,7 +133,7 @@ impl Population {
 /// uniform sampler.
 fn perturb(z: &mut Latent, rate: f32, std: f32, rng: &mut StdRng) {
     for g in z.iter_mut() {
-        if rng.r#gen::<f32>() < rate {
+        if rng.random::<f32>() < rate {
             *g += gaussian(rng) * std;
         }
     }
@@ -141,8 +141,8 @@ fn perturb(z: &mut Latent, rate: f32, std: f32, rng: &mut StdRng) {
 
 fn gaussian(rng: &mut StdRng) -> f32 {
     // Box–Muller; guard u1 away from 0 to avoid ln(0).
-    let u1: f32 = rng.r#gen::<f32>().max(1e-7);
-    let u2: f32 = rng.r#gen::<f32>();
+    let u1: f32 = rng.random::<f32>().max(1e-7);
+    let u2: f32 = rng.random::<f32>();
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 
