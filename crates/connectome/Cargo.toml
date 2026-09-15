@@ -1,0 +1,13 @@
+[package]
+name = "semblance-connectome"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Graph representation of a connectome and loaders (edge lists, synthetic test graphs)."
+
+[lib]
+name = "semblance_connectome"
+path = "src/lib.rs"
+
+[dependencies]

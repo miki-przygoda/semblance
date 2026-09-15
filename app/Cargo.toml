@@ -1,0 +1,18 @@
+[package]
+name = "semblance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CLI that wires the pipeline together: simulate, round-trip, and evolve. Dependency-light (std arg parsing) on purpose."
+
+[[bin]]
+name = "semblance"
+path = "src/main.rs"
+
+[dependencies]
+semblance-connectome.workspace = true
+semblance-sim.workspace = true
+semblance-codec.workspace = true
+semblance-evo.workspace = true
+semblance-fidelity.workspace = true
