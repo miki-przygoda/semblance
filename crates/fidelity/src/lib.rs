@@ -119,6 +119,44 @@ pub struct ProbeBattery<P: Probe> {
     pub probes: Vec<P>,
 }
 
+impl<P: Probe> ProbeBattery<P> {
+    /// An empty battery.
+    pub fn new() -> Self {
+        ProbeBattery { probes: Vec::new() }
+    }
+
+    /// Add a probe, returning `self` so a battery reads as one expression.
+    pub fn with(mut self, probe: P) -> Self {
+        self.probes.push(probe);
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.probes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.probes.is_empty()
+    }
+
+    /// The probes, ready to hand to [`behavioural_distance`].
+    pub fn as_slice(&self) -> &[P] {
+        &self.probes
+    }
+}
+
+impl<P: Probe> Default for ProbeBattery<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: Probe> From<Vec<P>> for ProbeBattery<P> {
+    fn from(probes: Vec<P>) -> Self {
+        ProbeBattery { probes }
+    }
+}
+
 /// A ready-made probe: constant drive into the first `k` neurons, spikes read
 /// from the last `motor` neurons. Enough to run the pipeline end to end; replace
 /// with something world-shaped when you design your real battery.
@@ -151,8 +189,9 @@ impl Probe for DriveProbe {
 #[derive(Clone, Debug)]
 pub struct CurvePoint {
     pub latent_dim: usize,
-    /// Behavioural distance (lower = more faithful). `None` if the codec isn't
-    /// implemented yet (e.g. `ReducedCodec` still `todo!()`).
+    /// Behavioural distance (lower = more faithful; `0.0` = identical behaviour).
+    /// A codec whose `encode`/`decode` are still `todo!()` panics rather than
+    /// producing a point here — there is no "not measured" value.
     pub behavioural_distance: f32,
     pub encode_ns: u128,
     pub decode_ns: u128,
@@ -195,23 +234,11 @@ pub fn size_fidelity_curve<P: Probe>(
 mod tests {
     use super::*;
     use semblance_codec::WeightCodec;
-    use semblance_sim::{ConstantDrive, SpikeReadout};
 
-    struct DrivePorbe {
-        k: usize,
-        motor: usize,
-        ticks: u64,
-    }
-    impl Probe for DrivePorbe {
-        fn stimulus(&self) -> Box<dyn Stimulus> {
-            Box::new(ConstantDrive { k: self.k, amplitude: 1.5 })
-        }
-        fn readout(&self, n: usize) -> Box<dyn Readout> {
-            Box::new(SpikeReadout::new(n, self.motor))
-        }
-        fn ticks(&self) -> u64 {
-            self.ticks
-        }
+    /// The probes these tests replay. Uses the public [`DriveProbe`] rather than a
+    /// private near-duplicate of it.
+    fn test_battery() -> Vec<DriveProbe> {
+        vec![DriveProbe { k: 8, amplitude: 1.5, motor: 4, ticks: 150 }]
     }
 
     #[test]
@@ -221,7 +248,7 @@ mod tests {
         let z = codec.encode(&c);
         let decoded = codec.decode(&z);
 
-        let battery = vec![DrivePorbe { k: 8, motor: 4, ticks: 150 }];
+        let battery = test_battery();
         let bd = behavioural_distance(&c, &decoded, &battery);
         assert_eq!(bd, 0.0, "a lossless round-trip must behave identically");
         assert_eq!(structural_distance(&c, &decoded), 0.0);
@@ -235,8 +262,23 @@ mod tests {
             *x += 0.5;
         }
         let perturbed = c.with_weights(&w);
-        let battery = vec![DrivePorbe { k: 8, motor: 4, ticks: 150 }];
+        let battery = test_battery();
         let bd = behavioural_distance(&c, &perturbed, &battery);
         assert!(bd > 0.0, "changed dynamics should change behaviour");
+    }
+
+    #[test]
+    fn probe_battery_collects_probes_for_behavioural_distance() {
+        let c = Connectome::synthetic(80, 5, 9);
+        let codec = WeightCodec::from_connectome(&c);
+        let decoded = codec.decode(&codec.encode(&c));
+
+        let battery = ProbeBattery::new()
+            .with(DriveProbe { k: 8, amplitude: 1.5, motor: 4, ticks: 150 })
+            .with(DriveProbe { k: 4, amplitude: 2.0, motor: 4, ticks: 150 });
+
+        assert_eq!(battery.len(), 2);
+        assert!(!battery.is_empty());
+        assert_eq!(behavioural_distance(&c, &decoded, battery.as_slice()), 0.0);
     }
 }
