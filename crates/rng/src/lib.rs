@@ -96,6 +96,16 @@ impl Rng {
             }
         }
     }
+
+    /// `true` with probability `p`.
+    ///
+    /// Correct at both ends without special-casing: `next_f32` is always
+    /// `>= 0.0`, so `p <= 0.0` never fires, and always `< 1.0`, so `p >= 1.0`
+    /// always fires.
+    #[inline]
+    pub fn chance(&mut self, p: f32) -> bool {
+        self.next_f32() < p
+    }
 }
 
 /// SplitMix64. Used only to expand a seed into xoshiro's state.
@@ -213,5 +223,23 @@ mod tests {
                 drift * 100.0
             );
         }
+    }
+
+    #[test]
+    fn chance_handles_both_extremes() {
+        let mut rng = Rng::seed_from_u64(11);
+        for _ in 0..10_000 {
+            assert!(!rng.chance(0.0), "p = 0.0 fired");
+            assert!(rng.chance(1.0), "p = 1.0 did not fire");
+        }
+    }
+
+    #[test]
+    fn chance_approximates_its_probability() {
+        let mut rng = Rng::seed_from_u64(12);
+        let draws = 100_000;
+        let hits = (0..draws).filter(|_| rng.chance(0.25)).count();
+        let rate = hits as f64 / draws as f64;
+        assert!((rate - 0.25).abs() < 0.01, "observed rate {rate:.4}");
     }
 }
