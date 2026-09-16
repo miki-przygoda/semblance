@@ -16,6 +16,13 @@
 //! This crate exists because `rand` 0.9 changed `StdRng`'s algorithm and
 //! silently reset this project's reproducibility baseline. The vectors in
 //! `tests/vectors.rs` make an accidental repeat of that fail loudly.
+//!
+//! `next_u64`, `next_f32` and `below` are pure integer arithmetic plus an
+//! exact power-of-two division, so they are bit-frozen unconditionally on
+//! every conformant target. `gaussian` additionally calls `f32::ln` and
+//! `f32::cos`, which lower to the host libm's `logf`/`cosf`; the freeze there
+//! assumes those are correctly rounded, which IEEE-754 does not mandate and
+//! glibc/musl/Apple libm/MSVC do not all agree on to the last bit.
 
 /// The golden-ratio constant, as SplitMix64's additive increment.
 ///
@@ -25,9 +32,11 @@
 /// precisely why seeding is safe for every possible `u64`.
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// Floor applied to Box-Muller's first uniform. `next_f32` can return exactly
-/// `0.0`, and `ln(0)` is `-inf`. Part of the frozen contract, so it is a named
-/// constant rather than a literal buried in the expression.
+/// Floor applied to Box-Muller's first uniform. `next_f32` can draw at or
+/// below this value — not just exactly `0.0`, since the smallest non-zero
+/// draw is `1/2^24 ≈ 5.96e-8` — and `ln` of anything that small blows up
+/// toward `-inf`. Part of the frozen contract, so it is a named constant
+/// rather than a literal buried in the expression.
 const GAUSSIAN_EPSILON: f32 = 1e-7;
 
 /// A seeded, deterministic random source.
@@ -219,8 +228,11 @@ mod tests {
         rng.below(0);
     }
 
-    /// The old `synthetic()` used `next_u64() % n`, which favours low indices.
-    /// Every bucket should land within 5% of the expected share.
+    /// A uniformity smoke test: every bucket should land within 5% of the
+    /// expected share. It does not test freedom from modulo bias — at
+    /// `N = 17` over a 2^64 range that bias is around 2^-60 relative, far too
+    /// small for this tolerance to catch. That property instead follows from
+    /// inspection of `below`'s rejection bound.
     #[test]
     fn below_is_unbiased_across_buckets() {
         const N: usize = 17;

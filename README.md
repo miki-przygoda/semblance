@@ -26,7 +26,9 @@ round-trip behaviourally rather than structurally**. See `DESIGN.md` for the gap
 ## Quickstart
 
 Requires **Rust 1.85 or newer** — the workspace is on edition 2024.
-Check with `rustc --version`; update with `rustup update`.
+Check with `rustc --version`; update with `rustup update`. The workspace has
+no external dependencies — everything it needs ships in the standard library
+plus the crates in this repo.
 
 ```bash
 cargo build            # builds the whole workspace
@@ -44,6 +46,7 @@ download anything to see the pipeline work. Wire in real data when you're ready
 
 | Crate | Built and working | Left for you (the research) |
 |-------|-------------------|------------------------------|
+| `rng` | `semblance-rng` — SplitMix64-seeded xoshiro256++, frozen stream pinned by test vectors | — |
 | `connectome` | graph type, CSR view, edge-list loader, synthetic generator | load a real FlyWire/MaleCNS export |
 | `sim` | LIF neurons, decaying-current synapses, tick loop | sensory encoding + motor decoding ("make it act like an ant") |
 | `codec` | `WeightCodec` — lossless baseline, directly evolvable | `ReducedCodec` — the actual compression (`todo!()`) |

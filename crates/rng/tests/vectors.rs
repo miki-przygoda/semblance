@@ -5,6 +5,12 @@
 //! If a change to `semblance-rng` makes this file fail, that change altered
 //! the stream and is a breaking change: either revert it, or bump the major
 //! version and regenerate these vectors deliberately.
+//!
+//! Exception: a failure confined to the `gaussian` values, on an unusual
+//! host libm, is a portability issue rather than a broken stream — `gaussian`
+//! depends on `logf`/`cosf` rounding (see the crate docs' stability contract)
+//! and is not bit-frozen the way the integer methods are. Diagnose that
+//! before assuming the generator changed.
 
 use semblance_rng::Rng;
 

@@ -139,7 +139,7 @@ fn cmd_evolve() -> ExitCode {
     let cfg = EvoConfig { pop_size: 60, elite: 8, mutation_rate: 0.25, mutation_std: 0.15 };
     let mut pop = Population::seeded(&seed, cfg, SEED);
 
-    // Baseline fires ~120 spikes under this probe; ask evolution to roughly double
+    // Baseline fires ~132 spikes under this probe; ask evolution to roughly double
     // it. Reachable by finding more excitable weightings, so the loop visibly climbs.
     let mut fitness = RateTargetFitness {
         codec,

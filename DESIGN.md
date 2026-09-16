@@ -79,6 +79,11 @@ project — if the metric is weak, every fidelity number downstream is meaningle
 
 ## Crate-by-crate
 
+- **`rng`** — the workspace's one random source. SplitMix64 expands a `u64`
+  seed into xoshiro256++'s state; the resulting stream is frozen and pinned by
+  test vectors, so `connectome`'s `synthetic()` and `evo`'s mutation are both
+  reproducible from a single seed. It's also what let this branch drop the
+  workspace's last external dependency.
 - **`connectome`** — the substrate, no dynamics. Edge list + CSR view. The
   `from_edge_list` loader is the seam for real data: most exports reduce to
   `pre,post,weight` plus a neuron table. `synthetic()` lets the whole pipeline run
