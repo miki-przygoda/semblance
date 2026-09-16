@@ -64,6 +64,15 @@ impl Rng {
 
         result
     }
+
+    /// A uniform draw in `[0, 1)`.
+    ///
+    /// Takes the top 24 bits, matching f32's mantissa width, so every
+    /// representable step in the interval is reachable and none is favoured.
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
 }
 
 /// SplitMix64. Used only to expand a seed into xoshiro's state.
@@ -114,5 +123,23 @@ mod tests {
                 "seed {seed:#x} produced a constant stream"
             );
         }
+    }
+
+    #[test]
+    fn next_f32_stays_in_the_unit_interval() {
+        let mut rng = Rng::seed_from_u64(7);
+        let mut saw_low = false;
+        let mut saw_high = false;
+        for _ in 0..100_000 {
+            let x = rng.next_f32();
+            assert!((0.0..1.0).contains(&x), "{x} outside [0, 1)");
+            if x < 0.25 {
+                saw_low = true;
+            }
+            if x > 0.75 {
+                saw_high = true;
+            }
+        }
+        assert!(saw_low && saw_high, "values clustered in the middle");
     }
 }
