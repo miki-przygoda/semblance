@@ -17,3 +17,4 @@ name = "semblance_connectome"
 path = "src/lib.rs"
 
 [dependencies]
+semblance-rng.workspace = true

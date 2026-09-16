@@ -90,6 +90,9 @@ dependencies = [
 [[package]]
 name = "semblance-connectome"
 version = "0.1.0"
+dependencies = [
+ "semblance-rng",
+]
 
 [[package]]
 name = "semblance-evo"

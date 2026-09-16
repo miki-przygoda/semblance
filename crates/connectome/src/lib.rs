@@ -18,6 +18,8 @@
 
 use std::io::{self, BufRead};
 
+use semblance_rng::Rng;
+
 /// Index of a neuron. `u32` keeps edge lists small; a fly brain is ~1.4e5 neurons.
 pub type NeuronId = u32;
 
@@ -138,14 +140,14 @@ impl Connectome {
     /// biologically meaningful — just gives you a graph of a chosen size and
     /// density so the whole pipeline runs before you plug in a real export.
     pub fn synthetic(num_neurons: usize, avg_out_degree: usize, seed: u64) -> Connectome {
-        let mut rng = Lcg::new(seed);
+        let mut rng = Rng::seed_from_u64(seed);
         let mut c = Connectome::new(num_neurons);
         if num_neurons == 0 {
             return c;
         }
         for pre in 0..num_neurons {
             for _ in 0..avg_out_degree {
-                let post = (rng.next_u64() as usize) % num_neurons;
+                let post = rng.below(num_neurons);
                 // weights in [-1, 1]; sign stands in for excitatory/inhibitory.
                 let w = (rng.next_f32() * 2.0) - 1.0;
                 c.add_synapse(pre as NeuronId, post as NeuronId, w);
@@ -172,29 +174,6 @@ impl Csr {
         let start = self.offsets[i] as usize;
         let end = self.offsets[i + 1] as usize;
         (start..end).map(move |k| (self.post[k], self.weight[k]))
-    }
-}
-
-/// Tiny deterministic RNG (xorshift-ish LCG). Kept local so this crate has zero
-/// dependencies; the evolution crate uses the real `rand` instead.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg(seed ^ 0x9E37_79B9_7F4A_7C15)
-    }
-    #[inline]
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-    #[inline]
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
     }
 }
 
@@ -236,5 +215,27 @@ mod tests {
         assert_eq!(c.num_synapses(), 3);
         assert_eq!(c.num_neurons(), 3);
         assert_eq!(c.synapses()[2].weight, 1.0); // defaulted
+    }
+
+    /// Regression: the private `Lcg` this crate used to carry XORed its seed
+    /// with 0x9E3779B97F4A7C15, so that exact seed zeroed its state and every
+    /// draw returned 0 forever. The graph came out with every synapse
+    /// targeting neuron 0 at weight -1.0, silently.
+    #[test]
+    fn synthetic_survives_the_seed_that_broke_the_old_rng() {
+        let c = Connectome::synthetic(64, 4, 0x9E37_79B9_7F4A_7C15);
+
+        let targets: std::collections::HashSet<NeuronId> =
+            c.synapses().iter().map(|s| s.post).collect();
+        assert!(
+            targets.len() > 1,
+            "every synapse landed on one neuron: the generator is degenerate"
+        );
+
+        let weights = c.weights();
+        assert!(
+            weights.windows(2).any(|w| w[0] != w[1]),
+            "every weight is identical: the generator is degenerate"
+        );
     }
 }
