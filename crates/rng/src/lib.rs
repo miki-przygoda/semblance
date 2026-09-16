@@ -73,6 +73,29 @@ impl Rng {
     pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
     }
+
+    /// A uniform index in `[0, n)`.
+    ///
+    /// Rejection sampling, not Lemire's multiply: `zone` is the largest
+    /// multiple of `n` that fits in a `u64`, and draws at or above it are
+    /// discarded. Marginally slower, and unbiased by inspection — which is
+    /// what matters when the stream is frozen by contract.
+    ///
+    /// # Panics
+    ///
+    /// If `n == 0`. An empty range has no valid answer, and returning 0 would
+    /// hide the caller's bug.
+    pub fn below(&mut self, n: usize) -> usize {
+        assert!(n > 0, "below(0) has no valid result");
+        let n = n as u64;
+        let zone = (u64::MAX / n) * n;
+        loop {
+            let x = self.next_u64();
+            if x < zone {
+                return (x % n) as usize;
+            }
+        }
+    }
 }
 
 /// SplitMix64. Used only to expand a seed into xoshiro's state.
@@ -141,5 +164,54 @@ mod tests {
             }
         }
         assert!(saw_low && saw_high, "values clustered in the middle");
+    }
+
+    #[test]
+    fn below_stays_in_range() {
+        let mut rng = Rng::seed_from_u64(99);
+        for n in [1usize, 2, 7, 50, 1000] {
+            for _ in 0..10_000 {
+                assert!(rng.below(n) < n);
+            }
+        }
+    }
+
+    #[test]
+    fn below_one_is_always_zero() {
+        let mut rng = Rng::seed_from_u64(3);
+        for _ in 0..1000 {
+            assert_eq!(rng.below(1), 0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "below(0)")]
+    fn below_zero_panics() {
+        let mut rng = Rng::seed_from_u64(3);
+        rng.below(0);
+    }
+
+    /// The old `synthetic()` used `next_u64() % n`, which favours low indices.
+    /// Every bucket should land within 5% of the expected share.
+    #[test]
+    fn below_is_unbiased_across_buckets() {
+        const N: usize = 17;
+        const DRAWS: usize = 340_000;
+        let expected = (DRAWS / N) as f64;
+
+        let mut rng = Rng::seed_from_u64(2024);
+        let mut counts = [0usize; N];
+        for _ in 0..DRAWS {
+            counts[rng.below(N)] += 1;
+        }
+
+        for (bucket, &count) in counts.iter().enumerate() {
+            let drift = (count as f64 - expected).abs() / expected;
+            assert!(
+                drift < 0.05,
+                "bucket {bucket} drifted {:.1}% from uniform ({count} vs {expected:.0})",
+                drift * 100.0
+            );
+        }
     }
 }
