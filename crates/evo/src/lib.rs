@@ -18,8 +18,7 @@
 //!   The trait boundary stays the same.
 
 use semblance_codec::Latent;
-use rand::rngs::StdRng;
-use rand::{RngExt, SeedableRng};
+use semblance_rng::Rng;
 
 /// A candidate solution — just a latent code.
 #[derive(Clone, Debug)]
@@ -65,9 +64,9 @@ impl Default for EvoConfig {
 
 /// A population that evolves latent codes.
 pub struct Population {
-    individuals: Vec<Individual>,
+    pub(crate) individuals: Vec<Individual>,
     cfg: EvoConfig,
-    rng: StdRng,
+    rng: Rng,
     generation: u64,
 }
 
@@ -75,7 +74,7 @@ impl Population {
     /// Seed `pop_size` genomes as jittered copies of `seed` (the real fly's
     /// latent). Individuals start unscored (fitness = -inf).
     pub fn seeded(seed: &Latent, cfg: EvoConfig, rng_seed: u64) -> Self {
-        let mut rng = StdRng::seed_from_u64(rng_seed);
+        let mut rng = Rng::seed_from_u64(rng_seed);
         let mut individuals = Vec::with_capacity(cfg.pop_size);
         for _ in 0..cfg.pop_size {
             let mut z = seed.clone();
@@ -115,7 +114,7 @@ impl Population {
         let elite = self.cfg.elite.max(1).min(self.individuals.len());
         let mut next: Vec<Individual> = self.individuals[..elite].to_vec();
         while next.len() < self.cfg.pop_size {
-            let parent = &self.individuals[self.rng.random_range(0..elite)];
+            let parent = &self.individuals[self.rng.below(elite)];
             let mut child = parent.genome.z.clone();
             perturb(&mut child, self.cfg.mutation_rate, self.cfg.mutation_std, &mut self.rng);
             next.push(Individual {
@@ -129,21 +128,13 @@ impl Population {
 }
 
 /// Gaussian perturbation of a latent, in place. Each gene is perturbed with
-/// probability `rate` by N(0, std). Uses Box–Muller so we only need `rand`'s
-/// uniform sampler.
-fn perturb(z: &mut Latent, rate: f32, std: f32, rng: &mut StdRng) {
+/// probability `rate` by N(0, std).
+fn perturb(z: &mut Latent, rate: f32, std: f32, rng: &mut Rng) {
     for g in z.iter_mut() {
-        if rng.random::<f32>() < rate {
-            *g += gaussian(rng) * std;
+        if rng.chance(rate) {
+            *g += rng.gaussian() * std;
         }
     }
-}
-
-fn gaussian(rng: &mut StdRng) -> f32 {
-    // Box–Muller; guard u1 away from 0 to avoid ln(0).
-    let u1: f32 = rng.random::<f32>().max(1e-7);
-    let u2: f32 = rng.random::<f32>();
-    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 
 #[cfg(test)]
@@ -177,5 +168,18 @@ mod tests {
         }
         let last = pop.best().fitness;
         assert!(last > first, "fitness should improve: {first} -> {last}");
+    }
+
+    #[test]
+    fn seeded_populations_are_reproducible() {
+        let seed_latent = vec![0.5f32; 32];
+        let cfg = EvoConfig::default();
+
+        let a = Population::seeded(&seed_latent, cfg.clone(), 7);
+        let b = Population::seeded(&seed_latent, cfg, 7);
+
+        let za: Vec<&Latent> = a.individuals.iter().map(|i| &i.genome.z).collect();
+        let zb: Vec<&Latent> = b.individuals.iter().map(|i| &i.genome.z).collect();
+        assert_eq!(za, zb, "same rng_seed must produce the same population");
     }
 }

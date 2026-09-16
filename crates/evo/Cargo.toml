@@ -18,4 +18,4 @@ path = "src/lib.rs"
 
 [dependencies]
 semblance-codec.workspace = true
-rand.workspace = true
+semblance-rng.workspace = true

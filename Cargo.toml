@@ -29,7 +29,6 @@ semblance-sim = { path = "crates/sim", version = "0.1.0" }
 semblance-codec = { path = "crates/codec", version = "0.1.0" }
 semblance-evo = { path = "crates/evo", version = "0.1.0" }
 semblance-fidelity = { path = "crates/fidelity", version = "0.1.0" }
-rand = "0.10"
 
 # A release profile tuned for the tick loop / evolution inner loops.
 [profile.release]
