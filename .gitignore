@@ -72,3 +72,6 @@ venv/
 .env
 *.local
 secrets.toml
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
