@@ -194,6 +194,33 @@ This is the crate's reason for existing, and it goes in the module docs:
 Test vectors pin exact outputs for a fixed set of seeds across every method.
 They are the executable half of the promise; the prose above is the other half.
 
+### One qualification on "frozen"
+
+The promise above is not uniform across the six methods, and the distinction
+belongs in the contract rather than in a footnote.
+
+`next_u64`, `next_f32` and `below` are pure integer arithmetic plus an exact
+power-of-two division. They are bit-frozen unconditionally, on every conformant
+target.
+
+`gaussian` is not. It calls `f32::ln` and `f32::cos`, which lower to the host
+libm's `logf`/`cosf`. IEEE-754 does not require those to be correctly rounded,
+and glibc, musl, Apple libm and MSVC do not all agree to the last bit. A one-ulp
+difference in either changes roughly 60% of the pinned gaussian values, so the
+vectors can fail on a platform whose libm differs — in a crate whose test file
+says a failure means the stream changed.
+
+The practical risk is small: mainstream libms compute f32 transcendentals in
+double and round once, which is correctly rounded with probability about
+1 - 2^-29 per call. But "small" is not the same as "frozen", so the docs say
+which of the two each method offers, and `tests/vectors.rs` notes that a failure
+confined to the gaussian values on an unusual libm is a portability problem
+rather than a broken generator.
+
+Making the freeze absolute would mean reimplementing `ln` and `cos` in-crate.
+That is not worth it for this project, but it is the option if the guarantee
+ever needs to be unconditional.
+
 ## Migration
 
 | File | Change |
