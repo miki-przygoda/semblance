@@ -1,0 +1,19 @@
+[package]
+name = "semblance-rng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+description = "One frozen, auditable random source: SplitMix64 seeding xoshiro256++, with a stability contract backed by test vectors."
+
+[lib]
+name = "semblance_rng"
+path = "src/lib.rs"
+
+[dependencies]
