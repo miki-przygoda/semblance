@@ -75,3 +75,6 @@ secrets.toml
 
 # Subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Long-term project outline (local planning notes, not part of the repo)
+docs/project-outline/
