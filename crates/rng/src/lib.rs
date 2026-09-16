@@ -25,6 +25,11 @@
 /// precisely why seeding is safe for every possible `u64`.
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 
+/// Floor applied to Box-Muller's first uniform. `next_f32` can return exactly
+/// `0.0`, and `ln(0)` is `-inf`. Part of the frozen contract, so it is a named
+/// constant rather than a literal buried in the expression.
+const GAUSSIAN_EPSILON: f32 = 1e-7;
+
 /// A seeded, deterministic random source.
 ///
 /// See the module docs for the stability contract. Construct with
@@ -105,6 +110,19 @@ impl Rng {
     #[inline]
     pub fn chance(&mut self, p: f32) -> bool {
         self.next_f32() < p
+    }
+
+    /// A draw from the standard normal, N(0, 1).
+    ///
+    /// Box-Muller. It naturally produces two normals per pair of uniforms; we
+    /// return one and discard the other on purpose. Caching the second would
+    /// make the number of draws per call depend on how many times `gaussian`
+    /// had been called before, which is exactly the kind of hidden stream
+    /// dependency the stability contract has to rule out.
+    pub fn gaussian(&mut self) -> f32 {
+        let u1 = self.next_f32().max(GAUSSIAN_EPSILON);
+        let u2 = self.next_f32();
+        (-2.0 * u1.ln()).sqrt() * (core::f32::consts::TAU * u2).cos()
     }
 }
 
@@ -241,5 +259,34 @@ mod tests {
         let hits = (0..draws).filter(|_| rng.chance(0.25)).count();
         let rate = hits as f64 / draws as f64;
         assert!((rate - 0.25).abs() < 0.01, "observed rate {rate:.4}");
+    }
+
+    #[test]
+    fn gaussian_has_standard_normal_moments() {
+        let mut rng = Rng::seed_from_u64(4242);
+        let n = 200_000;
+        let xs: Vec<f32> = (0..n).map(|_| rng.gaussian()).collect();
+
+        assert!(xs.iter().all(|x| x.is_finite()), "produced a non-finite value");
+
+        let mean = xs.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
+        let var = xs.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n as f64;
+
+        assert!(mean.abs() < 0.02, "mean {mean:.4} is not ~0");
+        assert!((var.sqrt() - 1.0).abs() < 0.02, "sd {:.4} is not ~1", var.sqrt());
+    }
+
+    /// Box-Muller yields two normals per pair of uniforms; we return one and
+    /// discard the other so the draw count per call never varies.
+    #[test]
+    fn gaussian_consumes_exactly_two_f32_draws() {
+        let mut a = Rng::seed_from_u64(5150);
+        let mut b = Rng::seed_from_u64(5150);
+
+        a.gaussian();
+        b.next_f32();
+        b.next_f32();
+
+        assert_eq!(a.next_u64(), b.next_u64(), "gaussian moved the stream by != 2 draws");
     }
 }
