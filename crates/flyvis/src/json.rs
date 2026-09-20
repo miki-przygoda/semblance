@@ -512,10 +512,26 @@ mod tests {
 
     #[test]
     fn parses_unicode_escapes() {
-        assert_eq!(parse(r#""A""#).unwrap().as_str(), Some("A"));
-        assert_eq!(parse(r#""é""#).unwrap().as_str(), Some("é"));
-        // surrogate pair -> U+1F600
-        assert_eq!(parse(r#""😀""#).unwrap().as_str(), Some("😀"));
+        // NOTE: the inputs below must contain literal backslash-u sequences.
+        assert_eq!(parse(r#""\u0041""#).unwrap().as_str(), Some("A"));
+        assert_eq!(parse(r#""\u00e9""#).unwrap().as_str(), Some("é"));
+        // a well-formed surrogate PAIR combines into one char (U+1F600)
+        assert_eq!(parse(r#""\ud83d\ude00""#).unwrap().as_str(), Some("😀"));
+        // escapes and literal characters must agree
+        assert_eq!(parse(r#""\u0041""#).unwrap(), parse(r#""A""#).unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_surrogate_pairs() {
+        use JsonErrorKind::*;
+        // lone high surrogate
+        assert_eq!(parse(r#""\ud83d""#).unwrap_err().kind, InvalidUnicodeEscape);
+        // lone low surrogate
+        assert_eq!(parse(r#""\ude00""#).unwrap_err().kind, InvalidUnicodeEscape);
+        // high surrogate followed by a non-surrogate escape
+        assert_eq!(parse(r#""\ud83d\u0041""#).unwrap_err().kind, InvalidUnicodeEscape);
+        // high surrogate followed by an ordinary character
+        assert_eq!(parse(r#""\ud83dA""#).unwrap_err().kind, InvalidUnicodeEscape);
     }
 
     #[test]
