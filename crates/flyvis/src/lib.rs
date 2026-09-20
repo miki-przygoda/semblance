@@ -7,3 +7,6 @@
 //! faithfully; expanding it into a graph belongs elsewhere.
 
 mod json;
+pub mod spec;
+
+pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError};
