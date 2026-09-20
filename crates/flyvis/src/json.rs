@@ -38,6 +38,11 @@ pub(crate) enum JsonErrorKind {
     DepthLimitExceeded,
 }
 
+/// Maximum container nesting depth. Guards the recursive-descent parser
+/// against stack overflow on adversarial input; the real flyvis file only
+/// nests 6 deep.
+const MAX_DEPTH: usize = 64;
+
 pub(crate) fn parse(input: &str) -> Result<Json, JsonError> {
     let mut parser = Parser::new(input);
     parser.skip_whitespace();
@@ -54,11 +59,12 @@ pub(crate) fn parse(input: &str) -> Result<Json, JsonError> {
 struct Parser<'a> {
     input: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
-        Parser { input, chars: input.char_indices().peekable() }
+        Parser { input, chars: input.char_indices().peekable(), depth: 0 }
     }
 
     /// Byte offset of the next unconsumed character, or `input.len()` at end of input.
@@ -82,6 +88,18 @@ impl<'a> Parser<'a> {
         while matches!(self.peek_char(), Some(' ' | '\t' | '\r' | '\n')) {
             self.bump();
         }
+    }
+
+    /// Enters one more level of array/object nesting, erroring if that
+    /// exceeds `MAX_DEPTH`. Must be paired with a `self.depth -= 1` on every
+    /// successful exit from the container (an error return can skip it --
+    /// the whole parse is aborting).
+    fn enter_depth(&mut self) -> Result<(), JsonError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.error(JsonErrorKind::DepthLimitExceeded));
+        }
+        Ok(())
     }
 
     fn parse_value(&mut self) -> Result<Json, JsonError> {
@@ -113,8 +131,8 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    /// Optional `-`, an integer part, and an optional fractional part.
-    /// Exponents are not handled here (task 2).
+    /// Optional `-`, an integer part, an optional fractional part, and an
+    /// optional exponent.
     fn parse_number(&mut self) -> Result<Json, JsonError> {
         let start = self.pos();
         if self.peek_char() == Some('-') {
@@ -148,6 +166,21 @@ impl<'a> Parser<'a> {
             }
         }
 
+        if matches!(self.peek_char(), Some('e' | 'E')) {
+            self.bump();
+            if matches!(self.peek_char(), Some('+' | '-')) {
+                self.bump();
+            }
+            let mut has_exp_digit = false;
+            while matches!(self.peek_char(), Some(c) if c.is_ascii_digit()) {
+                self.bump();
+                has_exp_digit = true;
+            }
+            if !has_exp_digit {
+                return Err(self.error(JsonErrorKind::InvalidNumber));
+            }
+        }
+
         let end = self.pos();
         let text = &self.input[start..end];
         text.parse::<f64>()
@@ -155,7 +188,8 @@ impl<'a> Parser<'a> {
             .map_err(|_| JsonError { kind: JsonErrorKind::InvalidNumber, offset: start })
     }
 
-    /// Content between quotes. A backslash always errors: escapes are task 2.
+    /// Content between quotes, decoding `\" \\ \/ \b \f \n \r \t` and
+    /// `\uXXXX` escapes (including surrogate pairs) along the way.
     fn parse_string(&mut self) -> Result<String, JsonError> {
         self.bump(); // opening quote
         let mut s = String::new();
@@ -164,19 +198,94 @@ impl<'a> Parser<'a> {
                 None => return Err(self.error(JsonErrorKind::UnexpectedEnd)),
                 Some((_, '"')) => return Ok(s),
                 Some((offset, '\\')) => {
-                    return Err(JsonError { kind: JsonErrorKind::InvalidEscape, offset });
+                    s.push(self.parse_escape(offset)?);
                 }
                 Some((_, c)) => s.push(c),
             }
         }
     }
 
+    /// Decodes one escape sequence, having already consumed the leading
+    /// backslash at `offset`. Returns the single character it produces
+    /// (surrogate pairs combine into one `char`).
+    fn parse_escape(&mut self, offset: usize) -> Result<char, JsonError> {
+        match self.bump() {
+            None => Err(self.error(JsonErrorKind::UnexpectedEnd)),
+            Some((_, '"')) => Ok('"'),
+            Some((_, '\\')) => Ok('\\'),
+            Some((_, '/')) => Ok('/'),
+            Some((_, 'b')) => Ok('\u{8}'),
+            Some((_, 'f')) => Ok('\u{c}'),
+            Some((_, 'n')) => Ok('\n'),
+            Some((_, 'r')) => Ok('\r'),
+            Some((_, 't')) => Ok('\t'),
+            Some((_, 'u')) => self.parse_unicode_escape(offset),
+            Some(_) => Err(JsonError { kind: JsonErrorKind::InvalidEscape, offset }),
+        }
+    }
+
+    /// Reads the 4 hex digits of a `\uXXXX` escape (the `\u` itself already
+    /// consumed) and resolves surrogate pairs. `offset` is the backslash
+    /// position, used for error reporting.
+    fn parse_unicode_escape(&mut self, offset: usize) -> Result<char, JsonError> {
+        let code = self.parse_hex4()?;
+        if (0xD800..=0xDBFF).contains(&code) {
+            // High surrogate: must be immediately followed by a low
+            // surrogate `\uXXXX`, and the two combine into one scalar.
+            if self.peek_char() != Some('\\') {
+                return Err(JsonError { kind: JsonErrorKind::InvalidUnicodeEscape, offset });
+            }
+            self.bump(); // '\\'
+            match self.bump() {
+                Some((_, 'u')) => {}
+                _ => {
+                    return Err(JsonError { kind: JsonErrorKind::InvalidUnicodeEscape, offset });
+                }
+            }
+            let low = self.parse_hex4()?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(JsonError { kind: JsonErrorKind::InvalidUnicodeEscape, offset });
+            }
+            let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+            char::from_u32(combined)
+                .ok_or(JsonError { kind: JsonErrorKind::InvalidUnicodeEscape, offset })
+        } else if (0xDC00..=0xDFFF).contains(&code) {
+            // Lone low surrogate: never valid on its own.
+            Err(JsonError { kind: JsonErrorKind::InvalidUnicodeEscape, offset })
+        } else {
+            char::from_u32(code)
+                .ok_or(JsonError { kind: JsonErrorKind::InvalidUnicodeEscape, offset })
+        }
+    }
+
+    /// Reads exactly 4 ASCII hex digit characters and returns their value.
+    fn parse_hex4(&mut self) -> Result<u32, JsonError> {
+        let mut code: u32 = 0;
+        for _ in 0..4 {
+            match self.bump() {
+                Some((_, c)) if c.is_ascii_hexdigit() => {
+                    code = code * 16 + c.to_digit(16).expect("checked is_ascii_hexdigit");
+                }
+                Some((digit_offset, _)) => {
+                    return Err(JsonError {
+                        kind: JsonErrorKind::InvalidUnicodeEscape,
+                        offset: digit_offset,
+                    });
+                }
+                None => return Err(self.error(JsonErrorKind::InvalidUnicodeEscape)),
+            }
+        }
+        Ok(code)
+    }
+
     fn parse_array(&mut self) -> Result<Json, JsonError> {
+        self.enter_depth()?;
         self.bump(); // '['
         let mut items = Vec::new();
         self.skip_whitespace();
         if self.peek_char() == Some(']') {
             self.bump();
+            self.depth -= 1;
             return Ok(Json::Array(items));
         }
         loop {
@@ -189,6 +298,7 @@ impl<'a> Parser<'a> {
                 }
                 Some(']') => {
                     self.bump();
+                    self.depth -= 1;
                     return Ok(Json::Array(items));
                 }
                 Some(c) => return Err(self.error(JsonErrorKind::UnexpectedChar(c))),
@@ -198,11 +308,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object(&mut self) -> Result<Json, JsonError> {
+        self.enter_depth()?;
         self.bump(); // '{'
         let mut pairs = Vec::new();
         self.skip_whitespace();
         if self.peek_char() == Some('}') {
             self.bump();
+            self.depth -= 1;
             return Ok(Json::Object(pairs));
         }
         loop {
@@ -230,6 +342,7 @@ impl<'a> Parser<'a> {
                 }
                 Some('}') => {
                     self.bump();
+                    self.depth -= 1;
                     return Ok(Json::Object(pairs));
                 }
                 Some(c) => return Err(self.error(JsonErrorKind::UnexpectedChar(c))),
@@ -383,6 +496,75 @@ mod tests {
     fn empty_containers() {
         assert_eq!(parse("[]").unwrap().as_array().unwrap().len(), 0);
         assert!(matches!(parse("{}").unwrap(), Json::Object(ref p) if p.is_empty()));
+    }
+
+    #[test]
+    fn parses_string_escapes() {
+        assert_eq!(parse(r#""a\"b""#).unwrap().as_str(), Some("a\"b"));
+        assert_eq!(parse(r#""a\\b""#).unwrap().as_str(), Some("a\\b"));
+        assert_eq!(parse(r#""a\/b""#).unwrap().as_str(), Some("a/b"));
+        assert_eq!(parse(r#""a\nb""#).unwrap().as_str(), Some("a\nb"));
+        assert_eq!(parse(r#""a\tb""#).unwrap().as_str(), Some("a\tb"));
+        assert_eq!(parse(r#""a\rb""#).unwrap().as_str(), Some("a\rb"));
+        assert_eq!(parse(r#""a\bb""#).unwrap().as_str(), Some("a\u{8}b"));
+        assert_eq!(parse(r#""a\fb""#).unwrap().as_str(), Some("a\u{c}b"));
+    }
+
+    #[test]
+    fn parses_unicode_escapes() {
+        assert_eq!(parse(r#""A""#).unwrap().as_str(), Some("A"));
+        assert_eq!(parse(r#""é""#).unwrap().as_str(), Some("é"));
+        // surrogate pair -> U+1F600
+        assert_eq!(parse(r#""😀""#).unwrap().as_str(), Some("😀"));
+    }
+
+    #[test]
+    fn parses_exponents() {
+        assert_eq!(parse("1e3").unwrap().as_f64(), Some(1000.0));
+        assert_eq!(parse("1E3").unwrap().as_f64(), Some(1000.0));
+        assert_eq!(parse("1.5e-2").unwrap().as_f64(), Some(0.015));
+        assert_eq!(parse("2e+2").unwrap().as_f64(), Some(200.0));
+    }
+
+    #[test]
+    fn rejects_malformed_input_with_offsets() {
+        use JsonErrorKind::*;
+        let cases: &[(&str, JsonErrorKind)] = &[
+            ("", UnexpectedEnd),
+            ("  ", UnexpectedEnd),
+            (r#""unterminated"#, UnexpectedEnd),
+            ("[1, 2,]", UnexpectedChar(']')),
+            ("{\"a\": 1,}", UnexpectedChar('}')),
+            ("{\"a\" 1}", UnexpectedChar('1')),
+            ("nul", UnexpectedEnd),
+            ("tru", UnexpectedEnd),
+            ("[1] extra", TrailingData),
+            ("01", TrailingData),
+            (r#""bad \x escape""#, InvalidEscape),
+            (r#""\uZZZZ""#, InvalidUnicodeEscape),
+            (r#""\ud83d""#, InvalidUnicodeEscape),
+            ("-", InvalidNumber),
+            ("1.", InvalidNumber),
+            ("1e", InvalidNumber),
+        ];
+        for (input, want) in cases {
+            let err = parse(input).unwrap_err();
+            assert_eq!(&err.kind, want, "input {input:?} produced {err:?}");
+            assert!(err.offset <= input.len(), "offset out of range for {input:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_deep_nesting_without_overflowing_the_stack() {
+        let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        let err = parse(&deep).unwrap_err();
+        assert_eq!(err.kind, JsonErrorKind::DepthLimitExceeded);
+    }
+
+    #[test]
+    fn accepts_nesting_up_to_the_limit() {
+        let ok = format!("{}1{}", "[".repeat(64), "]".repeat(64));
+        assert!(parse(&ok).is_ok());
     }
 
     /// The real file is gitignored; skip rather than fail when it is absent.
