@@ -4,13 +4,6 @@
 //! external dependencies. Not a general-purpose library — no streaming, no
 //! borrowed values, no derive.
 
-// This module has no consumers yet -- `spec.rs` (task 3) is what calls into
-// it -- so everything here reads as dead code to rustc until then. Two
-// `JsonErrorKind` variants also stay unconstructed until task 2 wires up
-// escapes and the depth limit. Silence both rather than leave `cargo test`
-// noisy in the meantime.
-#![allow(dead_code)]
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Json {
     Null,

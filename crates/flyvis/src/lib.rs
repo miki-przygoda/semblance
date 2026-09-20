@@ -6,6 +6,7 @@
 //! hexagonal lattice -- rather than as an edge list. This crate reads that file
 //! faithfully; expanding it into a graph belongs elsewhere.
 
+pub mod groundtruth;
 mod json;
 pub mod spec;
 
