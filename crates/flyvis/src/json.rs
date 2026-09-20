@@ -272,12 +272,19 @@ impl Json {
 
     /// `None` unless the value is a finite, integral number that fits in `i64`.
     pub(crate) fn as_i64(&self) -> Option<i64> {
+        // `i64::MAX` (2^63 - 1) has no exact `f64` representation, so
+        // `i64::MAX as f64` rounds *up* to 2^63 -- one past the real
+        // boundary. `<= i64::MAX as f64` would therefore accept 2^63 itself,
+        // which `as i64` then silently saturates down to `i64::MAX`. Compare
+        // against 2^63 directly (itself exactly representable, being a power
+        // of two) with a strict `<` instead.
+        const I64_EXCLUSIVE_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0; // 2^63
         match self {
             Json::Number(n) => {
                 if n.is_finite()
                     && n.fract() == 0.0
                     && *n >= i64::MIN as f64
-                    && *n <= i64::MAX as f64
+                    && *n < I64_EXCLUSIVE_UPPER_BOUND
                 {
                     Some(*n as i64)
                 } else {
@@ -319,6 +326,29 @@ mod tests {
     fn as_i64_rejects_non_integral() {
         assert_eq!(parse("3.5").unwrap().as_i64(), None);
         assert_eq!(parse("3.0").unwrap().as_i64(), Some(3));
+    }
+
+    #[test]
+    fn as_i64_respects_i64_bounds() {
+        // 2^63 itself: exactly representable in f64, but one past i64::MAX.
+        assert_eq!(parse("9223372036854775808").unwrap().as_i64(), None);
+
+        // i64::MAX (2^63 - 1) has no exact f64 representation. The two
+        // representable doubles either side of it are 2^63 - 1024 and 2^63
+        // (the ULP is 1024 at this magnitude); i64::MAX is 1 away from 2^63
+        // but 1023 away from 2^63 - 1024, so round-to-nearest lands on 2^63.
+        // Parsed through f64, this literal is therefore indistinguishable
+        // from "9223372036854775808" above, and must be rejected the same
+        // way -- not silently accepted as i64::MAX.
+        assert_eq!(parse("9223372036854775807").unwrap().as_i64(), None);
+
+        // i64::MIN = -2^63 is exactly representable and *is* the boundary
+        // itself (not one past it), so it is accepted.
+        assert_eq!(parse("-9223372036854775808").unwrap().as_i64(), Some(i64::MIN));
+
+        // A large-but-safe value comfortably within both f64's exact-integer
+        // range (<= 2^53) and i64's range.
+        assert_eq!(parse("9007199254740992").unwrap().as_i64(), Some(9007199254740992));
     }
 
     #[test]
