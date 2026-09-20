@@ -9,5 +9,7 @@
 pub mod groundtruth;
 mod json;
 pub mod spec;
+#[cfg(test)]
+mod test_support;
 
-pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError};
+pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, SpecErrorKind};

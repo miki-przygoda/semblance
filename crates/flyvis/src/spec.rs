@@ -59,8 +59,20 @@ pub struct ConnectomeSpec {
     pub output_units: Vec<String>,
 }
 
+/// Distinguishes a JSON-level failure (the input was not even valid JSON)
+/// from a schema-level one (valid JSON that does not match the connectome
+/// spec: a missing key, a wrong type, an unrecognised pattern name).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecErrorKind {
+    /// The input failed to parse as JSON, at this byte offset.
+    Json { offset: usize },
+    /// The input parsed as JSON but violates the connectome spec's schema.
+    Schema,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpecError {
+    pub kind: SpecErrorKind,
     /// Path to the offending element, e.g. `edges[417].offsets[3]`.
     pub path: String,
     pub reason: String,
@@ -68,13 +80,25 @@ pub struct SpecError {
 
 impl SpecError {
     fn new(path: impl Into<String>, reason: impl Into<String>) -> Self {
-        SpecError { path: path.into(), reason: reason.into() }
+        SpecError { kind: SpecErrorKind::Schema, path: path.into(), reason: reason.into() }
     }
 }
 
+impl std::fmt::Display for SpecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path, self.reason)
+    }
+}
+
+impl std::error::Error for SpecError {}
+
 impl From<JsonError> for SpecError {
     fn from(err: JsonError) -> Self {
-        SpecError::new("<root>", format!("{:?} at byte offset {}", err.kind, err.offset))
+        SpecError {
+            kind: SpecErrorKind::Json { offset: err.offset },
+            path: "<root>".to_string(),
+            reason: format!("{:?} at byte offset {}", err.kind, err.offset),
+        }
     }
 }
 
@@ -294,24 +318,7 @@ impl ConnectomeSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn load_real_spec() -> Option<String> {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json"
-        );
-        match std::fs::read_to_string(path) {
-            Ok(s) => Some(s),
-            Err(_) => {
-                eprintln!(
-                    "skipping: {path} not found. Download \
-                     https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip \
-                     and extract Lappalainen_et_al_connectome_avg_filters.json into data/flyvis-supplementary/"
-                );
-                None
-            }
-        }
-    }
+    use crate::test_support::load_real_spec;
 
     #[test]
     fn real_spec_matches_the_published_figures() {
@@ -331,7 +338,7 @@ mod tests {
         assert_eq!(offsets, 2140, "total offset entries");
 
         let n_syn: f64 = s.edges.iter().flat_map(|e| &e.offsets).map(|o| o.n_syn as f64).sum();
-        assert_eq!(n_syn.round() as i64, 8087, "summed synapse counts");
+        assert!((n_syn - 8087.2522).abs() < 0.01, "summed synapse counts: {n_syn}");
 
         assert_eq!(s.edges.iter().filter(|e| e.offsets.len() >= 3).count(), 243);
         assert_eq!(s.edges.iter().filter(|e| e.offsets.len() < 3).count(), 362);
@@ -358,6 +365,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_tile_and_single_patterns() {
+        let tile = parse_pattern(&parse(r#"["tile", 3]"#).unwrap(), "pattern").unwrap();
+        assert_eq!(tile, Pattern::Tile(3));
+
+        let single = parse_pattern(&parse(r#"["single", null]"#).unwrap(), "pattern").unwrap();
+        assert_eq!(single, Pattern::Single);
+    }
+
+    #[test]
     fn rejects_schema_violations() {
         assert!(ConnectomeSpec::from_json_str("{}").is_err(), "missing nodes/edges");
         assert!(ConnectomeSpec::from_json_str(r#"{"nodes": 1, "edges": []}"#).is_err());
@@ -369,10 +385,40 @@ mod tests {
     }
 
     #[test]
+    fn spec_error_kind_distinguishes_json_from_schema_failures() {
+        let json_err = ConnectomeSpec::from_json_str("not json").unwrap_err();
+        assert!(matches!(json_err.kind, SpecErrorKind::Json { .. }), "{json_err:?}");
+
+        let schema_err = ConnectomeSpec::from_json_str("{}").unwrap_err();
+        assert_eq!(schema_err.kind, SpecErrorKind::Schema);
+
+        let wrong_type_root = ConnectomeSpec::from_json_str("[]").unwrap_err();
+        assert_eq!(wrong_type_root.kind, SpecErrorKind::Schema);
+    }
+
+    #[test]
+    fn spec_error_implements_display_and_std_error() {
+        let err = ConnectomeSpec::from_json_str("{}").unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains(&err.path));
+        assert!(rendered.contains(&err.reason));
+
+        fn assert_is_std_error<E: std::error::Error>(_: &E) {}
+        assert_is_std_error(&err);
+
+        // Must be usable behind `?` as a boxed std error, e.g. from `main()`.
+        fn returns_boxed_error() -> Result<(), Box<dyn std::error::Error>> {
+            ConnectomeSpec::from_json_str("{}")?;
+            Ok(())
+        }
+        assert!(returns_boxed_error().is_err());
+    }
+
+    #[test]
     fn loads_a_minimal_handwritten_spec() {
         let src = r#"{
           "nodes": [{"name":"R1","pattern":["stride",[1,1]],"activation":"relu",
-                     "bias":3.5,"bias_fixed":false,"time_constant":null,"time_constant_fixed":false}],
+                     "bias":3.5,"bias_fixed":false,"time_constant":0.05,"time_constant_fixed":false}],
           "edges": [{"src":"R1","tar":"L1","offsets":[[[0,0],40]],"alpha":-1,"alpha_fixed":true,
                      "alpha_references":["Hardie1989"],"time_constant":null,
                      "time_constant_fixed":false,"lambda_mult":5.86,"edge_type":"chem"}],
@@ -383,7 +429,7 @@ mod tests {
         assert_eq!(s.nodes[0].name, "R1");
         assert!(matches!(s.nodes[0].pattern, Pattern::Stride { u: 1, v: 1 }));
         assert_eq!(s.nodes[0].bias, 3.5);
-        assert_eq!(s.nodes[0].time_constant, None);
+        assert_eq!(s.nodes[0].time_constant, Some(0.05));
         assert_eq!(s.edges[0].offsets.len(), 1);
         assert_eq!(s.edges[0].offsets[0].du, 0);
         assert_eq!(s.edges[0].offsets[0].dv, 0);

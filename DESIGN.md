@@ -88,6 +88,11 @@ project — if the metric is weak, every fidelity number downstream is meaningle
   `from_edge_list` loader is the seam for real data: most exports reduce to
   `pre,post,weight` plus a neuron table. `synthetic()` lets the whole pipeline run
   before you touch real data.
+- **`flyvis`** — reads the published flyvis connectome spec (Lappalainen et al.,
+  Nature 2024) faithfully: a private minimal JSON reader, a typed literal view of
+  the spec, and flyvis's curated ground truth as compiled constants. No external
+  dependencies. It reads the file; expanding it into a `connectome` graph is a
+  separate, later step.
 - **`sim`** — dynamics and the loop. LIF is implemented; synapses are current-based
   with exponential decay so sparse inputs summate (without that, recurrence is
   dead and weights don't matter). `Stimulus`/`Readout` are the input/output

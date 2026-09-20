@@ -568,6 +568,10 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
         let err = parse(&deep).unwrap_err();
         assert_eq!(err.kind, JsonErrorKind::DepthLimitExceeded);
+
+        // `parse_object` shares the same depth guard as `parse_array`.
+        let deep_obj = format!("{}1{}", r#"{"a":"#.repeat(200), "}".repeat(200));
+        assert_eq!(parse(&deep_obj).unwrap_err().kind, JsonErrorKind::DepthLimitExceeded);
     }
 
     #[test]
@@ -576,24 +580,7 @@ mod tests {
         assert!(parse(&ok).is_ok());
     }
 
-    /// The real file is gitignored; skip rather than fail when it is absent.
-    fn load_real_spec() -> Option<String> {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json"
-        );
-        match std::fs::read_to_string(path) {
-            Ok(s) => Some(s),
-            Err(_) => {
-                eprintln!(
-                    "skipping: {path} not found. Download \
-                     https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip \
-                     and extract Lappalainen_et_al_connectome_avg_filters.json into data/flyvis-supplementary/"
-                );
-                None
-            }
-        }
-    }
+    use crate::test_support::load_real_spec;
 
     #[test]
     fn parses_the_real_connectome_spec() {

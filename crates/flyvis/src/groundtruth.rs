@@ -185,6 +185,12 @@ pub const KNOWN_DSI_TYPES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: this crate's production code deliberately keeps
+    // `groundtruth.rs` independent of `spec.rs` (no shared root of trust).
+    // Pulling in the real connectome spec here, to check `POLARITY` against
+    // it, is fine precisely because it is confined to tests.
+    use crate::spec::ConnectomeSpec;
+    use crate::test_support::load_real_spec;
 
     #[test]
     fn table_sizes_match_upstream() {
@@ -198,6 +204,25 @@ mod tests {
         assert_eq!(NOISY_DATA.len(), 4);
         assert_eq!(ON_PATHWAY.len(), 12);
         assert_eq!(OFF_PATHWAY.len(), 12);
+    }
+
+    #[test]
+    fn known_dsi_types_is_the_union_of_motion_tuning_classes() {
+        let known: std::collections::BTreeSet<&str> = KNOWN_DSI_TYPES.iter().copied().collect();
+        let union: std::collections::BTreeSet<&str> =
+            NO_MOTION_TUNING.iter().chain(MOTION_TUNING.iter()).copied().collect();
+        assert_eq!(known, union, "KNOWN_DSI_TYPES must equal NO_MOTION_TUNING ++ MOTION_TUNING");
+    }
+
+    #[test]
+    fn t4_t5_name_sets_agree() {
+        let preferred: std::collections::BTreeSet<&str> =
+            PREFERRED_DIRECTIONS.iter().map(|(n, _)| *n).collect();
+        let tuning: std::collections::BTreeSet<&str> =
+            TUNING_CURVES.iter().map(|(n, _)| *n).collect();
+        let motion: std::collections::BTreeSet<&str> = MOTION_TUNING.iter().copied().collect();
+        assert_eq!(preferred, tuning, "PREFERRED_DIRECTIONS and TUNING_CURVES must name the same cells");
+        assert_eq!(preferred, motion, "PREFERRED_DIRECTIONS and MOTION_TUNING must name the same cells");
     }
 
     #[test]
@@ -232,6 +257,27 @@ mod tests {
         for n in named {
             assert!(known.contains(n), "{n} is not a cell type in POLARITY");
         }
+    }
+
+    /// `every_named_cell_type_exists_in_polarity` above treats `POLARITY` as
+    /// the root of trust for cell-type names, but `POLARITY` itself is never
+    /// checked against anything -- a typo inside it would pass every other
+    /// test in this file, including the one built to catch typos. Check it
+    /// against the real connectome file's node names instead.
+    #[test]
+    fn polarity_names_match_the_connectome_node_names_exactly() {
+        let Some(raw) = load_real_spec() else { return };
+        let s = ConnectomeSpec::from_json_str(&raw).expect("real spec must load");
+
+        let file_names: std::collections::BTreeSet<&str> =
+            s.nodes.iter().map(|n| n.name.as_str()).collect();
+        let polarity_names: std::collections::BTreeSet<&str> =
+            POLARITY.iter().map(|(n, _)| *n).collect();
+
+        assert_eq!(
+            polarity_names, file_names,
+            "POLARITY's cell-type names must match the connectome file's node names exactly"
+        );
     }
 
     #[test]
