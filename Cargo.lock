@@ -45,6 +45,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "semblance-flyvis"
+version = "0.1.0"
+
+[[package]]
 name = "semblance-rng"
 version = "0.1.0"
 

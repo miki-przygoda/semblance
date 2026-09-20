@@ -1,0 +1,19 @@
+[package]
+name = "semblance-flyvis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+description = "Reads the published flyvis connectome spec and carries its curated ground truth, with no external dependencies."
+
+[lib]
+name = "semblance_flyvis"
+path = "src/lib.rs"
+
+[dependencies]
