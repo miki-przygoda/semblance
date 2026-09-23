@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rng",
+    "crates/flyvis",
     "crates/connectome",
     "crates/sim",
     "crates/codec",
@@ -24,6 +25,7 @@ categories = ["science", "simulation"]
 # Shared dependency versions. Individual crates opt in under [dependencies].
 [workspace.dependencies]
 semblance-rng = { path = "crates/rng", version = "0.1.0" }
+semblance-flyvis = { path = "crates/flyvis", version = "0.1.0" }
 semblance-connectome = { path = "crates/connectome", version = "0.1.0" }
 semblance-sim = { path = "crates/sim", version = "0.1.0" }
 semblance-codec = { path = "crates/codec", version = "0.1.0" }

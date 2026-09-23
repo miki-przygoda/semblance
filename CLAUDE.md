@@ -65,7 +65,7 @@ instead (`v0.1.1` is one).
 
 ## Constraints that are easy to break by accident
 
-**Zero external dependencies.** `Cargo.lock` contains exactly 7 packages, all
+**Zero external dependencies.** `Cargo.lock` contains exactly 8 packages, all
 `semblance*`. This was deliberate and hard-won — do not add a crates.io
 dependency without asking, not even a small one, not even for tests.
 
@@ -111,10 +111,14 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 26 tests, 0 failures
+cargo test --workspace          # 57 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
+
+4 of those tests skip when `data/flyvis-supplementary/` is absent (it is
+gitignored real-data, see `RESOURCES.md`), so a fresh clone seeing them skip
+is expected, not suspicious.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.

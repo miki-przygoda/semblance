@@ -48,6 +48,7 @@ download anything to see the pipeline work. Wire in real data when you're ready
 |-------|-------------------|------------------------------|
 | `rng` | `semblance-rng` — SplitMix64-seeded xoshiro256++, frozen stream pinned by test vectors | — |
 | `connectome` | graph type, CSR view, edge-list loader, synthetic generator | load a real FlyWire/MaleCNS export |
+| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec, no external dependencies; carries its curated ground truth | — |
 | `sim` | LIF neurons, decaying-current synapses, tick loop | sensory encoding + motor decoding ("make it act like an ant") |
 | `codec` | `WeightCodec` — lossless baseline, directly evolvable | `ReducedCodec` — the actual compression (`todo!()`) |
 | `evo` | gaussian mutation + truncation selection + elitism, seedable | your `Fitness` (environment + reward) |

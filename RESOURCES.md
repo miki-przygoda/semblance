@@ -45,6 +45,18 @@ Grouped by how they map onto this project.
 > list for the subgraph you care about, then load it in Rust via
 > `Connectome::from_edge_list`. Start with a region/subgraph, not the whole brain.
 
+### flyvis supplementary data (for `crates/flyvis`)
+
+`semblance-flyvis` reads flyvis's published connectome spec directly. The
+supplementary materials bundle is here:
+
+<https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip>
+
+Extract `Lappalainen_et_al_connectome_avg_filters.json` from it into
+`data/flyvis-supplementary/` (gitignored; see `.gitignore`). A handful of
+`crates/flyvis` tests read that file directly and skip themselves, rather than
+fail, when it isn't present.
+
 ---
 
 ## Compression & low-dimensional structure
