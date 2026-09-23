@@ -1,0 +1,13 @@
+[project]
+name = "semblance-tools"
+version = "0.0.0"
+description = "Offline Python for exporting flyvis artifacts. Not part of the Rust workspace."
+# flyvis 1.2.0 requires <3.13; the host default is newer, so this is pinned.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "flyvis==1.2.0",
+]
+
+[tool.uv]
+# Scripts here are run manually and rarely. No dev extras, no packaging.
+package = false

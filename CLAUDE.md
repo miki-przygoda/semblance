@@ -19,6 +19,7 @@ mean something specific here.
 | `docs/project-outline/` | **gitignored.** Long-term direction, epics, version plan | deciding what to do next |
 | `docs/superpowers/specs/` | design docs for individual pieces of work | implementing something already designed |
 | `docs/superpowers/plans/` | step-by-step implementation plans | executing a plan task by task |
+| `tools/` | offline Python (uv). **Not part of the workspace** | exporting something from flyvis |
 
 `docs/project-outline/` is local-only and will not exist in a fresh clone. If it
 is missing, the roadmap is missing — ask before inventing one.
@@ -68,6 +69,13 @@ instead (`v0.1.1` is one).
 **Zero external dependencies.** `Cargo.lock` contains exactly 8 packages, all
 `semblance*`. This was deliberate and hard-won — do not add a crates.io
 dependency without asking, not even a small one, not even for tests.
+
+`tools/` is not an exception to this. It is offline Python, run by hand, that
+exports flyvis artifacts into plain files; no crate imports it, invokes it, or
+records it in `Cargo.lock`. It exists because flyvis's trained parameters ship as
+PyTorch checkpoints. The connectome itself needs none of it — that is read
+directly in Rust. If a script there ever becomes something the Rust side needs at
+*runtime*, the boundary has been broken. See `tools/README.md`.
 
 **`semblance-rng`'s stream is frozen by contract.** `crates/rng/tests/vectors.rs`
 pins exact outputs. Changing the algorithm, the constants, the number of draws a
