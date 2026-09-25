@@ -56,6 +56,21 @@ fn parameters_are_trained_not_placeholders() {
     assert!(SYN_STRENGTH.iter().any(|&x| x > 0.0));
 }
 
+/// `SYN_COUNT` is stored as ln(count) -- flyvis parameterises it as a Lognormal
+/// whose `semantic_values` are `raw.exp()`. Anything consuming it as a synapse
+/// count must exponentiate first. This pins the log-space reading so a future
+/// change that "helpfully" exponentiates at export time fails loudly.
+#[test]
+fn syn_count_is_stored_in_log_space() {
+    // exp() of these must land on plausible synapse counts, not on ~1.
+    let counts: Vec<f32> = SYN_COUNT.iter().map(|x| x.exp()).collect();
+    let max = counts.iter().cloned().fold(f32::MIN, f32::max);
+    assert!(max > 100.0, "exp(SYN_COUNT) max was {max}; values look already-exponentiated");
+    // and the raw values must be small, as logs are
+    let raw_max = SYN_COUNT.iter().cloned().fold(f32::MIN, f32::max);
+    assert!(raw_max < 10.0, "SYN_COUNT max was {raw_max}; values look like raw counts, not logs");
+}
+
 #[test]
 fn sign_is_only_plus_or_minus_one() {
     assert!(SIGN.iter().all(|&x| x == 1.0 || x == -1.0));
