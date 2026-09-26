@@ -120,10 +120,12 @@ Four details that decide the edge count:
 1. **The `1 + 1e-6` scaling affects only which points qhull selects as
    vertices.** The polygon is built from the *unscaled* points. It cannot inflate
    the hull. (An earlier note in the epic claimed it could; that was wrong.)
-2. **`contains_points` is matplotlib's Haines "crossings multiply" algorithm
-   with a half-open `>=` rule** — neither boundary-inclusive nor
-   boundary-exclusive. This is the whole ballgame: boundary-inclusive yields
-   1,517,786 edges, boundary-exclusive 1,453,484, Haines **1,513,231 exactly**.
+2. **`contains_points` is Haines' `CrossingsMultiplyTest`** (*Graphics Gems
+   IV*), neither boundary-inclusive nor boundary-exclusive: boundary-inclusive
+   yields 1,517,786 edges, boundary-exclusive 1,453,484, Haines **1,513,231
+   exactly**. Two properties are load-bearing — it *multiplies* rather than
+   divides, and it is *winding-sensitive*. See "Resolved while planning";
+   getting this wrong was the largest error in this spec's first draft.
 3. **Original offsets come first, filled ones after**, in grid order — and the
    grid is `u`-major (`np.mgrid` then `dstack` then `concatenate`). Edge ordering
    depends on this.
@@ -280,14 +282,10 @@ element-wise comparison possible at all. Match it.
 
 ## Risks
 
-**The hull may not reproduce.** qhull with `QJ` joggling may include collinear
-boundary points as vertices in ways a monotone-chain hull does not, and that
-interacts with the half-open rule exactly at the boundary. Stage 1 exists to
-surface this early and precisely. If it resists, the fallback is to compare
-against the dumped offsets to learn the rule empirically — not to embed the
-dumped offsets, which would make the "generative spec" non-generative and discard
-the provenance argument that motivated reading the published file in the first
-place.
+~~**The hull may not reproduce.**~~ **Resolved** — see below. The fallback, had
+it resisted, was to learn the rule empirically from the dumped offsets; never to
+embed them, which would make the "generative spec" non-generative and discard the
+provenance argument for reading the published file at all.
 
 **The fixtures are gitignored, so the acceptance tests will skip in a fresh
 clone.** This is the existing CI gap recorded in `chore-and-fixes/`, not a new
@@ -297,3 +295,32 @@ in `spec.rs`.
 **Scale is new.** Everything so far has run on a 500-neuron synthetic graph. 1.5M
 edges will surface memory assumptions that have never been tested. Build it
 simply first; do not pre-optimise.
+
+## Resolved while planning
+
+Both algorithms were checked against scipy and matplotlib on the real spec
+before any Rust was written. Two findings, one of which invalidated this spec's
+first draft.
+
+**The containment rule was wrong.** The first draft specified the familiar
+division-based `pnpoly` formulation, computing `x < (xj-xi)*(y-yi)/(yj-yi) +
+xi`. That is a *different algorithm at the boundary*: it disagrees with
+matplotlib on **877 of 3,425 grid points**, even when given matplotlib's own
+polygon. Haines' multiply form — `(lhs >= rhs) == yflag1`, no division —
+matches on **all 3,425**. It is also winding-sensitive, which matplotlib is and
+the division form structurally cannot be.
+
+**The hull does not need to match, and could not easily.** qhull's `QJ` joggle
+retains collinear boundary points as vertices; a monotone chain drops them, and
+the two disagree on 91 of 243 filled edge types. That turns out not to matter: a
+collinear vertex lying on an edge never changes a containment verdict, our
+vertex set is always a *subset* of scipy's, and **`fill_hull`'s output is
+identical offset for offset across all 243 types**, totalling 2,378.
+
+One caveat worth keeping. Ten individual grid points do differ between the two
+hulls, and they are harmless only because every one of them is a *declared*
+offset, which `fill_hull` never adds. That is a property of this file, not a
+theorem — and the totals matched at 238 even while those ten disagreed, so a
+count-level check would have missed it entirely. The offset-level gate is what
+actually guarantees correctness, which is why it, and not a hull comparison, is
+the acceptance criterion.
