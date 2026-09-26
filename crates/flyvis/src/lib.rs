@@ -8,6 +8,7 @@
 
 pub mod groundtruth;
 mod json;
+pub mod expand;
 pub mod pretrained;
 #[cfg(test)]
 mod pretrained_checks;

@@ -47,6 +47,9 @@ dependencies = [
 [[package]]
 name = "semblance-flyvis"
 version = "0.1.0"
+dependencies = [
+ "semblance-connectome",
+]
 
 [[package]]
 name = "semblance-rng"
