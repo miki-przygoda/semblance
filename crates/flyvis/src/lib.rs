@@ -20,4 +20,5 @@ pub mod spec;
 #[cfg(test)]
 mod test_support;
 
+pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
 pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, SpecErrorKind};

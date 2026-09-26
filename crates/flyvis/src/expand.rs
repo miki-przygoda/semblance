@@ -7,7 +7,9 @@
 //! because 0.3.0 validates a port by comparing per-neuron traces and a
 //! differently-ordered network would fail with no indication why.
 
-use crate::spec::{NodeSpec, Pattern};
+use crate::spec::{ConnectomeSpec, NodeSpec, Pattern};
+use semblance_connectome::{NetworkError, TypedNetwork, TypedNetworkParts};
+use std::collections::HashMap;
 
 /// flyvis's default lattice radius, in columns.
 pub const DEFAULT_EXTENT: i32 = 15;
@@ -184,6 +186,137 @@ pub(crate) fn fill_hull(offsets: &[Offset], n_syn_fill: f32) -> Vec<Offset> {
         }
     }
     out
+}
+
+/// Why a spec could not be expanded.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExpandError {
+    /// An edge names a cell type the node list does not declare.
+    UnknownCellType { edge_spec_index: usize, name: String },
+    /// More node or connection types than a `u16` index can address.
+    TooManyTypes { count: usize },
+    /// The expansion produced arrays the network type rejected.
+    Network(NetworkError),
+}
+
+impl std::fmt::Display for ExpandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExpandError::UnknownCellType { edge_spec_index, name } =>
+                write!(f, "edges[{edge_spec_index}] names unknown cell type {name:?}"),
+            ExpandError::TooManyTypes { count } =>
+                write!(f, "{count} types exceeds the u16 index range"),
+            ExpandError::Network(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ExpandError {}
+
+impl From<NetworkError> for ExpandError {
+    fn from(e: NetworkError) -> Self {
+        ExpandError::Network(e)
+    }
+}
+
+/// Expands the generative spec into the realised network.
+///
+/// Use [`DEFAULT_EXTENT`] and [`DEFAULT_N_SYN_FILL`] to reproduce flyvis's own
+/// build, which yields 45,669 neurons and 1,513,231 synapses.
+///
+/// Edge types that realise no edges are dropped, and **do not consume a
+/// connection type index**. That is not a cosmetic count correction: the
+/// trained `syn_strength` vector is positional, so a retained zero-realising
+/// type would shift every later index by one and silently attribute every
+/// subsequent weight to the wrong connection type.
+pub fn expand(
+    spec: &ConnectomeSpec,
+    extent: i32,
+    n_syn_fill: f32,
+) -> Result<TypedNetwork, ExpandError> {
+    if spec.nodes.len() > u16::MAX as usize {
+        return Err(ExpandError::TooManyTypes { count: spec.nodes.len() });
+    }
+
+    let placed = place_nodes(&spec.nodes, extent);
+    let type_of: HashMap<&str, u16> = spec
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name.as_str(), i as u16))
+        .collect();
+
+    // Where each node sits, and which nodes belong to each type.
+    let mut at: HashMap<(u16, i32, i32), u32> = HashMap::with_capacity(placed.len());
+    let mut by_type: Vec<Vec<u32>> = vec![Vec::new(); spec.nodes.len()];
+    for (i, p) in placed.iter().enumerate() {
+        at.insert((p.cell_type, p.u, p.v), i as u32);
+        by_type[p.cell_type as usize].push(i as u32);
+    }
+
+    let mut conn_types: Vec<(u16, u16)> = Vec::new();
+    let mut conn_sign: Vec<f32> = Vec::new();
+    let (mut edge_source, mut edge_target) = (Vec::new(), Vec::new());
+    let (mut edge_conn_type, mut edge_n_syn) = (Vec::new(), Vec::new());
+
+    for (ei, e) in spec.edges.iter().enumerate() {
+        let src_t = *type_of.get(e.src.as_str()).ok_or(ExpandError::UnknownCellType {
+            edge_spec_index: ei,
+            name: e.src.clone(),
+        })?;
+        let tar_t = *type_of.get(e.tar.as_str()).ok_or(ExpandError::UnknownCellType {
+            edge_spec_index: ei,
+            name: e.tar.clone(),
+        })?;
+
+        let offsets = if n_syn_fill > 0.0 && e.offsets.len() >= 3 {
+            fill_hull(&e.offsets, n_syn_fill)
+        } else {
+            e.offsets.clone()
+        };
+
+        // Assigned on the first realised edge, not up front.
+        let mut ct: Option<u16> = None;
+
+        for o in &offsets {
+            for &src in &by_type[src_t as usize] {
+                let p = &placed[src as usize];
+                let Some(&tgt) = at.get(&(tar_t, p.u + o.du, p.v + o.dv)) else {
+                    continue;
+                };
+                let index = match ct {
+                    Some(c) => c,
+                    None => {
+                        if conn_types.len() >= u16::MAX as usize {
+                            return Err(ExpandError::TooManyTypes { count: conn_types.len() + 1 });
+                        }
+                        conn_types.push((src_t, tar_t));
+                        conn_sign.push(e.alpha as f32);
+                        let c = (conn_types.len() - 1) as u16;
+                        ct = Some(c);
+                        c
+                    }
+                };
+                edge_source.push(src);
+                edge_target.push(tgt);
+                edge_conn_type.push(index);
+                edge_n_syn.push(o.n_syn);
+            }
+        }
+    }
+
+    Ok(TypedNetwork::new(TypedNetworkParts {
+        cell_types: spec.nodes.iter().map(|n| n.name.clone()).collect(),
+        node_cell_type: placed.iter().map(|p| p.cell_type).collect(),
+        node_u: placed.iter().map(|p| p.u as i16).collect(),
+        node_v: placed.iter().map(|p| p.v as i16).collect(),
+        conn_types,
+        conn_sign,
+        edge_source,
+        edge_target,
+        edge_conn_type,
+        edge_n_syn,
+    })?)
 }
 
 #[cfg(test)]
@@ -506,5 +639,107 @@ mod tests {
                 assert!((g.2 - w.2).abs() < 1e-6, "n_syn for edge spec index {ei}");
             }
         }
+    }
+
+    use crate::spec::EdgeSpec;
+
+    fn edge(src: &str, tar: &str, alpha: i32, offsets: Vec<Offset>) -> EdgeSpec {
+        EdgeSpec {
+            src: src.to_string(),
+            tar: tar.to_string(),
+            offsets,
+            alpha,
+            alpha_fixed: true,
+            alpha_references: vec![],
+            time_constant: None,
+            time_constant_fixed: false,
+            lambda_mult: 1.0,
+            edge_type: "chem".to_string(),
+        }
+    }
+
+    fn tiny_spec(edges: Vec<EdgeSpec>) -> ConnectomeSpec {
+        ConnectomeSpec {
+            nodes: vec![
+                node("A", Pattern::Stride { u: 1, v: 1 }),
+                node("B", Pattern::Stride { u: 1, v: 1 }),
+            ],
+            edges,
+            input_units: vec!["A".to_string()],
+            output_units: vec!["B".to_string()],
+        }
+    }
+
+    #[test]
+    fn expands_a_single_offset_into_one_edge_per_realisable_source() {
+        // extent 1 gives 7 columns; a (1, 0) shift lands inside for some of them.
+        let s = tiny_spec(vec![edge("A", "B", 1, vec![off(0, 0, 3.0)])]);
+        let n = expand(&s, 1, DEFAULT_N_SYN_FILL).unwrap();
+        assert_eq!(n.num_nodes(), 14, "7 columns x 2 types");
+        assert_eq!(n.num_edges(), 7, "a (0,0) offset always lands");
+        assert!(n.edge_n_syn().iter().all(|&x| x == 3.0));
+    }
+
+    #[test]
+    fn drops_an_edge_type_that_realises_nothing() {
+        // A tiles with stride 3, so a (1, 0) shift never lands on another A.
+        let mut s = tiny_spec(vec![
+            edge("A", "A", 1, vec![off(1, 0, 2.0)]),
+            edge("A", "B", -1, vec![off(0, 0, 4.0)]),
+        ]);
+        s.nodes[0].pattern = Pattern::Stride { u: 3, v: 2 };
+        let n = expand(&s, 15, DEFAULT_N_SYN_FILL).unwrap();
+        assert_eq!(n.conn_types().len(), 1, "the zero-realising type must not appear");
+        assert_eq!(n.conn_sign(), [-1.0], "and the surviving type keeps its own sign");
+    }
+
+    /// The trap this whole design guards against: connection type indices are
+    /// assigned on first *realised* edge, so a zero-realising type must not
+    /// consume an index. If it did, every syn_strength past it would attach to
+    /// the wrong connection type.
+    #[test]
+    fn connection_type_indices_follow_first_realised_edge() {
+        let mut s = tiny_spec(vec![
+            edge("A", "A", 1, vec![off(1, 0, 2.0)]),   // realises nothing
+            edge("B", "B", 1, vec![off(0, 0, 5.0)]),   // realises
+            edge("A", "B", -1, vec![off(0, 0, 4.0)]),  // realises
+        ]);
+        s.nodes[0].pattern = Pattern::Stride { u: 3, v: 2 };
+        let n = expand(&s, 15, DEFAULT_N_SYN_FILL).unwrap();
+        assert_eq!(n.conn_types().len(), 2);
+        assert_eq!(n.conn_types()[0], (1, 1), "B->B takes index 0, not 1");
+        assert_eq!(n.conn_types()[1], (0, 1), "A->B takes index 1");
+        assert_eq!(n.conn_sign(), [1.0, -1.0]);
+    }
+
+    #[test]
+    fn edges_are_ordered_offset_outer_source_inner() {
+        let s = tiny_spec(vec![edge("A", "B", 1, vec![off(0, 0, 1.0), off(1, 0, 2.0)])]);
+        let n = expand(&s, 1, DEFAULT_N_SYN_FILL).unwrap();
+        let counts = n.edge_n_syn();
+        let first = counts.iter().filter(|&&x| x == 1.0).count();
+        // All offset-(0,0) edges must come before any offset-(1,0) edge.
+        assert!(counts[..first].iter().all(|&x| x == 1.0));
+        assert!(counts[first..].iter().all(|&x| x == 2.0));
+    }
+
+    #[test]
+    fn rejects_an_edge_naming_an_unknown_cell_type() {
+        let s = tiny_spec(vec![edge("A", "Z", 1, vec![off(0, 0, 1.0)])]);
+        assert_eq!(
+            expand(&s, 1, DEFAULT_N_SYN_FILL),
+            Err(ExpandError::UnknownCellType { edge_spec_index: 0, name: "Z".to_string() })
+        );
+    }
+
+    /// At extent 1 the lattice is 7 columns: (0,0), (0,1), (0,-1), (1,0),
+    /// (1,-1), (-1,0), (-1,1). Offset (0,0) lands for all 7; offset (1,0)
+    /// lands only for (0,0), (0,1), (-1,0), (-1,1) -- 4 of them. 11 in total,
+    /// and no hull filling because two offsets is below flyvis's threshold.
+    #[test]
+    fn skips_hull_filling_below_three_offsets() {
+        let s = tiny_spec(vec![edge("A", "B", 1, vec![off(0, 0, 1.0), off(1, 0, 1.0)])]);
+        let n = expand(&s, 1, DEFAULT_N_SYN_FILL).unwrap();
+        assert_eq!(n.num_edges(), 11);
     }
 }
