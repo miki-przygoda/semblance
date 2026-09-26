@@ -161,12 +161,22 @@ def main() -> int:
 
     # Three oracle cases, chosen by deterministic rule so this is reproducible:
     # most offsets, fewest offsets, and the most collinear-looking hull
-    # (largest known-points-minus-hull-vertices).
-    chosen = {
-        max(fill_stats, key=lambda r: r[1])[0],
-        min(fill_stats, key=lambda r: r[1])[0],
-        max(fill_stats, key=lambda r: r[1] - r[2])[0],
-    }
+    # (largest known-points-minus-hull-vertices). Two criteria can pick the
+    # same edge type -- they did on the real data -- so a criterion that
+    # collides takes its next-best candidate instead. `sorted` is stable, so
+    # ties fall back to edge-spec order and the choice stays reproducible.
+    ranked = [
+        sorted(fill_stats, key=lambda r: -r[1]),           # most offsets
+        sorted(fill_stats, key=lambda r: r[1]),            # fewest offsets
+        sorted(fill_stats, key=lambda r: -(r[1] - r[2])),  # most collinear
+    ]
+    chosen = []
+    for order in ranked:
+        for r in order:
+            if r[0] not in chosen:
+                chosen.append(r[0])
+                break
+    assert len(chosen) == 3, chosen
     with (OUT / "containment_oracle.csv").open("w") as f:
         f.write("edge_spec_index,u,v,inside\n")
         for ei in sorted(chosen):
