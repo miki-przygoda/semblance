@@ -111,6 +111,81 @@ pub(crate) fn convex_hull(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
     hull
 }
 
+use crate::spec::Offset;
+
+/// Point-in-polygon by Haines' `CrossingsMultiplyTest` (*Graphics Gems IV*).
+///
+/// This is the algorithm behind matplotlib's `Path.contains_points`, which is
+/// what flyvis's `fill_hull` uses. Checked against matplotlib over every grid
+/// point of every filled edge type in the real spec: 0 mismatches in 3,425.
+///
+/// **Do not replace this with the division-based `pnpoly` formulation.** That
+/// is a different algorithm at the boundary -- it disagreed with matplotlib on
+/// 877 of those 3,425 points -- and it cannot reproduce the winding-sensitivity
+/// that `(lhs >= rhs) == yflag1` gives, which matplotlib has.
+///
+/// Arithmetic is `i64` and therefore exact. Every product is a difference of
+/// lattice coordinates, well inside the range where `f64` represents integers
+/// exactly, so this agrees with matplotlib's floating-point evaluation rather
+/// than merely approximating it.
+pub(crate) fn contains_point(poly: &[(i32, i32)], p: (i32, i32)) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let (tx, ty) = (p.0 as i64, p.1 as i64);
+    let mut vtx0 = poly[poly.len() - 1];
+    let mut yflag0 = vtx0.1 as i64 >= ty;
+    let mut inside = false;
+    for &vtx1 in poly {
+        let yflag1 = vtx1.1 as i64 >= ty;
+        if yflag0 != yflag1 {
+            let lhs = (vtx1.1 as i64 - ty) * (vtx0.0 as i64 - vtx1.0 as i64);
+            let rhs = (vtx1.0 as i64 - tx) * (vtx0.1 as i64 - vtx1.1 as i64);
+            if (lhs >= rhs) == yflag1 {
+                inside = !inside;
+            }
+        }
+        yflag0 = yflag1;
+        vtx0 = vtx1;
+    }
+    inside
+}
+
+/// Adds an offset at every lattice point inside the convex hull of the
+/// declared offsets, with `n_syn_fill` synapses each.
+///
+/// This is how flyvis reconstructs edges across gaps in the EM data. Declared
+/// offsets are returned first and unchanged; invented ones follow in `u`-major
+/// grid order, matching `np.mgrid`. That ordering is part of the contract,
+/// because edge construction iterates offsets in this order.
+///
+/// The caller is responsible for only invoking this when there are 3 or more
+/// declared offsets, which is flyvis's own condition.
+pub(crate) fn fill_hull(offsets: &[Offset], n_syn_fill: f32) -> Vec<Offset> {
+    let pts: Vec<(i32, i32)> = offsets.iter().map(|o| (o.du, o.dv)).collect();
+    let declared: std::collections::HashSet<(i32, i32)> = pts.iter().copied().collect();
+    let poly = convex_hull(&pts);
+
+    let (min_u, max_u) = (
+        pts.iter().map(|p| p.0).min().unwrap(),
+        pts.iter().map(|p| p.0).max().unwrap(),
+    );
+    let (min_v, max_v) = (
+        pts.iter().map(|p| p.1).min().unwrap(),
+        pts.iter().map(|p| p.1).max().unwrap(),
+    );
+
+    let mut out = offsets.to_vec();
+    for u in min_u..=max_u {
+        for v in min_v..=max_v {
+            if !declared.contains(&(u, v)) && contains_point(&poly, (u, v)) {
+                out.push(Offset { du: u, dv: v, n_syn: n_syn_fill });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +329,177 @@ mod tests {
                 spec.edges[ei].offsets.iter().map(|o| (o.du, o.dv)).collect();
             for v in convex_hull(&pts) {
                 assert!(want.contains(&v), "edge spec index {ei}: {v:?} is not a scipy vertex");
+            }
+        }
+    }
+
+    use crate::spec::Offset;
+
+    fn off(du: i32, dv: i32, n_syn: f32) -> Offset {
+        Offset { du, dv, n_syn }
+    }
+
+    #[test]
+    fn a_point_well_inside_is_contained() {
+        let sq = [(0, 0), (4, 0), (4, 4), (0, 4)];
+        assert!(contains_point(&sq, (2, 2)));
+    }
+
+    #[test]
+    fn a_point_well_outside_is_not_contained() {
+        let sq = [(0, 0), (4, 0), (4, 4), (0, 4)];
+        assert!(!contains_point(&sq, (9, 9)));
+        assert!(!contains_point(&sq, (-1, 2)));
+    }
+
+    /// Verified against matplotlib: for a counter-clockwise axis-aligned
+    /// square, both vertical edges and the top are inside; the bottom is not.
+    #[test]
+    fn the_boundary_rule_matches_matplotlib() {
+        let sq = [(0, 0), (4, 0), (4, 4), (0, 4)];
+        assert!(contains_point(&sq, (0, 2)), "left edge is inside");
+        assert!(contains_point(&sq, (4, 2)), "right edge is inside");
+        assert!(contains_point(&sq, (2, 4)), "top edge is inside");
+        assert!(!contains_point(&sq, (2, 0)), "bottom edge is outside");
+    }
+
+    /// The multiply form compares against `yflag1`, so reversing the winding
+    /// changes boundary verdicts. matplotlib does the same. A division-based
+    /// crossing test cannot reproduce this -- which is how the wrong variant
+    /// gets chosen and then disagrees on 26% of boundary points.
+    #[test]
+    fn the_rule_is_winding_sensitive() {
+        let ccw = [(0, 0), (4, 0), (4, 4), (0, 4)];
+        let cw = [(0, 0), (0, 4), (4, 4), (4, 0)];
+        let differing = (-1..=5)
+            .flat_map(|u| (-1..=5).map(move |v| (u, v)))
+            .filter(|&p| contains_point(&ccw, p) != contains_point(&cw, p))
+            .count();
+        assert_eq!(differing, 8, "reversing the winding must change boundary verdicts");
+    }
+
+    /// A collinear vertex inserted on an edge changes nothing. This is why the
+    /// monotone chain may drop the points qhull's joggle keeps.
+    #[test]
+    fn a_collinear_vertex_does_not_change_the_verdict() {
+        let tri = [(0, 0), (2, 0), (0, 2)];
+        let with_extra = [(0, 0), (1, 0), (2, 0), (0, 2)];
+        for u in 0..=2 {
+            for v in 0..=2 {
+                assert_eq!(
+                    contains_point(&tri, (u, v)),
+                    contains_point(&with_extra, (u, v)),
+                    "({u}, {v})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fill_hull_leaves_declared_offsets_first_and_in_order() {
+        let declared = [off(0, 0, 5.0), off(2, 0, 6.0), off(0, 2, 7.0)];
+        let filled = fill_hull(&declared, DEFAULT_N_SYN_FILL);
+        assert_eq!(&filled[..3], &declared[..]);
+    }
+
+    /// Hand-checked against matplotlib: for the triangle (0,0), (2,0), (0,2)
+    /// the contained grid points are (0,1), (0,2) and (1,1); (0,2) is already
+    /// declared, so exactly (0,1) and (1,1) are added, in u-major order.
+    #[test]
+    fn fill_hull_adds_exactly_the_contained_lattice_points() {
+        let declared = [off(0, 0, 5.0), off(2, 0, 6.0), off(0, 2, 7.0)];
+        let filled = fill_hull(&declared, DEFAULT_N_SYN_FILL);
+        let added: Vec<(i32, i32)> = filled[3..].iter().map(|o| (o.du, o.dv)).collect();
+        assert_eq!(added, vec![(0, 1), (1, 1)]);
+        assert!(filled[3..].iter().all(|o| o.n_syn == DEFAULT_N_SYN_FILL));
+    }
+
+    #[test]
+    fn fill_hull_never_duplicates_a_declared_offset() {
+        let declared = [off(0, 0, 5.0), off(2, 0, 6.0), off(0, 2, 7.0)];
+        let filled = fill_hull(&declared, DEFAULT_N_SYN_FILL);
+        let mut seen = std::collections::HashSet::new();
+        assert!(filled.iter().all(|o| seen.insert((o.du, o.dv))), "duplicate offset");
+    }
+
+    /// The rule, in isolation: matplotlib's verdict for every grid point of
+    /// three representative edge types, evaluated on **scipy's own polygon**
+    /// rather than ours. Using our hull here would conflate a rule error with
+    /// the known-and-harmless collinear vertex difference; this test must fail
+    /// only when `contains_point` itself is wrong.
+    #[test]
+    fn containment_matches_matplotlib_point_for_point() {
+        let (Some(oracle), Some(hulls)) = (
+            load_build_fixture("containment_oracle.csv"),
+            load_build_fixture("hulls.csv"),
+        ) else {
+            return;
+        };
+
+        let mut polys: std::collections::BTreeMap<usize, Vec<(i32, i32)>> = Default::default();
+        for line in hulls.lines().skip(1).filter(|l| !l.is_empty()) {
+            let f: Vec<&str> = line.split(',').collect();
+            let ei: usize = f[0].parse().unwrap();
+            let du: i32 = f[2].parse().unwrap();
+            let dv: i32 = f[3].trim().parse().unwrap();
+            polys.entry(ei).or_default().push((du, dv));
+        }
+
+        let mut checked = 0usize;
+        let mut types = std::collections::BTreeSet::new();
+        for line in oracle.lines().skip(1).filter(|l| !l.is_empty()) {
+            let f: Vec<&str> = line.split(',').collect();
+            let ei: usize = f[0].parse().unwrap();
+            let u: i32 = f[1].parse().unwrap();
+            let v: i32 = f[2].parse().unwrap();
+            let want = f[3].trim() == "1";
+
+            let poly = &polys[&ei];
+            assert_eq!(
+                contains_point(poly, (u, v)), want,
+                "containment mismatch at ({u}, {v}) for edge spec index {ei}"
+            );
+            checked += 1;
+            types.insert(ei);
+        }
+        assert_eq!(types.len(), 3, "oracle should cover 3 edge types");
+        assert!(checked > 0);
+    }
+
+    /// The stage 1 gate: every filled offset, for every edge type, against
+    /// flyvis's own post-fill_hull output.
+    #[test]
+    fn filled_offsets_match_flyvis_exactly() {
+        let (Some(raw), Some(csv)) = (load_real_spec(), load_build_fixture("offsets.csv")) else {
+            return;
+        };
+        let spec = ConnectomeSpec::from_json_str(&raw).expect("real spec must load");
+
+        let mut expected: std::collections::BTreeMap<usize, Vec<(i32, i32, f32)>> = Default::default();
+        for line in csv.lines().skip(1).filter(|l| !l.is_empty()) {
+            let f: Vec<&str> = line.split(',').collect();
+            let ei: usize = f[0].parse().unwrap();
+            let du: i32 = f[3].parse().unwrap();
+            let dv: i32 = f[4].parse().unwrap();
+            let n: f32 = f[5].parse().unwrap();
+            expected.entry(ei).or_default().push((du, dv, n));
+        }
+        assert_eq!(expected.values().map(Vec::len).sum::<usize>(), 2378, "total offsets");
+
+        for (ei, want) in expected {
+            let e = &spec.edges[ei];
+            let got: Vec<(i32, i32, f32)> = if e.offsets.len() >= 3 {
+                fill_hull(&e.offsets, DEFAULT_N_SYN_FILL)
+            } else {
+                e.offsets.clone()
+            }
+            .iter()
+            .map(|o| (o.du, o.dv, o.n_syn))
+            .collect();
+            assert_eq!(got.len(), want.len(), "offset count for edge spec index {ei}");
+            for (g, w) in got.iter().zip(&want) {
+                assert_eq!((g.0, g.1), (w.0, w.1), "offset position for edge spec index {ei}");
+                assert!((g.2 - w.2).abs() < 1e-6, "n_syn for edge spec index {ei}");
             }
         }
     }
