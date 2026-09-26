@@ -333,8 +333,6 @@ mod tests {
         }
     }
 
-    use crate::spec::Offset;
-
     fn off(du: i32, dv: i32, n_syn: f32) -> Offset {
         Offset { du, dv, n_syn }
     }
@@ -402,15 +400,21 @@ mod tests {
         assert_eq!(&filled[..3], &declared[..]);
     }
 
-    /// Hand-checked against matplotlib: for the triangle (0,0), (2,0), (0,2)
-    /// the contained grid points are (0,1), (0,2) and (1,1); (0,2) is already
-    /// declared, so exactly (0,1) and (1,1) are added, in u-major order.
+    /// Pins the u-major grid order flyvis's `np.mgrid` produces, which the next
+    /// task's edge construction depends on.
+    ///
+    /// The fixture is chosen so the two added points come out in a DIFFERENT
+    /// order under v-major iteration -- u-major gives [(0,2), (1,1)], v-major
+    /// gives [(1,1), (0,2)] -- so swapping the loop nesting makes this test
+    /// fail. An earlier fixture used two points sharing `v`, which both
+    /// orderings visit identically; it asserted an order it could not detect.
+    /// Expected values verified against matplotlib.
     #[test]
     fn fill_hull_adds_exactly_the_contained_lattice_points() {
-        let declared = [off(0, 0, 5.0), off(2, 0, 6.0), off(0, 2, 7.0)];
+        let declared = [off(0, 1, 5.0), off(0, 3, 6.0), off(2, 0, 7.0)];
         let filled = fill_hull(&declared, DEFAULT_N_SYN_FILL);
         let added: Vec<(i32, i32)> = filled[3..].iter().map(|o| (o.du, o.dv)).collect();
-        assert_eq!(added, vec![(0, 1), (1, 1)]);
+        assert_eq!(added, vec![(0, 2), (1, 1)], "u-major; v-major would give [(1,1), (0,2)]");
         assert!(filled[3..].iter().all(|o| o.n_syn == DEFAULT_N_SYN_FILL));
     }
 
