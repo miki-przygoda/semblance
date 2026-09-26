@@ -198,3 +198,47 @@ fn derives_weights_over_the_real_network() {
     assert!(out.iter().any(|&w| w > 0.0), "some weights must be excitatory");
     assert!(out.iter().any(|&w| w < 0.0), "some weights must be inhibitory");
 }
+
+/// The trained synapse counts must line up with the expanded network's offset
+/// groups, in order.
+///
+/// `SYN_COUNT` is positional over the 2,355 realised `(connection type, du, dv)`
+/// groups and is stored in **natural-log space** -- a port that used the stored
+/// value directly would be wrong by an exponential in every weight while still
+/// running. `matches_the_published_figures` counts these groups; only this test
+/// pins their order and their values. `pretrained.rs`'s module doc states that
+/// `SYN_COUNT` exists so an independent expansion can be checked against it
+/// rather than trusted, and until this test that check did not exist.
+#[test]
+fn trained_synapse_counts_match_the_expanded_network() {
+    let Some(n) = real_network() else { return };
+
+    // First-appearance order over the built edges, matching export_params.py.
+    let mut seen: std::collections::HashSet<(u16, i16, i16)> = Default::default();
+    let mut groups: Vec<f32> = Vec::new();
+    for i in 0..n.num_edges() {
+        let s = n.edge_source()[i] as usize;
+        let t = n.edge_target()[i] as usize;
+        let key = (
+            n.edge_conn_type()[i],
+            n.node_u()[t] - n.node_u()[s],
+            n.node_v()[t] - n.node_v()[s],
+        );
+        if seen.insert(key) {
+            groups.push(n.edge_n_syn()[i]);
+        }
+    }
+
+    assert_eq!(
+        groups.len(),
+        crate::pretrained::SYN_COUNT.len(),
+        "realised offset groups"
+    );
+    for (g, &n_syn) in groups.iter().enumerate() {
+        let want = crate::pretrained::SYN_COUNT[g].exp();
+        assert!(
+            (want - n_syn).abs() <= 1e-3 * n_syn.max(1.0),
+            "offset group {g}: exp(SYN_COUNT) = {want}, expansion has n_syn = {n_syn}"
+        );
+    }
+}
