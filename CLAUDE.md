@@ -119,12 +119,12 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 109 tests, 0 failures
+cargo test --workspace          # 110 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-14 of those tests skip when `data/flyvis-supplementary/` and `data/flyvis-build/`
+15 of those tests skip when `data/flyvis-supplementary/` and `data/flyvis-build/`
 are absent (both are gitignored real-data; the former is fetched per
 `RESOURCES.md`, the latter produced by `tools/export_build.py`), so a fresh
 clone seeing them skip is expected, not suspicious.
