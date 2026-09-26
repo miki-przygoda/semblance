@@ -20,6 +20,10 @@ use std::io::{self, BufRead};
 
 use semblance_rng::Rng;
 
+pub mod typed;
+
+pub use typed::{NetworkError, TypedNetwork, TypedNetworkParts};
+
 /// Index of a neuron. `u32` keeps edge lists small; a fly brain is ~1.4e5 neurons.
 pub type NeuronId = u32;
 
