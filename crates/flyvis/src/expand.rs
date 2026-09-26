@@ -66,8 +66,11 @@ pub(crate) fn place_nodes(nodes: &[NodeSpec], extent: i32) -> Vec<PlacedNode> {
     out
 }
 
-/// Cross product of `ob` and `oa`, in `i64` so lattice coordinates cannot
-/// overflow.
+/// Cross product of `ob` and `oa`, widened to `i64`.
+///
+/// The widening is exact for the bounded lattice coordinates this is called
+/// with here -- offsets bounded by the hex extent -- not as a general
+/// overflow guarantee for arbitrary `i32` inputs.
 fn cross(o: (i32, i32), a: (i32, i32), b: (i32, i32)) -> i64 {
     (a.0 as i64 - o.0 as i64) * (b.1 as i64 - o.1 as i64)
         - (a.1 as i64 - o.1 as i64) * (b.0 as i64 - o.0 as i64)
@@ -672,7 +675,7 @@ mod tests {
 
     #[test]
     fn expands_a_single_offset_into_one_edge_per_realisable_source() {
-        // extent 1 gives 7 columns; a (1, 0) shift lands inside for some of them.
+        // extent 1 gives 7 columns; a (0, 0) offset lands for every one of them.
         let s = tiny_spec(vec![edge("A", "B", 1, vec![off(0, 0, 3.0)])]);
         let n = expand(&s, 1, DEFAULT_N_SYN_FILL).unwrap();
         assert_eq!(n.num_nodes(), 14, "7 columns x 2 types");
@@ -734,8 +737,13 @@ mod tests {
 
     /// At extent 1 the lattice is 7 columns: (0,0), (0,1), (0,-1), (1,0),
     /// (1,-1), (-1,0), (-1,1). Offset (0,0) lands for all 7; offset (1,0)
-    /// lands only for (0,0), (0,1), (-1,0), (-1,1) -- 4 of them. 11 in total,
-    /// and no hull filling because two offsets is below flyvis's threshold.
+    /// lands only for (0,0), (0,-1), (-1,0), (-1,1) -- 4 of them. 11 in total.
+    ///
+    /// This pins the realised edge count, not the hull-filling threshold:
+    /// below three offsets, `convex_hull` already returns fewer than 3
+    /// points, and `contains_point` short-circuits to `false` on that -- so
+    /// filling is a provable no-op here regardless of where flyvis's `>= 3`
+    /// threshold is actually set.
     #[test]
     fn skips_hull_filling_below_three_offsets() {
         let s = tiny_spec(vec![edge("A", "B", 1, vec![off(0, 0, 1.0), off(1, 0, 1.0)])]);
