@@ -44,3 +44,22 @@ pub(crate) fn load_build_fixture(name: &str) -> Option<String> {
         }
     }
 }
+
+/// Loads a binary fixture exported from flyvis's own build, or `None` if the
+/// export has not been run. See `tools/export_build.py`.
+pub(crate) fn load_build_bytes(name: &str) -> Option<Vec<u8>> {
+    let path = format!(
+        "{}/../../data/flyvis-build/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    match std::fs::read(&path) {
+        Ok(b) => Some(b),
+        Err(_) => {
+            eprintln!(
+                "skipping: {path} not found. Run \
+                 `uv run --project tools tools/export_build.py` to generate it."
+            );
+            None
+        }
+    }
+}

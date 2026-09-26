@@ -119,14 +119,15 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 57 tests, 0 failures
+cargo test --workspace          # 109 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-4 of those tests skip when `data/flyvis-supplementary/` is absent (it is
-gitignored real-data, see `RESOURCES.md`), so a fresh clone seeing them skip
-is expected, not suspicious.
+14 of those tests skip when `data/flyvis-supplementary/` and `data/flyvis-build/`
+are absent (both are gitignored real-data; the former is fetched per
+`RESOURCES.md`, the latter produced by `tools/export_build.py`), so a fresh
+clone seeing them skip is expected, not suspicious.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.
