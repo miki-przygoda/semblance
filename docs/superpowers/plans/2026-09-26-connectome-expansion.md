@@ -1018,10 +1018,13 @@ fn cross(o: (i32, i32), a: (i32, i32), b: (i32, i32)) -> i64 {
 /// Andrew's monotone chain, in exact integer arithmetic. Duplicates in the
 /// input are tolerated.
 ///
-/// flyvis obtains this from qhull with the `QJ` joggle option, which perturbs
-/// points and could in principle retain a collinear boundary point as a
-/// vertex. `hull_matches_scipy_for_every_filled_edge_type` checks that it does
-/// not, for every edge type in the real spec.
+/// flyvis obtains this from qhull with the `QJ` joggle option, which **does**
+/// retain collinear boundary points as vertices where this chain drops them:
+/// measured against the real spec, the two disagree on 91 of the 243 filled
+/// edge types. That difference provably does not change what `fill_hull`
+/// returns, so `hull_is_a_subset_of_scipys_vertices` asserts only that every
+/// vertex produced here is one scipy also found. The offset-level comparison
+/// in `fill_hull`'s tests is what actually pins correctness.
 pub(crate) fn convex_hull(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
     let mut pts: Vec<(i32, i32)> = points.to_vec();
     pts.sort_unstable();
