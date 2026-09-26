@@ -46,6 +46,14 @@ committed — it is the reproducibility record for anything exported from here.
 uv run python <script>.py
 ```
 
+## Scripts
+
+| Script | What it exports | Destination |
+|---|---|---|
+| `download_pretrained.py` | flyvis's pretrained model ensemble, fetched from upstream | `data/flyvis-pretrained/` |
+| `export_params.py` | the validation model's trained parameters, plus the full ensemble as data | `crates/flyvis/src/pretrained.rs`, `data/flyvis-pretrained/ensemble.csv` |
+| `export_build.py` | flyvis's own built connectome — nodes, connection types, offsets, scipy's convex hulls, and matplotlib's containment verdicts — as fixtures the Rust expansion is tested against | `data/flyvis-build/` |
+
 ## Provenance rule
 
 Anything exported from here is an input to a later result, so it has to be
