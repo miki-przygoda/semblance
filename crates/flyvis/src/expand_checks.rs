@@ -5,8 +5,10 @@
 //! these are the criteria for the whole epic rather than unit tests of a
 //! function.
 //!
-//! All of them skip when their data is absent. See `chore-and-fixes/` for the
-//! CI gap that makes that a known hazard.
+//! All of them skip when their data is absent. `test_support::fixtures_required`
+//! turns that skip into a hard failure under `SEMBLANCE_REQUIRE_FIXTURES=1`,
+//! which CI must set -- without it, a skip is invisible under plain
+//! `cargo test` (see `CLAUDE.md`).
 
 use crate::expand::{expand, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
 use crate::spec::ConnectomeSpec;

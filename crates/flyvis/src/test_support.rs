@@ -4,6 +4,18 @@
 //! in exactly one place, instead of being copy-pasted into every test module
 //! that needs to skip when the real data is absent.
 
+/// Whether missing fixtures must fail the suite instead of skipping it.
+///
+/// libtest captures `eprintln!` for *passing* tests, so a skip notice is
+/// invisible under plain `cargo test`: with the data absent the suite reports
+/// the same "111 passed, 0 failed" as a full run. Measured, not assumed.
+///
+/// Set `SEMBLANCE_REQUIRE_FIXTURES=1` — as CI must — to turn every skip into a
+/// failure. Without it the acceptance gates can silently verify nothing.
+fn fixtures_required() -> bool {
+    std::env::var("SEMBLANCE_REQUIRE_FIXTURES").is_ok_and(|v| v == "1")
+}
+
 /// Loads the real, published flyvis connectome spec as a string, or `None`
 /// if it hasn't been fetched. The file is gitignored real data (see
 /// `RESOURCES.md` for how to get it); tests that depend on it must skip via
@@ -16,6 +28,10 @@ pub(crate) fn load_real_spec() -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Some(s),
         Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
             eprintln!(
                 "skipping: {path} not found. Download \
                  https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip \
@@ -36,6 +52,10 @@ pub(crate) fn load_build_fixture(name: &str) -> Option<String> {
     match std::fs::read_to_string(&path) {
         Ok(s) => Some(s),
         Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
             eprintln!(
                 "skipping: {path} not found. Run \
                  `uv run --project tools tools/export_build.py` to generate it."
@@ -55,6 +75,10 @@ pub(crate) fn load_build_bytes(name: &str) -> Option<Vec<u8>> {
     match std::fs::read(&path) {
         Ok(b) => Some(b),
         Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
             eprintln!(
                 "skipping: {path} not found. Run \
                  `uv run --project tools tools/export_build.py` to generate it."
