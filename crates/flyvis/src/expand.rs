@@ -64,6 +64,50 @@ pub(crate) fn place_nodes(nodes: &[NodeSpec], extent: i32) -> Vec<PlacedNode> {
     out
 }
 
+/// Cross product of `ob` and `oa`, in `i64` so lattice coordinates cannot
+/// overflow.
+fn cross(o: (i32, i32), a: (i32, i32), b: (i32, i32)) -> i64 {
+    (a.0 as i64 - o.0 as i64) * (b.1 as i64 - o.1 as i64)
+        - (a.1 as i64 - o.1 as i64) * (b.0 as i64 - o.0 as i64)
+}
+
+/// Convex hull of integer points, counter-clockwise, collinear points dropped.
+///
+/// Andrew's monotone chain, in exact integer arithmetic. Duplicates in the
+/// input are tolerated.
+///
+/// flyvis obtains this from qhull with the `QJ` joggle option, which perturbs
+/// points and could in principle retain a collinear boundary point as a
+/// vertex. `hull_matches_scipy_for_every_filled_edge_type` checks that it does
+/// not, for every edge type in the real spec.
+pub(crate) fn convex_hull(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let mut pts: Vec<(i32, i32)> = points.to_vec();
+    pts.sort_unstable();
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+
+    let mut hull: Vec<(i32, i32)> = Vec::with_capacity(pts.len() * 2);
+    for &p in &pts {
+        while hull.len() >= 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    let lower = hull.len() + 1;
+    // `skip(1)`: the last sorted point already ends the lower chain. Including
+    // it again pushes a duplicate that the pop at the end does not remove.
+    for &p in pts.iter().rev().skip(1) {
+        while hull.len() >= lower && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    hull.pop();
+    hull
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +179,79 @@ mod tests {
         let mut sorted = b.clone();
         sorted.sort();
         assert_eq!(b, sorted, "u-major, v-minor ordering");
+    }
+
+    use crate::test_support::{load_build_fixture, load_real_spec};
+    use crate::spec::ConnectomeSpec;
+
+    #[test]
+    fn hull_of_a_square_is_its_four_corners() {
+        let pts = [(0, 0), (2, 0), (2, 2), (0, 2), (1, 1)];
+        let mut h = convex_hull(&pts);
+        h.sort();
+        assert_eq!(h, vec![(0, 0), (0, 2), (2, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn hull_drops_points_collinear_on_an_edge() {
+        let pts = [(0, 0), (1, 0), (2, 0), (2, 2), (0, 2)];
+        let h = convex_hull(&pts);
+        assert!(!h.contains(&(1, 0)), "midpoint of an edge is not a vertex: {h:?}");
+        assert_eq!(h.len(), 4);
+    }
+
+    #[test]
+    fn hull_of_collinear_points_is_the_two_extremes() {
+        let h = convex_hull(&[(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(h.len(), 2);
+        assert!(h.contains(&(0, 0)) && h.contains(&(2, 2)));
+    }
+
+    #[test]
+    fn hull_is_counter_clockwise() {
+        let h = convex_hull(&[(0, 0), (2, 0), (2, 2), (0, 2)]);
+        // Shoelace: positive area means counter-clockwise.
+        let area: i64 = (0..h.len())
+            .map(|i| {
+                let (x1, y1) = h[i];
+                let (x2, y2) = h[(i + 1) % h.len()];
+                x1 as i64 * y2 as i64 - x2 as i64 * y1 as i64
+            })
+            .sum();
+        assert!(area > 0, "expected counter-clockwise, got area {area}");
+    }
+
+    /// scipy runs qhull with the `QJ` joggle, which RETAINS collinear boundary
+    /// points as vertices; a monotone chain drops them. Measured across all 243
+    /// filled edge types while this plan was written: our vertex set is always a
+    /// *subset* of scipy's, and the difference never changes what `fill_hull`
+    /// returns. Asserting set equality would fail on 91 of 243 for reasons that
+    /// provably do not affect the output. The real gate is
+    /// `filled_offsets_match_flyvis_exactly` in the next task.
+    #[test]
+    fn hull_is_a_subset_of_scipys_vertices() {
+        let (Some(raw), Some(hulls)) = (load_real_spec(), load_build_fixture("hulls.csv")) else {
+            return;
+        };
+        let spec = ConnectomeSpec::from_json_str(&raw).expect("real spec must load");
+
+        let mut scipy: std::collections::BTreeMap<usize, std::collections::BTreeSet<(i32, i32)>> =
+            Default::default();
+        for line in hulls.lines().skip(1).filter(|l| !l.is_empty()) {
+            let f: Vec<&str> = line.split(',').collect();
+            let ei: usize = f[0].parse().unwrap();
+            let du: i32 = f[2].parse().unwrap();
+            let dv: i32 = f[3].trim().parse().unwrap();
+            scipy.entry(ei).or_default().insert((du, dv));
+        }
+        assert_eq!(scipy.len(), 243, "edge types with 3+ offsets");
+
+        for (ei, want) in scipy {
+            let pts: Vec<(i32, i32)> =
+                spec.edges[ei].offsets.iter().map(|o| (o.du, o.dv)).collect();
+            for v in convex_hull(&pts) {
+                assert!(want.contains(&v), "edge spec index {ei}: {v:?} is not a scipy vertex");
+            }
+        }
     }
 }

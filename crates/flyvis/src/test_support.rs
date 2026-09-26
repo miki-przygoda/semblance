@@ -25,3 +25,22 @@ pub(crate) fn load_real_spec() -> Option<String> {
         }
     }
 }
+
+/// Loads a fixture exported from flyvis's own build, or `None` if the export
+/// has not been run. See `tools/export_build.py`.
+pub(crate) fn load_build_fixture(name: &str) -> Option<String> {
+    let path = format!(
+        "{}/../../data/flyvis-build/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            eprintln!(
+                "skipping: {path} not found. Run \
+                 `uv run --project tools tools/export_build.py` to generate it."
+            );
+            None
+        }
+    }
+}
