@@ -8,7 +8,7 @@
 ///
 /// libtest captures `eprintln!` for *passing* tests, so a skip notice is
 /// invisible under plain `cargo test`: with the data absent the suite reports
-/// the same "111 passed, 0 failed" as a full run. Measured, not assumed.
+/// the same pass count as a full run. Measured, not assumed.
 ///
 /// Set `SEMBLANCE_REQUIRE_FIXTURES=1` — as CI must — to turn every skip into a
 /// failure. Without it the acceptance gates can silently verify nothing.

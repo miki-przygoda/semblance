@@ -76,7 +76,7 @@ pub(crate) fn hex_distance(a: (i32, i32), b: (i32, i32)) -> i32 {
 ///
 /// The boundary ring is **included** (`<=`). Returned in ascending lattice
 /// order, so the result indexes directly into a frame buffer. A disc centred
-/// away from the origin is clipped by the lattice edge, exactly as flyvis's is.
+/// away from the origin is clipped by the lattice edge.
 pub(crate) fn disc_indices(extent: i32, centre: (i32, i32), radius: i32) -> Vec<usize> {
     hex_coords(extent)
         .enumerate()
@@ -96,7 +96,11 @@ pub(crate) fn frame_count(duration: f32, dt: f32) -> usize {
 /// Parameters for a family of circular flashes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlashParams {
-    /// Hex radius of the receptor array. 15 gives 721 hexals.
+    /// Hex radius of the receptor array. 15 gives 721 hexals, and is the only
+    /// value verified against flyvis. flyvis's own `filled_circle` hardcodes
+    /// its embedding lattice to 15 regardless of this parameter, so at any
+    /// other extent this implementation and flyvis disagree -- this one being
+    /// the more self-consistent of the two. The gates only cover 15.
     pub extent: i32,
     /// The two intensity extremes. Their mean is the baseline.
     pub dynamic_range: [f32; 2],
@@ -255,7 +259,11 @@ impl Stimulus for Flashes {
 /// Parameters for a family of single-ommatidium dot flashes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DotParams {
-    /// Hex radius of the receptor array. 15 gives 721 hexals.
+    /// Hex radius of the receptor array. 15 gives 721 hexals, and is the only
+    /// value verified against flyvis. flyvis's own `filled_circle` hardcodes
+    /// its embedding lattice to 15 regardless of this parameter, so at any
+    /// other extent this implementation and flyvis disagree -- this one being
+    /// the more self-consistent of the two. The gates only cover 15.
     pub extent: i32,
     /// Radius of the lit disc around each centre. 0 lights one hexal.
     pub dot_column_radius: i32,
@@ -453,7 +461,7 @@ mod tests {
     #[test]
     fn a_disc_off_the_origin_is_clipped_by_the_lattice() {
         // Centred on the lattice edge, most of the disc falls outside.
-        assert!(disc_indices(15, (15, 0), 2).len() < 19);
+        assert_eq!(disc_indices(15, (15, 0), 2).len(), 9);
     }
 
     #[test]
