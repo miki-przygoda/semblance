@@ -119,18 +119,20 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 111 tests, 0 failures
+cargo test --workspace          # 150 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-16 of those tests skip when `data/flyvis-supplementary/` and `data/flyvis-build/`
-are absent (both are gitignored real-data; the former is fetched per
-`RESOURCES.md`, the latter produced by `tools/export_build.py`). A skip prints
-`eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
-tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "111 passed, 0 failed" whether the data is present
-or absent. They are only visible under `cargo test --workspace -- --nocapture`.
+21 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`
+and `data/flyvis-stimuli/` are absent (all three are gitignored real-data; the
+first is fetched per `RESOURCES.md`, the other two produced by
+`tools/export_build.py` and `tools/export_stimuli.py` respectively). A skip
+prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!` for
+*passing* tests, so under plain `cargo test --workspace` those notices are
+invisible — the suite reports the same "150 passed, 0 failed" whether the data
+is present or absent. They are only visible under
+`cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
 hard failure instead — CI must set this, or the acceptance gates that prove

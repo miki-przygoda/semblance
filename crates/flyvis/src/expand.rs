@@ -40,6 +40,27 @@ fn strides_and_extent(pattern: Pattern, extent: i32) -> ((i32, i32), i32) {
     }
 }
 
+/// The canonical hex-lattice order: outer `u` ascending, inner `v` ascending
+/// over the hexagonal bound.
+///
+/// This one ordering is shared by the connectome's node construction and by
+/// every stimulus's hexal indexing. flyvis derives it independently in both
+/// places from textually identical loops (`utils/hex_utils.py:15-42`
+/// `get_hex_coords`, and `connectome/connectome.py:326-342`
+/// `add_strided_nodes`). Naming it here makes that agreement explicit instead
+/// of incidental -- a stimulus whose flat index disagrees with the connectome's
+/// node index is spatially scrambled while keeping the right shape, the right
+/// frame count and entirely plausible dynamics.
+///
+/// The `v` bounds are asymmetric on purpose: they are what make the region a
+/// hexagon rather than a rhombus. At `extent = 15` this yields 721 pairs,
+/// index 0 is `(-15, 0)` and the origin `(0, 0)` is index 360.
+pub(crate) fn hex_coords(extent: i32) -> impl Iterator<Item = (i32, i32)> {
+    (-extent..=extent).flat_map(move |u| {
+        ((-extent).max(-extent - u)..=extent.min(extent - u)).map(move |v| (u, v))
+    })
+}
+
 /// Tiles every node type over the lattice, in flyvis's build order.
 ///
 /// Ordering is spec entry, then `u` ascending, then `v` ascending. A node's
@@ -53,13 +74,9 @@ pub(crate) fn place_nodes(nodes: &[NodeSpec], extent: i32) -> Vec<PlacedNode> {
     let mut out = Vec::new();
     for (index, node) in nodes.iter().enumerate() {
         let ((u_stride, v_stride), ext) = strides_and_extent(node.pattern, extent);
-        for u in -ext..=ext {
-            let lo = (-ext).max(-ext - u);
-            let hi = ext.min(ext - u);
-            for v in lo..=hi {
-                if u % u_stride == 0 && v % v_stride == 0 {
-                    out.push(PlacedNode { cell_type: index as u16, u, v });
-                }
+        for (u, v) in hex_coords(ext) {
+            if u % u_stride == 0 && v % v_stride == 0 {
+                out.push(PlacedNode { cell_type: index as u16, u, v });
             }
         }
     }
@@ -337,6 +354,45 @@ mod tests {
             time_constant: None,
             time_constant_fixed: false,
         }
+    }
+
+    #[test]
+    fn hex_coords_yields_the_full_lattice_at_extent_15() {
+        assert_eq!(hex_coords(15).count(), 721);
+    }
+
+    #[test]
+    fn hex_coords_starts_at_minus_extent_and_centres_at_360() {
+        let c: Vec<(i32, i32)> = hex_coords(15).collect();
+        assert_eq!(c[0], (-15, 0), "index 0");
+        assert_eq!(c[360], (0, 0), "the origin sits at index 360");
+        assert_eq!(c[720], (15, 0), "index 720");
+    }
+
+    /// The asymmetric v bounds are what make the region a hexagon. A naive
+    /// `-extent..=extent` for v would give a rhombus of (2n+1)^2 = 961 cells
+    /// at extent 15 -- still plausible-looking, and wrong.
+    #[test]
+    fn hex_coords_is_a_hexagon_not_a_rhombus() {
+        assert_eq!(hex_coords(15).count(), 721);
+        assert_ne!(hex_coords(15).count(), 31 * 31);
+    }
+
+    #[test]
+    fn hex_coords_degenerates_correctly_at_small_extents() {
+        assert_eq!(hex_coords(0).collect::<Vec<_>>(), vec![(0, 0)]);
+        assert_eq!(hex_coords(1).count(), 7);
+        assert_eq!(hex_coords(2).count(), 19);
+    }
+
+    /// The extraction must be behaviour-preserving: an unstrided type placed by
+    /// `place_nodes` must visit exactly `hex_coords`' sequence.
+    #[test]
+    fn place_nodes_visits_hex_coords_order_for_an_unstrided_type() {
+        let placed = place_nodes(&[node("A", Pattern::Stride { u: 1, v: 1 })], 15);
+        let want: Vec<(i32, i32)> = hex_coords(15).collect();
+        let got: Vec<(i32, i32)> = placed.iter().map(|p| (p.u, p.v)).collect();
+        assert_eq!(got, want);
     }
 
     #[test]

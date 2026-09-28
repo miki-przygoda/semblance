@@ -8,7 +8,7 @@
 ///
 /// libtest captures `eprintln!` for *passing* tests, so a skip notice is
 /// invisible under plain `cargo test`: with the data absent the suite reports
-/// the same "111 passed, 0 failed" as a full run. Measured, not assumed.
+/// the same pass count as a full run. Measured, not assumed.
 ///
 /// Set `SEMBLANCE_REQUIRE_FIXTURES=1` — as CI must — to turn every skip into a
 /// failure. Without it the acceptance gates can silently verify nothing.
@@ -82,6 +82,51 @@ pub(crate) fn load_build_bytes(name: &str) -> Option<Vec<u8>> {
             eprintln!(
                 "skipping: {path} not found. Run \
                  `uv run --project tools tools/export_build.py` to generate it."
+            );
+            None
+        }
+    }
+}
+
+/// Loads a stimulus fixture exported from flyvis, or `None` if the export has
+/// not been run. See `tools/export_stimuli.py`.
+pub(crate) fn load_stimulus_fixture(name: &str) -> Option<String> {
+    let path = format!(
+        "{}/../../data/flyvis-stimuli/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
+            eprintln!(
+                "skipping: {path} not found. Run \
+                 `uv run --project tools tools/export_stimuli.py` to generate it."
+            );
+            None
+        }
+    }
+}
+
+/// Loads a binary stimulus fixture, or `None` if the export has not been run.
+pub(crate) fn load_stimulus_bytes(name: &str) -> Option<Vec<u8>> {
+    let path = format!(
+        "{}/../../data/flyvis-stimuli/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    match std::fs::read(&path) {
+        Ok(b) => Some(b),
+        Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
+            eprintln!(
+                "skipping: {path} not found. Run \
+                 `uv run --project tools tools/export_stimuli.py` to generate it."
             );
             None
         }
