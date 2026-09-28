@@ -25,4 +25,4 @@ pub mod stimuli;
 
 pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
 pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, SpecErrorKind};
-pub use stimuli::{Stimulus, StimulusError, FULL_FIELD};
+pub use stimuli::{FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD};
