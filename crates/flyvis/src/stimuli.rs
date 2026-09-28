@@ -252,6 +252,151 @@ impl Stimulus for Flashes {
     }
 }
 
+/// Parameters for a family of single-ommatidium dot flashes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DotParams {
+    /// Hex radius of the receptor array. 15 gives 721 hexals.
+    pub extent: i32,
+    /// Radius of the lit disc around each centre. 0 lights one hexal.
+    pub dot_column_radius: i32,
+    /// Background intensity.
+    pub bg_intensity: f32,
+    /// The bright flash intensity. The dark one is its mirror below background.
+    pub intensity: f32,
+    /// Seconds the dot is shown.
+    pub t_stim: f32,
+    /// Seconds of background before the dot.
+    pub t_pre: f32,
+    /// Seconds of background after the dot.
+    pub t_post: f32,
+    /// Integration step, in seconds.
+    pub dt: f32,
+}
+
+impl DotParams {
+    /// flyvis's defaults, with `dt` supplied by the caller. See
+    /// [`FlashParams::flyvis_defaults`] for why `dt` has no default.
+    pub fn flyvis_defaults(dt: f32) -> Self {
+        DotParams {
+            extent: 15,
+            dot_column_radius: 0,
+            bg_intensity: 0.5,
+            intensity: 1.0,
+            t_stim: 5.0,
+            t_pre: 2.0,
+            t_post: 0.0,
+            dt,
+        }
+    }
+}
+
+/// Single-ommatidium flashes: every lattice position, both polarities.
+#[derive(Clone, Debug)]
+pub struct Dots {
+    n_hexals: usize,
+    n_frames: usize,
+    n_pre: usize,
+    n_stim: usize,
+    bg_intensity: f32,
+    /// Lattice coordinate of each centre, in lattice order.
+    centres: Vec<(i32, i32)>,
+    /// Lit hexals per centre.
+    masks: Vec<Vec<usize>>,
+    /// `[dark, bright]`.
+    intensities: [f32; 2],
+}
+
+impl Dots {
+    /// Builds the family. All 721 masks are computed once here.
+    pub fn new(params: DotParams) -> Self {
+        let centres: Vec<(i32, i32)> = hex_coords(params.extent).collect();
+        let n_hexals = centres.len();
+        let masks: Vec<Vec<usize>> = centres
+            .iter()
+            .map(|&c| disc_indices(params.extent, c, params.dot_column_radius))
+            .collect();
+
+        let n_pre = frame_count(params.t_pre, params.dt);
+        let n_stim = frame_count(params.t_stim, params.dt);
+        let n_post = frame_count(params.t_post, params.dt);
+
+        Dots {
+            n_hexals,
+            n_frames: n_pre + n_stim + n_post,
+            n_pre,
+            n_stim,
+            bg_intensity: params.bg_intensity,
+            centres,
+            masks,
+            // flyvis: `[2 * bg_intensity - intensity, intensity]` -- a dark
+            // flash mirrored below background, then a bright one.
+            intensities: [
+                2.0 * params.bg_intensity - params.intensity,
+                params.intensity,
+            ],
+        }
+    }
+
+    /// The lit centre for a sequence.
+    pub fn centre_of(&self, sequence: usize) -> Option<(i32, i32)> {
+        self.centres.get(sequence / 2).copied()
+    }
+
+    /// The flash intensity for a sequence: dark for even, bright for odd.
+    pub fn intensity_of(&self, sequence: usize) -> Option<f32> {
+        if sequence >= self.num_sequences() {
+            return None;
+        }
+        Some(self.intensities[sequence % 2])
+    }
+}
+
+impl Stimulus for Dots {
+    fn num_sequences(&self) -> usize {
+        self.centres.len() * 2
+    }
+
+    fn num_frames(&self) -> usize {
+        self.n_frames
+    }
+
+    fn num_hexals(&self) -> usize {
+        self.n_hexals
+    }
+
+    fn frame_into(
+        &self,
+        sequence: usize,
+        frame: usize,
+        out: &mut [f32],
+    ) -> Result<(), StimulusError> {
+        if sequence >= self.num_sequences() {
+            return Err(StimulusError::SequenceOutOfRange {
+                index: sequence,
+                count: self.num_sequences(),
+            });
+        }
+        if frame >= self.n_frames {
+            return Err(StimulusError::FrameOutOfRange { index: frame, count: self.n_frames });
+        }
+        if out.len() != self.n_hexals {
+            return Err(StimulusError::BufferLengthMismatch {
+                expected: self.n_hexals,
+                actual: out.len(),
+            });
+        }
+
+        out.fill(self.bg_intensity);
+        if frame >= self.n_pre && frame < self.n_pre + self.n_stim {
+            let intensity = self.intensities[sequence % 2];
+            for &i in &self.masks[sequence / 2] {
+                out[i] = intensity;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +475,10 @@ mod tests {
 
     fn flashes() -> Flashes {
         Flashes::new(FlashParams::flyvis_defaults(1.0 / 200.0))
+    }
+
+    fn dots() -> Dots {
+        Dots::new(DotParams::flyvis_defaults(1.0 / 200.0))
     }
 
     #[test]
@@ -428,5 +577,111 @@ mod tests {
         let f = flashes();
         assert_eq!(f.intensity_of(4), None);
         assert_eq!(f.radius_of(4), None);
+    }
+
+    #[test]
+    fn dots_have_flyvis_dimensions() {
+        let d = dots();
+        assert_eq!(d.num_sequences(), 1442, "721 centres x 2 polarities");
+        assert_eq!(d.num_frames(), 1400, "400 pre + 1000 stim + 0 post");
+        assert_eq!(d.num_hexals(), 721);
+    }
+
+    /// Ordering is centre-major, intensity-minor -- the OPPOSITE grouping from
+    /// flashes, though both follow the same `product`-varies-last rule. flyvis
+    /// uses `product(zip(u, v, offsets, coordinate_indices), intensities)`.
+    #[test]
+    fn dot_sequences_are_centre_major() {
+        let d = dots();
+        assert_eq!(d.centre_of(0), Some((-15, 0)));
+        assert_eq!(d.centre_of(1), Some((-15, 0)), "same centre, other polarity");
+        assert_eq!(d.centre_of(2), Some((-15, 1)), "next centre");
+        assert_eq!(d.centre_of(720), Some((0, 0)), "centre 360 is the origin");
+        assert_eq!(d.centre_of(1441), Some((15, 0)), "last centre, bright");
+    }
+
+    #[test]
+    fn dot_polarities_are_dark_then_bright() {
+        let d = dots();
+        assert_eq!(d.intensity_of(0), Some(0.0), "2 * 0.5 - 1.0 = 0.0, the dark flash");
+        assert_eq!(d.intensity_of(1), Some(1.0), "the bright flash");
+        assert_eq!(d.intensity_of(720), Some(0.0));
+        assert_eq!(d.intensity_of(721), Some(1.0));
+    }
+
+    #[test]
+    fn a_dot_lights_exactly_one_hexal() {
+        let d = dots();
+        let mut out = vec![0.0; 721];
+        d.frame_into(720, 400, &mut out).unwrap(); // origin centre, dark, first stim frame
+        assert_eq!(out.iter().filter(|&&x| x != 0.5).count(), 1);
+        assert_eq!(out[360], 0.0, "the origin hexal is the dark dot");
+    }
+
+    #[test]
+    fn a_bright_dot_lights_the_same_hexal() {
+        let d = dots();
+        let mut out = vec![0.0; 721];
+        d.frame_into(721, 400, &mut out).unwrap(); // origin centre, bright
+        assert_eq!(out[360], 1.0);
+        assert_eq!(out.iter().filter(|&&x| x == 0.5).count(), 720);
+    }
+
+    #[test]
+    fn the_dot_stimulus_block_is_frames_400_to_1399() {
+        let d = dots();
+        let lit = |frame: usize| {
+            let mut o = vec![0.0; 721];
+            d.frame_into(721, frame, &mut o).unwrap();
+            o[360] == 1.0
+        };
+        assert!(!lit(399), "frame 399 is still pre-stimulus");
+        assert!(lit(400), "frame 400 is the first stimulus frame");
+        assert!(lit(1399), "frame 1399 is the last, since t_post is 0");
+    }
+
+    #[test]
+    fn a_dot_pre_stimulus_frame_is_uniform_background() {
+        let d = dots();
+        let mut out = vec![0.0; 721];
+        d.frame_into(721, 0, &mut out).unwrap();
+        assert!(out.iter().all(|&x| x == 0.5));
+    }
+
+    /// A wider dot lights a filled disc, using the same inclusive rule as flashes.
+    #[test]
+    fn a_wider_dot_lights_a_filled_disc() {
+        let mut p = DotParams::flyvis_defaults(1.0 / 200.0);
+        p.dot_column_radius = 1;
+        let d = Dots::new(p);
+        let mut out = vec![0.0; 721];
+        d.frame_into(721, 400, &mut out).unwrap();
+        assert_eq!(out.iter().filter(|&&x| x == 1.0).count(), 7);
+    }
+
+    #[test]
+    fn dots_reject_a_bad_sequence_frame_or_buffer() {
+        let d = dots();
+        let mut out = vec![0.0; 721];
+        assert_eq!(
+            d.frame_into(1442, 0, &mut out),
+            Err(StimulusError::SequenceOutOfRange { index: 1442, count: 1442 })
+        );
+        assert_eq!(
+            d.frame_into(0, 1400, &mut out),
+            Err(StimulusError::FrameOutOfRange { index: 1400, count: 1400 })
+        );
+        let mut short = vec![0.0; 100];
+        assert_eq!(
+            d.frame_into(0, 0, &mut short),
+            Err(StimulusError::BufferLengthMismatch { expected: 721, actual: 100 })
+        );
+    }
+
+    #[test]
+    fn dot_accessors_return_none_past_the_end() {
+        let d = dots();
+        assert_eq!(d.centre_of(1442), None);
+        assert_eq!(d.intensity_of(1442), None);
     }
 }
