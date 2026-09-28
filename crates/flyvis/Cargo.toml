@@ -17,3 +17,4 @@ name = "semblance_flyvis"
 path = "src/lib.rs"
 
 [dependencies]
+semblance-connectome.workspace = true
