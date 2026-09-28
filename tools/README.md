@@ -53,6 +53,7 @@ uv run python <script>.py
 | `download_pretrained.py` | flyvis's pretrained model ensemble, fetched from upstream | `data/flyvis-pretrained/` |
 | `export_params.py` | the validation model's trained parameters, plus the full ensemble as data | `crates/flyvis/src/pretrained.rs`, `data/flyvis-pretrained/ensemble.csv` |
 | `export_build.py` | flyvis's own built connectome — nodes, connection types, offsets, scipy's convex hulls, and matplotlib's containment verdicts — as fixtures the Rust expansion is tested against | `data/flyvis-build/` |
+| `export_stimuli.py` | flyvis's own rendered flash stimuli in full, and a deterministic three-centre subset of the dot stimuli, alongside the hexal lattice order and each family's sequence order — as fixtures the Rust stimulus generators are checked against | `data/flyvis-stimuli/` |
 
 ## Provenance rule
 
