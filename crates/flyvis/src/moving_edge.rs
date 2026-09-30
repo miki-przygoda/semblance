@@ -1,0 +1,347 @@
+//! Moving edges: a wide bar whose leading edge sweeps across the eye, at
+//! twelve directions and six speeds.
+//!
+//! # This family is gated at a tolerance, and it is the only one that is
+//!
+//! Every other comparison in this workspace is element-wise: the connectome's
+//! 1,513,231 edges, the flash and dot families, the lattice ordering. This one
+//! is not, and reading "moving edges are gated against flyvis" as the same
+//! claim would be wrong.
+//!
+//! flyvis rasterises the bar into a 775x775 image, casts it to `uint8` --
+//! truncating, so its background 0.5 becomes 127/255 = 0.498039 -- and rotates
+//! that image through Pillow's bilinear resampler for eleven of the twelve
+//! angles. Reproducing those numbers bit-exactly would mean reimplementing
+//! Pillow's affine resampling.
+//!
+//! Instead this rotates the *sampling geometry*: for each pixel, inverse-rotate
+//! the query point about the monitor centre and test membership of the
+//! unrotated bar. Exact, uniform across all twelve directions, and with no
+//! external numerics to port. The cost is that our values and flyvis's differ
+//! by a small amount, measured at **max 0.00306 per hexal** with **zero hexals
+//! over 0.005** -- dominated by a near-uniform floor of `0.5 - 127/255 =
+//! 0.00196`, which is flyvis's quantised background and nothing else.
+//!
+//! # Structure
+//!
+//! flyvis never renders per frame. It renders the 21 offset positions once per
+//! (angle, intensity), then derives every speed from them by truncating-index
+//! selection. A six-speed sweep costs 21 renders, not six sequences' worth.
+//! This does the same.
+
+/// Parameters for a family of moving edges.
+///
+/// Every real-valued field is `f64`. This family's correctness is geometric --
+/// a half-pixel error in the rotation centre moves the agreement with flyvis
+/// from 0.003 to 0.032 -- and the frame counts are differences of truncations,
+/// where a last-bit difference can move a boundary by a whole frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MovingEdgeParams {
+    /// Hex radius of the receptor array. 15 gives 721 hexals.
+    pub extent: i32,
+    /// Pixels per ommatidium on the rendering monitor. flyvis uses 25, giving
+    /// 775x775.
+    pub ppo: usize,
+    /// Sweep directions, in **degrees**.
+    pub angles: Vec<i32>,
+    /// Speeds in half-ommatidia per second.
+    pub speeds: Vec<f64>,
+    /// Edge intensities. The background sits between them.
+    pub intensities: Vec<f64>,
+    /// First and last offset, inclusive, in half-ommatidia.
+    pub offsets: (i32, i32),
+    /// Bar width in half-ommatidia. `MovingEdge` hardcodes 80 -- a 180-degree
+    /// bar, wide enough that one of its edges is always off-monitor, which is
+    /// what turns a bar into an edge. `MovingBar` uses `[1, 2, 4]`.
+    pub width: i32,
+    /// Bar height in half-ommatidia.
+    pub height: i32,
+    /// Where offset 0 sits before rotation, in radians. `MovingEdge` uses
+    /// `radians(0)`; `MovingBar` uses `radians(90)`.
+    pub bar_loc_horizontal: f64,
+    /// Vertical anchor, in radians. `radians(90)` is the monitor's middle.
+    pub bar_loc_vertical: f64,
+    /// Background intensity.
+    pub bg_intensity: f64,
+    /// The **spatial** unit: widths, offsets and height are multiples of it.
+    pub led_width: f64,
+    /// The **temporal** unit: converts speeds into durations, and nothing else.
+    pub omm_width: f64,
+    /// Seconds of background before the sweep.
+    pub t_pre: f64,
+    /// Seconds after the sweep, holding the final frame.
+    pub t_post: f64,
+    /// Integration step, in seconds.
+    pub dt: f64,
+}
+
+impl MovingEdgeParams {
+    /// flyvis's `MovingEdge` defaults, with `dt` supplied by the caller.
+    ///
+    /// There is deliberately no default `dt`. The dynamics use
+    /// `1 / max(tau, dt)`, so `dt` decides which cell types are floored -- it
+    /// is a modelling choice, not a convenience. flyvis's own response analyses
+    /// use `1.0 / 200.0`.
+    pub fn flyvis_defaults(dt: f64) -> Self {
+        MovingEdgeParams {
+            extent: 15,
+            ppo: 25,
+            angles: vec![0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330],
+            speeds: vec![2.4, 4.8, 9.7, 13.0, 19.0, 25.0],
+            intensities: vec![0.0, 1.0],
+            offsets: (-10, 10),
+            width: 80,
+            height: 9,
+            bar_loc_horizontal: 0.0,
+            bar_loc_vertical: std::f64::consts::FRAC_PI_2,
+            bg_intensity: 0.5,
+            led_width: 2.25f64.to_radians(),
+            omm_width: 5.8f64.to_radians(),
+            t_pre: 1.0,
+            t_post: 1.0,
+            dt,
+        }
+    }
+}
+
+/// The unrotated bar's extent in monitor pixels, per offset.
+///
+/// The row band is fixed; only the columns move. flyvis's bar is 775 px wide on
+/// a 775 px monitor, so its left edge is always off-monitor and `start` clamps
+/// to 0 -- what sweeps is the right edge.
+// This task produces `BarGeometry` and `inverse_rotate` for the rasteriser
+// built in Tasks 4 and 5; nothing in this crate calls them yet, so rustc sees
+// them as dead outside the `#[cfg(test)]` module below.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct BarGeometry {
+    /// `[first, last)` rows.
+    pub rows: (i64, i64),
+    /// Per offset, `[first, last)` columns.
+    pub cols: Vec<(i64, i64)>,
+}
+
+#[allow(dead_code)]
+impl BarGeometry {
+    /// Reproduces flyvis's integer pixel arithmetic exactly.
+    ///
+    /// Every cast below is a truncation toward zero, matching Python's `int()`.
+    /// Rust's `as` on `f64` truncates toward zero too, so `-9.6875 as i64` is
+    /// `-9` in both languages -- `floor` would give `-10` and shift the whole
+    /// negative half of the sweep by a pixel.
+    pub(crate) fn new(params: &MovingEdgeParams, monitor_px: usize) -> Self {
+        let monitor = monitor_px as f64;
+        let ppo = params.ppo as f64;
+        let pi = std::f64::consts::PI;
+
+        let bar_width_px =
+            (params.width as f64 * params.led_width / params.omm_width * ppo) as i64;
+        let bar_height_px =
+            (params.height as f64 * params.led_width / params.omm_width * ppo) as i64;
+        let loc_vertical_px = (monitor * params.bar_loc_vertical / pi) as i64;
+
+        let rows = (
+            (loc_vertical_px as f64 - bar_height_px as f64 / 2.0) as i64,
+            (loc_vertical_px as f64 + bar_height_px as f64 / 2.0) as i64 + 1,
+        );
+
+        let cols = (params.offsets.0..=params.offsets.1)
+            .map(|k| {
+                let theta = params.bar_loc_horizontal + k as f64 * params.led_width;
+                let loc_horizontal_px = (monitor * theta / pi) as i64;
+                let loc_w =
+                    (loc_horizontal_px as f64 - bar_width_px as f64 / 2.0) as i64;
+                // flyvis loops over `n_bars`; MovingEdge always has one, so the
+                // spacing term drops out and only the first bar is drawn.
+                (loc_w.max(0), loc_w + bar_width_px + 1)
+            })
+            .collect();
+
+        BarGeometry { rows, cols }
+    }
+
+    /// How many offset positions the sweep visits -- 21 at the defaults.
+    pub(crate) fn num_offsets(&self) -> usize {
+        self.cols.len()
+    }
+}
+
+/// The source pixel that `(col, row)` samples when the image is rotated by
+/// `angle_deg`, clamped to the monitor.
+///
+/// # The centre is `monitor/2 - 0.5`, not `monitor/2`
+///
+/// Pillow rotates about `(w/2, h/2)` in *continuous* coordinates, but its
+/// transform samples the output pixel at `x + 0.5` and its bilinear filter
+/// subtracts 0.5 before interpolating. The two halves cancel into a rotation
+/// about `w/2 - 0.5` in *index* coordinates -- 387.0 on a 775 px monitor, which
+/// is also exactly where the origin ommatidium sits.
+///
+/// Measured end to end against flyvis's own renderer: 387.0 agrees to a maximum
+/// of 0.00306 per hexal, 387.5 to 0.03185 with up to 39 hexals over 0.01. Both
+/// produce a perfectly plausible moving edge.
+///
+/// # The clamp
+///
+/// flyvis pads the image to its diagonal with `mode="edge"` before rotating, so
+/// pixels that rotate in from off-monitor take the nearest edge pixel's value.
+/// Clamping the source coordinate reproduces that exactly. Returning background
+/// instead would put a grey wedge in the corner of every rotated frame.
+///
+/// No angle needs special-casing. At 0 degrees the sine is exactly zero and
+/// this is the identity; at 90, 180 and 270 the residual sine or cosine is
+/// around 1e-16, which shifts the source by at most 5e-14 px and cannot change
+/// a rounded integer.
+// Consumed starting in Task 4; unused in production code within this task.
+#[allow(dead_code)]
+pub(crate) fn inverse_rotate(
+    angle_deg: i32,
+    monitor_px: usize,
+    col: usize,
+    row: usize,
+) -> (i64, i64) {
+    let last = monitor_px as i64 - 1;
+    let centre = monitor_px as f64 / 2.0 - 0.5;
+    let (sin, cos) = (angle_deg as f64).to_radians().sin_cos();
+    let (dx, dy) = (col as f64 - centre, row as f64 - centre);
+    let x = (cos * dx - sin * dy + centre).round() as i64;
+    let y = (sin * dx + cos * dy + centre).round() as i64;
+    (x.clamp(0, last), y.clamp(0, last))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> MovingEdgeParams {
+        MovingEdgeParams::flyvis_defaults(1.0 / 200.0)
+    }
+
+    /// The three MovingEdge overrides. Every one of them is inherited wrongly
+    /// from MovingBar by default, and every one produces a plausible edge.
+    #[test]
+    fn the_defaults_are_movingedges_not_movingbars() {
+        let p = params();
+        assert_eq!(p.width, 80, "MovingBar uses [1, 2, 4]");
+        assert_eq!(p.bar_loc_horizontal, 0.0, "MovingBar uses radians(90)");
+        assert_eq!(p.angles.len(), 12);
+        assert_eq!(p.angles[1], 30);
+        assert_eq!(p.speeds, vec![2.4, 4.8, 9.7, 13.0, 19.0, 25.0]);
+        assert_eq!(p.intensities, vec![0.0, 1.0]);
+        assert_eq!(p.offsets, (-10, 10));
+        assert_eq!(p.height, 9);
+        assert_eq!((p.t_pre, p.t_post), (1.0, 1.0));
+    }
+
+    /// `led_width` (2.25 deg) is the SPATIAL unit; `omm_width` (5.8 deg) only
+    /// ever converts speeds into durations. Swapping them scales every offset
+    /// by 2.6x and still sweeps an edge across the eye.
+    #[test]
+    fn the_two_angular_units_are_not_interchangeable() {
+        let p = params();
+        assert!((p.led_width - 2.25f64.to_radians()).abs() < 1e-15);
+        assert!((p.omm_width - 5.8f64.to_radians()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn the_bar_covers_88_rows_at_the_monitor_centre() {
+        let g = BarGeometry::new(&params(), 775);
+        assert_eq!(g.rows, (343, 431), "bar_height_px 87 centred on row 387");
+    }
+
+    /// Every one of the 21 offsets, against flyvis's own integer arithmetic.
+    /// The bar is anchored at column 0 and its right edge sweeps rightward.
+    #[test]
+    fn the_21_offsets_match_flyviss_pixel_arithmetic() {
+        let g = BarGeometry::new(&params(), 775);
+        let want: [(i64, i64); 21] = [
+            (0, 293), (0, 302), (0, 312), (0, 322), (0, 331), (0, 341), (0, 351),
+            (0, 360), (0, 370), (0, 380), (0, 389), (0, 398), (0, 408), (0, 418),
+            (0, 427), (0, 437), (0, 447), (0, 456), (0, 466), (0, 476), (0, 485),
+        ];
+        assert_eq!(g.num_offsets(), 21);
+        assert_eq!(g.cols.as_slice(), want.as_slice());
+    }
+
+    /// The right edge advances monotonically, which is what makes this an edge
+    /// sweeping in one direction rather than a bar flickering.
+    #[test]
+    fn the_leading_edge_only_ever_advances() {
+        let g = BarGeometry::new(&params(), 775);
+        assert!(g.cols.windows(2).all(|w| w[0].1 < w[1].1));
+    }
+
+    /// `int()` truncates toward zero, so offset -1 gives -9 px and offset +1
+    /// gives +9. `floor` would give -10 for the negative half and shift the
+    /// whole negative sweep by a pixel.
+    #[test]
+    fn offsets_truncate_toward_zero_rather_than_flooring() {
+        let g = BarGeometry::new(&params(), 775);
+        // offset 0 -> loc_w -387 -> stop 389; offset -1 -> loc_w -396 -> 380.
+        // The gap either side of centre is 9, symmetric. Flooring the negative
+        // side would make it 10.
+        assert_eq!(g.cols[10].1 - g.cols[9].1, 9);
+        assert_eq!(g.cols[11].1 - g.cols[10].1, 9);
+    }
+
+    /// No rotation at 0 degrees: the source pixel is the query pixel.
+    #[test]
+    fn zero_degrees_is_the_identity() {
+        for (c, r) in [(0, 0), (387, 387), (774, 774), (100, 700)] {
+            assert_eq!(inverse_rotate(0, 775, c, r), (c as i64, r as i64));
+        }
+    }
+
+    /// The rotation centre is `monitor/2 - 0.5` = 387.0, NOT 387.5. Pillow
+    /// samples the output pixel at `x + 0.5` and its bilinear filter subtracts
+    /// 0.5 again. Measured end to end: 387.0 agrees with flyvis to 0.003 and
+    /// 387.5 to 0.032, with up to 39 hexals over 0.01.
+    #[test]
+    fn the_rotation_centre_is_387_not_387_5() {
+        // 180 degrees about 387.0 maps 387 + d to 387 - d, exactly.
+        assert_eq!(inverse_rotate(180, 775, 387, 387), (387, 387));
+        assert_eq!(inverse_rotate(180, 775, 400, 387), (374, 387));
+        assert_eq!(inverse_rotate(180, 775, 387, 400), (387, 374));
+        // About 387.5 these would be 375 and 375. Assert they are not.
+        assert_ne!(inverse_rotate(180, 775, 400, 387), (375, 387));
+    }
+
+    /// 90 degrees is a quarter turn about the same centre.
+    #[test]
+    fn ninety_degrees_is_an_exact_quarter_turn() {
+        assert_eq!(inverse_rotate(90, 775, 387, 387), (387, 387));
+        // (col, row) = (400, 387) -> offset (13, 0) -> rotated to (0, 13).
+        assert_eq!(inverse_rotate(90, 775, 400, 387), (387, 400));
+        assert_eq!(inverse_rotate(90, 775, 387, 400), (374, 387));
+    }
+
+    /// Inverse-rotating by an angle and then by its negation returns the
+    /// original pixel, up to the rounding each step does.
+    #[test]
+    fn rotating_by_an_angle_and_back_returns_the_pixel() {
+        for angle in [30, 60, 120, 150, 210, 240, 300, 330] {
+            for (c, r) in [(387, 387), (400, 390), (300, 500), (200, 200)] {
+                let (x, y) = inverse_rotate(angle, 775, c, r);
+                let (bx, by) = inverse_rotate(360 - angle, 775, x as usize, y as usize);
+                assert!(
+                    (bx - c as i64).abs() <= 1 && (by - r as i64).abs() <= 1,
+                    "angle {angle}: ({c}, {r}) -> ({x}, {y}) -> ({bx}, {by})"
+                );
+            }
+        }
+    }
+
+    /// Source coordinates are clamped to the monitor, which reproduces flyvis's
+    /// `np.pad(..., mode="edge")` before the rotation. Without the clamp,
+    /// pixels that rotate in from off-monitor would read as background and put
+    /// a spurious grey wedge in every rotated frame.
+    #[test]
+    fn source_coordinates_are_clamped_to_the_monitor() {
+        for angle in [30, 150, 210, 330] {
+            for (c, r) in [(0, 0), (774, 0), (0, 774), (774, 774), (387, 0)] {
+                let (x, y) = inverse_rotate(angle, 775, c, r);
+                assert!((0..775).contains(&x) && (0..775).contains(&y), "angle {angle} at ({c}, {r})");
+            }
+        }
+    }
+}

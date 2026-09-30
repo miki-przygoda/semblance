@@ -16,6 +16,7 @@ pub mod expand;
 #[cfg(test)]
 mod expand_checks;
 pub mod hex_eye;
+pub mod moving_edge;
 pub mod pretrained;
 #[cfg(test)]
 mod pretrained_checks;
