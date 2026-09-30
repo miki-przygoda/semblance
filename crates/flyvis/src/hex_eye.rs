@@ -40,10 +40,8 @@ pub struct HexEye {
     dist_to_vertex: f64,
     /// Row-major, `monitor_px * monitor_px`. [`NO_OWNER`] where no ommatidium
     /// claims the pixel.
-    #[allow(dead_code)] // read in Task 2
     owners: Vec<u16>,
     /// Pixels owned, per hexal. flyvis calls this `kernel_sum`.
-    #[allow(dead_code)] // read in Task 2
     kernel_sum: Vec<u32>,
 }
 
@@ -55,7 +53,7 @@ impl HexEye {
     ///
     /// # Panics
     ///
-    /// If `extent` is negative.
+    /// If `extent` is negative, or if a pixel falls inside two ommatidia.
     pub fn new(extent: i32, ppo: usize) -> Self {
         assert!(extent >= 0, "extent must not be negative, got {extent}");
         let across = 2 * extent + 1;
@@ -79,7 +77,7 @@ impl HexEye {
         let dist_to_edge = (dist_w + dist_h) / 4.0;
         let dist_to_vertex = 2.0 / 3.0f64.sqrt() * dist_to_edge;
 
-        let (owners, kernel_sum) = build_owners(monitor_px, &centres, dist_to_vertex);
+        let (owners, kernel_sum) = build_owners(monitor_px, &centres, dist_to_edge, dist_to_vertex);
 
         HexEye { monitor_px, centres, dist_to_edge, dist_to_vertex, owners, kernel_sum }
     }
@@ -108,15 +106,147 @@ impl HexEye {
     pub fn dist_to_vertex(&self) -> f64 {
         self.dist_to_vertex
     }
+
+    /// Which ommatidium owns the pixel at `(col, row)`, or `None` if none does.
+    ///
+    /// Note the argument order: **column then row**. 36% of the monitor's
+    /// pixels are owned by nothing.
+    pub fn owner(&self, col: usize, row: usize) -> Option<usize> {
+        if col >= self.monitor_px || row >= self.monitor_px {
+            return None;
+        }
+        match self.owners[row * self.monitor_px + col] {
+            NO_OWNER => None,
+            h => Some(h as usize),
+        }
+    }
+
+    /// The whole ownership map, row-major, [`NO_OWNER`] where unowned.
+    pub fn owners(&self) -> &[u16] {
+        &self.owners
+    }
+
+    /// Pixels owned, per ommatidium. flyvis calls this `kernel_sum`, and it is
+    /// the divisor that turns a pixel sum into an ommatidium's mean.
+    pub fn kernel_sum(&self) -> &[u32] {
+        &self.kernel_sum
+    }
 }
 
-/// Placeholder: Task 2 replaces this with the real point-in-hexagon scan.
+/// Whether the point `(x, y)` lies inside the hexagon centred on `centre`.
+///
+/// Six half-plane sign tests, one per edge, exactly as flyvis does it: for each
+/// edge, evaluate the edge's line at the query point and at the hexagon's own
+/// centre, and require the two to fall on the same side.
+///
+/// `tilt` is zero throughout flyvis, so the vertices sit at 0, 60, ... 300
+/// degrees -- a vertex on the horizontal axis, flats above and below. Rather
+/// than build those vertices with `cos`/`sin`, this uses their exact closed
+/// forms in terms of `dist_to_vertex` (the vertex on the horizontal axis) and
+/// `dist_to_edge` (the flats above and below) -- `dist_to_vertex * sin(60deg)`
+/// is mathematically `dist_to_edge`, so no trigonometry is needed to get
+/// there. This is not merely style: the half-plane test below compares signs
+/// of a value that passes through exactly zero right at the boundary, so a
+/// single ULP of difference in a vertex coordinate can flip which side of an
+/// edge a boundary pixel falls on. `cos`/`sin` are not required to be
+/// correctly rounded by IEEE 754 and do differ by an ULP across libm
+/// implementations, which made the ownership counts non-reproducible.
+/// `f64::sqrt` (used to derive `dist_to_vertex` from `dist_to_edge`) *is*
+/// required to be correctly rounded, so this construction is bit-exact
+/// everywhere.
+///
+/// A point exactly on an edge has sign 0, which matches neither `+1` nor `-1`,
+/// so it is **excluded**. That is flyvis's behaviour (`torch.sign`), not an
+/// oversight, and it is part of why no pixel gets two owners.
+pub(crate) fn contains(
+    centre: (f64, f64),
+    dist_to_edge: f64,
+    dist_to_vertex: f64,
+    x: f64,
+    y: f64,
+) -> bool {
+    let (xc, yc) = centre;
+    let verts = [
+        (dist_to_vertex, 0.0),
+        (dist_to_vertex / 2.0, dist_to_edge),
+        (-dist_to_vertex / 2.0, dist_to_edge),
+        (-dist_to_vertex, 0.0),
+        (-dist_to_vertex / 2.0, -dist_to_edge),
+        (dist_to_vertex / 2.0, -dist_to_edge),
+        (dist_to_vertex, 0.0),
+    ];
+    for i in 0..6 {
+        let (x1, y1) = (verts[i].0 + xc, verts[i].1 + yc);
+        let (x2, y2) = (verts[i + 1].0 + xc, verts[i + 1].1 + yc);
+        let slope = (y2 - y1) / (x2 - x1);
+        let f_centre = y1 + slope * (xc - x1) - yc;
+        let f_point = y1 + slope * (x - x1) - y;
+        if sign(f_centre) != sign(f_point) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `-1`, `0` or `1`, matching `torch.sign`. Zero is its own case, so a point on
+/// an edge is outside.
+fn sign(v: f64) -> i32 {
+    if v > 0.0 {
+        1
+    } else if v < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+/// Scans every pixel of every ommatidium's bounding box and records the owner.
+///
+/// # Panics
+///
+/// If a pixel falls inside two ommatidia. One `u16` per pixel cannot represent
+/// that, and silently keeping the first or last owner would corrupt every frame
+/// by a little.
 fn build_owners(
     monitor_px: usize,
     centres: &[(f64, f64)],
-    _dist_to_vertex: f64,
+    dist_to_edge: f64,
+    dist_to_vertex: f64,
 ) -> (Vec<u16>, Vec<u32>) {
-    (vec![NO_OWNER; monitor_px * monitor_px], vec![0; centres.len()])
+    assert!(
+        centres.len() < NO_OWNER as usize,
+        "{} ommatidia does not fit a u16 owner index",
+        centres.len()
+    );
+    let mut owners = vec![NO_OWNER; monitor_px * monitor_px];
+    let mut kernel_sum = vec![0u32; centres.len()];
+    let last = monitor_px - 1;
+
+    for (h, &c) in centres.iter().enumerate() {
+        let lo_c = (c.0 - dist_to_vertex).floor().max(0.0) as usize;
+        let hi_c = ((c.0 + dist_to_vertex).ceil().max(0.0) as usize).min(last);
+        let lo_r = (c.1 - dist_to_vertex).floor().max(0.0) as usize;
+        let hi_r = ((c.1 + dist_to_vertex).ceil().max(0.0) as usize).min(last);
+        if lo_c > hi_c || lo_r > hi_r {
+            continue;
+        }
+        for row in lo_r..=hi_r {
+            for col in lo_c..=hi_c {
+                if !contains(c, dist_to_edge, dist_to_vertex, col as f64, row as f64) {
+                    continue;
+                }
+                let slot = &mut owners[row * monitor_px + col];
+                assert_eq!(
+                    *slot, NO_OWNER,
+                    "pixel ({col}, {row}) is inside both ommatidium {} and {h}",
+                    *slot
+                );
+                *slot = h as u16;
+                kernel_sum[h] += 1;
+            }
+        }
+    }
+    (owners, kernel_sum)
 }
 
 #[cfg(test)]
@@ -203,5 +333,110 @@ mod tests {
         }
         assert_eq!((lo_x, hi_x), (12.0, 762.0));
         assert_eq!((lo_y, hi_y), (12.0, 762.0));
+    }
+
+    /// The load-bearing invariant. flyvis stores a dense (600625, 721)
+    /// boolean; one `u16` per pixel only replaces it if no pixel is ever
+    /// inside two footprints. Measured true in f64 AND in flyvis's own fp16
+    /// mask -- but checked, not assumed, because the lattice pitch and the
+    /// hexagon size are set independently and nothing in flyvis enforces this.
+    #[test]
+    fn no_pixel_belongs_to_two_ommatidia() {
+        let e = eye();
+        // HexEye::new panics if this is violated; reaching here is the
+        // assertion. Re-derive it independently so the test is not merely
+        // re-running the constructor's own check.
+        let mut claims = vec![0u8; 775 * 775];
+        for h in 0..e.num_hexals() {
+            let c = e.centre(h).unwrap();
+            let dte = e.dist_to_edge();
+            let dtv = e.dist_to_vertex();
+            let lo_c = (c.0 - dtv).floor().max(0.0) as usize;
+            let hi_c = ((c.0 + dtv).ceil() as usize).min(774);
+            let lo_r = (c.1 - dtv).floor().max(0.0) as usize;
+            let hi_r = ((c.1 + dtv).ceil() as usize).min(774);
+            for row in lo_r..=hi_r {
+                for col in lo_c..=hi_c {
+                    if contains(c, dte, dtv, col as f64, row as f64) {
+                        claims[row * 775 + col] += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(claims.iter().filter(|&&n| n > 1).count(), 0, "pixels claimed twice");
+    }
+
+    /// Measured against flyvis 1.2.0. If these move, something in the geometry
+    /// moved -- report it, do not re-pin the constants.
+    #[test]
+    fn ownership_counts_match_what_was_measured() {
+        let e = eye();
+        let owned = e.owners().iter().filter(|&&o| o != NO_OWNER).count();
+        assert_eq!(owned, 383_613, "pixels owned by some ommatidium");
+        assert_eq!(775 * 775 - owned, 217_012, "pixels owned by none (36%)");
+        let ks = e.kernel_sum();
+        assert_eq!(ks.len(), 721);
+        assert_eq!(ks.iter().sum::<u32>() as usize, owned, "kernel sums must total the owned pixels");
+        assert_eq!(*ks.iter().min().unwrap(), 518, "smallest footprint, clipped by the monitor edge");
+        assert_eq!(*ks.iter().max().unwrap(), 541, "largest footprint, fully on the monitor");
+    }
+
+    /// Every ommatidium samples something. A zero here would divide by zero in
+    /// the renderer.
+    #[test]
+    fn every_ommatidium_owns_at_least_one_pixel() {
+        assert!(eye().kernel_sum().iter().all(|&n| n > 0));
+    }
+
+    /// The origin hexal is index 360 and sits on pixel (387, 387).
+    #[test]
+    fn the_centre_pixel_belongs_to_the_origin_hexal() {
+        let e = eye();
+        assert_eq!(e.owner(387, 387), Some(360));
+    }
+
+    /// `owner` takes (column, row) -- NOT (row, column). Swapping them
+    /// transposes the whole eye and still returns 721 plausible values, so this
+    /// picks a hexal that is far off the diagonal.
+    #[test]
+    fn owner_takes_column_then_row() {
+        let e = eye();
+        // Hexal (u, v) = (0, 10): x = 25*10 + 387 = 637, y = 25*5 + 387 = 512.
+        let h = crate::expand::hex_coords(15).position(|p| p == (0, 10)).unwrap();
+        assert_eq!(e.centre(h), Some((637.0, 512.0)));
+        assert_eq!(e.owner(637, 512), Some(h), "(column, row)");
+        assert_ne!(e.owner(512, 637), Some(h), "(row, column) must NOT work");
+    }
+
+    /// The monitor's corners fall outside the hexagonal lattice entirely.
+    #[test]
+    fn the_monitor_corners_belong_to_no_ommatidium() {
+        let e = eye();
+        for (c, r) in [(0, 0), (774, 0), (0, 774), (774, 774)] {
+            assert_eq!(e.owner(c, r), None, "corner ({c}, {r})");
+        }
+    }
+
+    #[test]
+    fn owner_rejects_coordinates_off_the_monitor() {
+        let e = eye();
+        assert_eq!(e.owner(775, 0), None);
+        assert_eq!(e.owner(0, 775), None);
+    }
+
+    /// Hand-computed: the hexagon has vertices on the horizontal axis at
+    /// +/-dist_to_vertex and flats above and below at +/-dist_to_edge.
+    #[test]
+    fn contains_agrees_with_hand_computed_cases() {
+        let c = (100.0, 100.0);
+        let dte = 12.5;
+        let dtv = 2.0 / 3.0f64.sqrt() * dte;
+        assert!(contains(c, dte, dtv, 100.0, 100.0), "the centre");
+        assert!(contains(c, dte, dtv, 114.0, 100.0), "just inside the right vertex");
+        assert!(!contains(c, dte, dtv, 115.0, 100.0), "just outside the right vertex");
+        assert!(contains(c, dte, dtv, 100.0, 112.0), "just inside the bottom flat");
+        assert!(!contains(c, dte, dtv, 100.0, 113.0), "just outside the bottom flat");
+        // A corner of the bounding box, outside the hexagon.
+        assert!(!contains(c, dte, dtv, 114.0, 112.0));
     }
 }
