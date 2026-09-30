@@ -15,9 +15,10 @@
 //! - **The footprints do not tile the monitor.** The lattice pitch is `ppo` in
 //!   both axes while the hexagons are regular, so 36% of the monitor's pixels
 //!   fall inside no ommatidium at all. They are simply never sampled.
-//! - **flyvis builds this mask in `float16`.** We use `f64`. 2,052 of 600,625
-//!   pixels end up assigned differently, which is one of the components the
-//!   moving-edge tolerance gate measures.
+//! - **flyvis builds this mask in `float16`.** We use `f64`. Measured offline
+//!   against flyvis 1.2.0, 2,052 of 600,625 pixels end up assigned
+//!   differently. No test in this commit checks that number -- nothing here
+//!   compares the two masks.
 //!
 //! What both masks agree on, and what this module depends on, is that **no
 //! pixel is ever inside two footprints**. That is checked in
@@ -53,9 +54,11 @@ impl HexEye {
     ///
     /// # Panics
     ///
-    /// If `extent` is negative, or if a pixel falls inside two ommatidia.
+    /// If `extent` is negative, if `ppo` is zero, or if a pixel falls inside
+    /// two ommatidia.
     pub fn new(extent: i32, ppo: usize) -> Self {
         assert!(extent >= 0, "extent must not be negative, got {extent}");
+        assert!(ppo > 0, "ppo must not be zero");
         let across = 2 * extent + 1;
         let monitor_px = ppo * across as usize;
 
@@ -145,15 +148,21 @@ impl HexEye {
 /// forms in terms of `dist_to_vertex` (the vertex on the horizontal axis) and
 /// `dist_to_edge` (the flats above and below) -- `dist_to_vertex * sin(60deg)`
 /// is mathematically `dist_to_edge`, so no trigonometry is needed to get
-/// there. This is not merely style: the half-plane test below compares signs
-/// of a value that passes through exactly zero right at the boundary, so a
-/// single ULP of difference in a vertex coordinate can flip which side of an
-/// edge a boundary pixel falls on. `cos`/`sin` are not required to be
-/// correctly rounded by IEEE 754 and do differ by an ULP across libm
-/// implementations, which made the ownership counts non-reproducible.
-/// `f64::sqrt` (used to derive `dist_to_vertex` from `dist_to_edge`) *is*
-/// required to be correctly rounded, so this construction is bit-exact
-/// everywhere.
+/// there.
+///
+/// This is not merely style: the half-plane test below compares signs of a
+/// value that passes through exactly zero right at the boundary, so a single
+/// ULP of difference in a vertex coordinate can flip which side of an edge a
+/// boundary pixel falls on. `cos`/`sin` are not required by IEEE 754 to be
+/// correctly rounded, so they are not guaranteed to produce the same bits on
+/// every platform -- measured against the closed form used here, five of the
+/// six vertices differ from what `cos`/`sin` compute, by 1 to 14 ULP
+/// depending on the vertex and axis, and at 180 degrees `cos`/`sin` gives
+/// `-4.64e-15` where the closed form gives an exact `0.0`. `f64::sqrt` (used
+/// to derive `dist_to_vertex` from `dist_to_edge`) *is* required to be
+/// correctly rounded, so this construction -- unlike one built from
+/// `cos`/`sin` -- is **bit-exact**: the same bits on every platform, not
+/// merely the same bits `cos`/`sin` would have produced.
 ///
 /// A point exactly on an edge has sign 0, which matches neither `+1` nor `-1`,
 /// so it is **excluded**. That is flyvis's behaviour (`torch.sign`), not an
@@ -335,18 +344,13 @@ mod tests {
         assert_eq!((lo_y, hi_y), (12.0, 762.0));
     }
 
-    /// The load-bearing invariant. flyvis stores a dense (600625, 721)
-    /// boolean; one `u16` per pixel only replaces it if no pixel is ever
-    /// inside two footprints. Measured true in f64 AND in flyvis's own fp16
-    /// mask -- but checked, not assumed, because the lattice pitch and the
-    /// hexagon size are set independently and nothing in flyvis enforces this.
-    #[test]
-    fn no_pixel_belongs_to_two_ommatidia() {
-        let e = eye();
-        // HexEye::new panics if this is violated; reaching here is the
-        // assertion. Re-derive it independently so the test is not merely
-        // re-running the constructor's own check.
+    /// Re-derives ownership from the module's geometry primitives alone --
+    /// `centre`, `dist_to_edge`, `dist_to_vertex` and `contains` -- without
+    /// reading anything `build_owners` wrote. Returns how many ommatidia claim
+    /// each pixel, and the owner each one would get.
+    fn independent_scan(e: &HexEye) -> (Vec<u8>, Vec<u16>) {
         let mut claims = vec![0u8; 775 * 775];
+        let mut owner = vec![NO_OWNER; 775 * 775];
         for h in 0..e.num_hexals() {
             let c = e.centre(h).unwrap();
             let dte = e.dist_to_edge();
@@ -358,12 +362,45 @@ mod tests {
             for row in lo_r..=hi_r {
                 for col in lo_c..=hi_c {
                     if contains(c, dte, dtv, col as f64, row as f64) {
-                        claims[row * 775 + col] += 1;
+                        let idx = row * 775 + col;
+                        claims[idx] += 1;
+                        owner[idx] = h as u16;
                     }
                 }
             }
         }
+        (claims, owner)
+    }
+
+    /// The geometry: no two footprints overlap. This is what makes one `u16`
+    /// per pixel able to replace flyvis's dense (600625, 721) boolean.
+    #[test]
+    fn no_pixel_belongs_to_two_ommatidia() {
+        let (claims, _) = independent_scan(&eye());
         assert_eq!(claims.iter().filter(|&&n| n > 1).count(), 0, "pixels claimed twice");
+    }
+
+    /// The scan: `build_owners` wrote what the geometry implies. A mutation
+    /// test showed the invariant check above passes even when `build_owners`
+    /// is corrupted, because it never reads what `build_owners` produced.
+    #[test]
+    fn build_owners_agrees_with_an_independent_scan() {
+        let e = eye();
+        let (_, want) = independent_scan(&e);
+        if let Some(i) = want.iter().zip(e.owners()).position(|(a, b)| a != b) {
+            panic!(
+                "pixel (col {}, row {}): independent scan says {:?}, build_owners says {:?}",
+                i % 775, i / 775, want[i], e.owners()[i]
+            );
+        }
+        // kernel_sum must be the same map, counted.
+        let mut counts = vec![0u32; e.num_hexals()];
+        for &o in &want {
+            if o != NO_OWNER {
+                counts[o as usize] += 1;
+            }
+        }
+        assert_eq!(counts, e.kernel_sum());
     }
 
     /// Measured against flyvis 1.2.0. If these move, something in the geometry
