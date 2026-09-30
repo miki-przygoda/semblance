@@ -52,6 +52,10 @@ impl HexEye {
     ///
     /// `extent` is the hex radius (15 gives 721 ommatidia) and `ppo` the pixels
     /// per ommatidium (flyvis uses 25, giving a 775x775 monitor).
+    ///
+    /// # Panics
+    ///
+    /// If `extent` is negative.
     pub fn new(extent: i32, ppo: usize) -> Self {
         assert!(extent >= 0, "extent must not be negative, got {extent}");
         let across = 2 * extent + 1;
