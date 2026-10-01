@@ -22,6 +22,7 @@ Run by hand:  uv run --project tools tools/export_moving_edges.py
 """
 
 import datetime
+import inspect
 import json
 import pathlib
 import sys
@@ -101,6 +102,11 @@ def main() -> int:
     print(f"  background at angle 30: {quantised:.6f} (127/255 = {127/255:.6f})")
 
     # -- timing ---------------------------------------------------------------
+    n_angles = len(inspect.signature(MovingEdge.__init__).parameters["angles"].default)
+    n_intensities = len(edge.intensities)
+    assert n_angles == 12, f"flyvis's own MovingEdge.__init__ default has {n_angles} angles"
+    assert n_intensities == 2, f"flyvis's own MovingEdge instance has {n_intensities} intensities"
+
     speeds = [float(s) for s in edge.speeds]
     t_stim = [float(t) for t in edge.t_stim]
     n_frames = int(next(iter(edge.sequences.values())).shape[-2])
@@ -125,7 +131,7 @@ def main() -> int:
                 "dt": DT,
                 "n_frames": n_frames,
                 "t_stim_max": float(edge.t_stim_max),
-                "n_sequences_full_family": 12 * 2 * len(speeds),
+                "n_sequences_full_family": n_angles * n_intensities * len(speeds),
                 "speeds": timing,
             },
             indent=2,

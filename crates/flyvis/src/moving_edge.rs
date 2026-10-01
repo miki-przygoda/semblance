@@ -178,8 +178,11 @@ impl BarGeometry {
 /// is also exactly where the origin ommatidium sits.
 ///
 /// Measured end to end against flyvis's own renderer: 387.0 agrees to a maximum
-/// of 0.00306 per hexal, 387.5 to 0.03185 with up to 39 hexals over 0.01. Both
-/// produce a perfectly plausible moving edge.
+/// of 0.00306 per hexal; 387.5 raises the maximum to 0.03185 and, over the
+/// gate's full 21-offset, four-angle sweep, puts 1,316 hexals over 0.01 (a
+/// narrower 3-offset, 5-angle probe sees only 39 -- both figures are correct
+/// for what they measured; see `moving_edge_checks::TOLERANCE` for the fuller
+/// account). Both produce a perfectly plausible moving edge.
 ///
 /// # The clamp
 ///
@@ -623,7 +626,9 @@ mod tests {
     /// The rotation centre is `monitor/2 - 0.5` = 387.0, NOT 387.5. Pillow
     /// samples the output pixel at `x + 0.5` and its bilinear filter subtracts
     /// 0.5 again. Measured end to end: 387.0 agrees with flyvis to 0.003 and
-    /// 387.5 to 0.032, with up to 39 hexals over 0.01.
+    /// 387.5 to 0.032, putting 1,316 hexals over 0.01 across the gate's full
+    /// sweep (see `moving_edge_checks::TOLERANCE` -- a narrower probe sees
+    /// only 39, which is not the figure that bounds the gate).
     #[test]
     fn the_rotation_centre_is_387_not_387_5() {
         // 180 degrees about 387.0 maps 387 + d to 387 - d, exactly.
@@ -984,6 +989,19 @@ mod tests {
         assert_eq!(e.resample_index(5, 4), Some(1));
         assert_eq!(e.resample_index(5, 0), Some(0));
         assert_eq!(e.resample_index(5, 64), Some(20), "the sweep always ends at +10");
+    }
+
+    /// `first_frame_selecting` is only exercised indirectly by the fixture gate,
+    /// which cannot see a slip smaller than one offset's run -- about 34 frames
+    /// at the slowest speed. 0.4.0's DSI work aligns responses to offsets with
+    /// this, so pin it directly.
+    #[test]
+    fn first_frame_selecting_counts_from_the_start_of_the_sequence() {
+        let e = edge_for(vec![0]);
+        assert_eq!(e.first_frame_selecting(0, 0), Some(200), "200 pre-stimulus frames precede the sweep");
+        assert_eq!(e.first_frame_selecting(0, 20), Some(200 + 677));
+        assert_eq!(e.first_frame_selecting(0, 21), None, "there is no offset index 21");
+        assert_eq!(e.first_frame_selecting(144, 0), None, "no such sequence");
     }
 
     /// A background hexal reads exactly 0.5 here. flyvis reads 127/255 =

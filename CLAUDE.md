@@ -119,7 +119,7 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 202 tests, 0 failures
+cargo test --workspace          # 203 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
@@ -131,7 +131,7 @@ first is fetched per `RESOURCES.md`, the other two produced by
 `tools/export_moving_edges.py` respectively). A skip prints
 `eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
 tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "202 passed, 0 failed" whether the data is present
+the suite reports the same "203 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
@@ -149,13 +149,18 @@ measured bound rather than exact equality, because flyvis rotates a `uint8`
 raster through Pillow's bilinear resampler and this crate rotates the
 sampling geometry instead — a decision recorded in
 `docs/superpowers/specs/2026-09-30-moving-edge-stimuli-design.md`. That gate
-prints its observed distribution; read it, do not just watch it pass. One
-other test in that file, `the_ownership_map_agrees_with_flyviss_fp16_mask`,
-also carries slack — it bounds how many pixels may disagree, not how far a
-value may be off, because flyvis's mask is `float16` and this crate's is
-`f64`. Every other comparison — the connectome's 1,513,231 edges, the flash
-and dot families, the lattice order — is exact, element-wise equality, and
-"gated against flyvis" means something stronger everywhere else.
+prints its observed distribution; read it, do not just watch it pass. Two
+other tests carry a different kind of slack, neither a magnitude tolerance:
+`the_ownership_map_agrees_with_flyviss_fp16_mask`, in that same file, bounds
+how many pixels may disagree, not how far a value may be off, because
+flyvis's mask is `float16` and this crate's is `f64`; and
+`trained_synapse_counts_match_the_expanded_network`, in
+`crates/flyvis/src/expand_checks.rs`, allows a `1e-6` relative epsilon on
+trained synapse counts that are supposed to be numerically identical, an f32
+round-trip artifact rather than a bound on disagreement. Every other
+comparison — the connectome's 1,513,231 edges, the flash and dot families,
+the lattice order — is exact, element-wise equality, and "gated against
+flyvis" means something stronger everywhere else.
 
 Clippy currently has 5 pre-existing warnings (4 `needless_range_loop` in `sim`,
 1 manual char comparison in `connectome`). Do not count those as new.

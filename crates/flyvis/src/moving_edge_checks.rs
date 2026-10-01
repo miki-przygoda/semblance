@@ -11,23 +11,26 @@
 //! carries slack, but as a bound on *how many* pixels may disagree, not on
 //! how far any one value may be off -- a different kind of tolerance, for a
 //! different reason: `float16` vs `f64`, not a rasteriser this crate cannot
-//! reproduce.)
+//! reproduce. `expand_checks::trained_synapse_counts_match_the_expanded_network`
+//! carries a third kind again: a `1e-6` relative epsilon on trained synapse
+//! counts that are supposed to be numerically identical, an f32 round-trip
+//! artifact rather than a bound on disagreement.)
 //!
 //! So the geometry gate prints its observed distribution rather than merely
 //! asserting a bound. The difference between 0.002 and 0.009 agreement is the
 //! difference between "that is the quantisation artifact" and "something else
 //! is wrong", and a pass/fail assertion hides it.
 //!
-//! Everything that *can* be compared element-wise still is: the ownership map,
-//! the sequence ordering, the resample indices, the pad lengths and the NaN
-//! boundary.
+//! Everything that *can* be compared element-wise still is: the sequence
+//! ordering, the resample indices, the pad lengths and the NaN boundary.
 //!
 //! These skip when their fixtures are absent, and the skip notice is invisible
 //! under a plain `cargo test`. Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn a
 //! missing fixture into a failure.
 //!
-//! The geometry gate renders twelve angles' worth of offsets and is slow in
-//! debug; `cargo test --release` is the comfortable way to run it.
+//! The geometry gate renders `GATE_ANGLES`' worth of offsets -- four, not
+//! twelve -- and the whole crate's debug suite runs in about a second;
+//! nothing here needs `--release` to be comfortable.
 
 use crate::hex_eye::{HexEye, NO_OWNER};
 use crate::moving_edge::{MovingEdge, MovingEdgeParams};
@@ -111,6 +114,21 @@ fn json_field_all(s: &str, key: &str) -> Vec<i64> {
     out
 }
 
+/// Every floating-point value that follows a `"key":` in the document, in
+/// order. `json_field_all`'s `f64` sibling, for fields like `intensity` that
+/// are not integers.
+fn json_field_all_f64(s: &str, key: &str) -> Vec<f64> {
+    let needle = format!("\"{key}\":");
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(&needle) {
+        rest = &rest[i + needle.len()..];
+        let end = rest.find([',', '}', '\n']).unwrap_or(rest.len());
+        out.push(rest[..end].trim().parse().expect("number after key"));
+    }
+    out
+}
+
 /// The numeric value immediately at the start of a speed block -- the text
 /// right after the `"speed":` the block was split on.
 fn block_speed(block: &str) -> f64 {
@@ -147,6 +165,11 @@ fn moving_edge_offsets_match_flyvis_within_tolerance() {
     assert_eq!(
         json_field_all(&manifest, "angle"),
         GATE_ANGLES.iter().flat_map(|&a| [a as i64, a as i64]).collect::<Vec<_>>(),
+        "fixture group order must be angle-major, intensity-minor"
+    );
+    assert_eq!(
+        json_field_all_f64(&manifest, "intensity"),
+        GATE_ANGLES.iter().flat_map(|_| [0.0, 1.0]).collect::<Vec<_>>(),
         "fixture group order must be angle-major, intensity-minor"
     );
 
@@ -263,23 +286,40 @@ fn the_ownership_map_agrees_with_flyviss_fp16_mask() {
 }
 
 /// The sequence ordering and the published figures.
+///
+/// Reads only sequence counts and timing, never geometry, so -- like
+/// [`the_timing_matches_flyvis_frame_for_frame`] and unlike the geometry gate
+/// above -- it restricts `angles` to a single value rather than paying for
+/// all twelve of `flyvis_defaults`'s. `num_sequences` scales with the angle
+/// count, so the comparison scales back up by the angle count this test left
+/// out, rather than comparing a one-angle family against flyvis's twelve.
 #[test]
 fn the_full_family_has_flyviss_shape() {
     let Some(timing) = load_stimulus_fixture("moving_edge_timing.json") else { return };
-    let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(DT));
+    let mut params = MovingEdgeParams::flyvis_defaults(DT);
+    let n_angles = params.angles.len();
+    params.angles = vec![params.angles[0]];
+    let e = MovingEdge::new(params);
     let n_frames: usize = json_field(&timing, "n_frames").parse().unwrap();
     let n_sequences: usize = json_field(&timing, "n_sequences_full_family").parse().unwrap();
 
-    assert_eq!(e.num_sequences(), n_sequences, "144 = 12 x 2 x 6");
+    assert_eq!(e.num_sequences() * n_angles, n_sequences, "144 = 12 x 2 x 6");
     assert_eq!(e.num_frames(), n_frames, "1078 frames");
     assert_eq!(e.num_hexals(), 721);
 }
 
 /// The resample indices and the pad boundaries, element-wise.
+///
+/// None of what this reads -- speed, frame counts, resample indices -- varies
+/// with the angle count, so it restricts `angles` the same way
+/// [`the_nan_boundary_matches_flyvis`] does rather than paying for all twelve
+/// of `flyvis_defaults`'s purely to read them.
 #[test]
 fn the_timing_matches_flyvis_frame_for_frame() {
     let Some(json) = load_stimulus_fixture("moving_edge_timing.json") else { return };
-    let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(DT));
+    let mut params = MovingEdgeParams::flyvis_defaults(DT);
+    params.angles = vec![0];
+    let e = MovingEdge::new(params);
 
     // One object per speed, in the same order as `speeds`.
     let blocks: Vec<&str> = json.split("\"speed\":").skip(1).collect();

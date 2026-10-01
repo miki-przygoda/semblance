@@ -17,8 +17,10 @@
 //!   fall inside no ommatidium at all. They are simply never sampled.
 //! - **flyvis builds this mask in `float16`.** We use `f64`. Measured offline
 //!   against flyvis 1.2.0, 2,052 of 600,625 pixels end up assigned
-//!   differently. No test in this commit checks that number -- nothing here
-//!   compares the two masks.
+//!   differently. `the_ownership_map_agrees_with_flyviss_fp16_mask` in
+//!   `moving_edge_checks.rs` compares exactly those two masks and pins that
+//!   count against a bound of 4,000 -- the gate that proves this crate's
+//!   hexal ordering is flyvis's own.
 //!
 //! What both masks agree on, and what this module depends on, is that **no
 //! pixel is ever inside two footprints**. That is checked in

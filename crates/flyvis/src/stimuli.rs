@@ -113,14 +113,17 @@ pub struct FlashParams {
     /// other extent this implementation and flyvis disagree -- this one being
     /// the more self-consistent of the two. The gates only cover 15.
     pub extent: i32,
-    /// The two intensity extremes. Their mean is the baseline.
+    /// The two intensity extremes. Their mean is the baseline. `f32`: these
+    /// are exact small constants written straight into an `f32` output
+    /// buffer, unlike the time fields below, which feed `frame_count` and
+    /// must stay `f64` to avoid a value-destroying cast.
     pub dynamic_range: [f32; 2],
     /// Seconds of stimulus per `1` in `alternations`.
-    pub t_stim: f32,
+    pub t_stim: f64,
     /// Seconds of baseline per `0` in `alternations`.
-    pub t_pre: f32,
+    pub t_pre: f64,
     /// Integration step, in seconds.
-    pub dt: f32,
+    pub dt: f64,
     /// Radii to render. [`FULL_FIELD`] means the whole array.
     pub radii: Vec<i32>,
     /// Block sequence: `0` baseline, anything else stimulus.
@@ -134,7 +137,7 @@ impl FlashParams {
     /// `1 / max(tau, dt)`, so `dt` decides which cell types are floored --
     /// it is a modelling choice, not a convenience. flyvis's own response
     /// analyses use `1.0 / 200.0`.
-    pub fn flyvis_defaults(dt: f32) -> Self {
+    pub fn flyvis_defaults(dt: f64) -> Self {
         FlashParams {
             extent: 15,
             dynamic_range: [0.0, 1.0],
@@ -183,8 +186,8 @@ impl Flashes {
             }
         }
 
-        let n_pre = frame_count(params.t_pre as f64, params.dt as f64);
-        let n_stim = frame_count(params.t_stim as f64, params.dt as f64);
+        let n_pre = frame_count(params.t_pre, params.dt);
+        let n_stim = frame_count(params.t_stim, params.dt);
         let blocks: Vec<(usize, bool)> = params
             .alternations
             .iter()
@@ -278,24 +281,27 @@ pub struct DotParams {
     pub extent: i32,
     /// Radius of the lit disc around each centre. 0 lights one hexal.
     pub dot_column_radius: i32,
-    /// Background intensity.
+    /// Background intensity. `f32`: an exact small constant written straight
+    /// into an `f32` output buffer, unlike the time fields below, which feed
+    /// `frame_count` and must stay `f64` to avoid a value-destroying cast.
     pub bg_intensity: f32,
-    /// The bright flash intensity. The dark one is its mirror below background.
+    /// The bright flash intensity. The dark one is its mirror below
+    /// background. `f32`, for the same reason as `bg_intensity`.
     pub intensity: f32,
     /// Seconds the dot is shown.
-    pub t_stim: f32,
+    pub t_stim: f64,
     /// Seconds of background before the dot.
-    pub t_pre: f32,
+    pub t_pre: f64,
     /// Seconds of background after the dot.
-    pub t_post: f32,
+    pub t_post: f64,
     /// Integration step, in seconds.
-    pub dt: f32,
+    pub dt: f64,
 }
 
 impl DotParams {
     /// flyvis's defaults, with `dt` supplied by the caller. See
     /// [`FlashParams::flyvis_defaults`] for why `dt` has no default.
-    pub fn flyvis_defaults(dt: f32) -> Self {
+    pub fn flyvis_defaults(dt: f64) -> Self {
         DotParams {
             extent: 15,
             dot_column_radius: 0,
@@ -335,9 +341,9 @@ impl Dots {
             .map(|&c| disc_indices(params.extent, c, params.dot_column_radius))
             .collect();
 
-        let n_pre = frame_count(params.t_pre as f64, params.dt as f64);
-        let n_stim = frame_count(params.t_stim as f64, params.dt as f64);
-        let n_post = frame_count(params.t_post as f64, params.dt as f64);
+        let n_pre = frame_count(params.t_pre, params.dt);
+        let n_stim = frame_count(params.t_stim, params.dt);
+        let n_post = frame_count(params.t_post, params.dt);
 
         Dots {
             n_hexals,
@@ -490,6 +496,10 @@ mod tests {
         assert_eq!(frame_count(0.0, 1.0 / 200.0), 0);
         // 0.999 / 0.005 = 199.8 -> 199, not 200.
         assert_eq!(frame_count(0.999, 1.0 / 200.0), 199);
+        // 1/3 is where f32 and f64 part company: the f32 value is
+        // 0.33333334, and 1.0 / that truncates to 2. flyvis computes this in
+        // Python floats and gets 3, so f64 is the agreeing precision.
+        assert_eq!(frame_count(1.0, 1.0 / 3.0), 3);
     }
 
     fn flashes() -> Flashes {

@@ -13,7 +13,7 @@ use crate::expand::hex_coords;
 use crate::stimuli::{DotParams, Dots, FlashParams, Flashes, Stimulus};
 use crate::test_support::{load_stimulus_bytes, load_stimulus_fixture};
 
-const DT: f32 = 1.0 / 200.0;
+const DT: f64 = 1.0 / 200.0;
 
 fn f32s(bytes: &[u8]) -> Vec<f32> {
     bytes
@@ -59,8 +59,8 @@ fn flashes_match_flyvis() {
             let base = (s * 600 + fr) * 721;
             for (h, &got) in out.iter().enumerate() {
                 let w = want[base + h];
-                assert!(
-                    (got - w).abs() < 1e-6,
+                assert_eq!(
+                    got, w,
                     "sequence {s}, frame {fr}, hexal {h}: got {got}, flyvis has {w}"
                 );
             }
@@ -119,8 +119,8 @@ fn dot_subset_matches_flyvis() {
             let base = (order * 1400 + fr) * 721;
             for (h, &got) in out.iter().enumerate() {
                 let w = want[base + h];
-                assert!(
-                    (got - w).abs() < 1e-6,
+                assert_eq!(
+                    got, w,
                     "sequence {s}, frame {fr}, hexal {h}: got {got}, flyvis has {w}"
                 );
             }

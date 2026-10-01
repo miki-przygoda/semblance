@@ -237,7 +237,7 @@ fn trained_synapse_counts_match_the_expanded_network() {
     for (g, &n_syn) in groups.iter().enumerate() {
         let want = crate::pretrained::SYN_COUNT[g].exp();
         assert!(
-            (want - n_syn).abs() <= 1e-3 * n_syn.max(1.0),
+            (want - n_syn).abs() <= 1e-6 * n_syn.max(1.0),
             "offset group {g}: exp(SYN_COUNT) = {want}, expansion has n_syn = {n_syn}"
         );
     }
