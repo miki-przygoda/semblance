@@ -230,7 +230,7 @@ impl Coverage {
     /// Renders every angle's 21 offsets.
     ///
     /// One pass over the monitor per angle finds the pixels whose rotated
-    /// source lands in the bar's row band -- about 11% of the owned pixels --
+    /// source lands in the bar's row band -- 88 of the monitor's 775 rows --
     /// and the 21 offsets are then cheap sweeps over that band alone.
     pub(crate) fn new(params: &MovingEdgeParams, eye: &HexEye) -> Self {
         let geometry = BarGeometry::new(params, eye.monitor_px());
@@ -519,5 +519,37 @@ mod tests {
         assert_eq!(c.counts(11, 20).len(), 721);
         assert_eq!(c.kernel_sum().len(), 721);
         assert_eq!(c.kernel_sum().iter().sum::<u32>(), 383_613);
+    }
+
+    /// An asymmetric hexal (row 412, column 437) that the bar *does* sweep,
+    /// unlike the row-band exclusion test, and that is not the row/column-
+    /// symmetric origin. A transposed owner read misattributes this hexal's
+    /// pixels to whichever hexal sits at (col 412, row 437), so it never
+    /// reaches full coverage. `coverage_is_monotonic_in_the_offset` cannot
+    /// catch that: the offset windows nest, so any per-pixel value at all
+    /// produces non-decreasing counts.
+    #[test]
+    fn an_off_diagonal_hexal_is_swept_from_zero_to_full() {
+        let p = params_for(vec![0]);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        let h = crate::expand::hex_coords(15).position(|q| q == (0, 2)).unwrap();
+        assert_eq!(eye.centre(h), Some((437.0, 412.0)));
+        let total = c.kernel_sum()[h];
+        assert_eq!(c.counts(0, 0)[h], 0, "offset -10: column span 423..451 falls short of stop 293");
+        assert_eq!(c.counts(0, 20)[h], total, "offset +10: stop 485 clears the whole footprint");
+    }
+
+    /// An angle's coverage must not depend on which angles were rendered
+    /// beside it. `band` is reused across angles, so a missing `clear()` would
+    /// let one angle's pixels leak into the next -- caught today only by
+    /// accident, because one other test happens to pass two angles.
+    #[test]
+    fn an_angles_coverage_does_not_depend_on_its_neighbours() {
+        let alone = Coverage::new(&params_for(vec![0]), &HexEye::new(15, 25));
+        let beside = Coverage::new(&params_for(vec![30, 0]), &HexEye::new(15, 25));
+        for o in 0..21 {
+            assert_eq!(alone.counts(0, o), beside.counts(1, o), "offset index {o}");
+        }
     }
 }
