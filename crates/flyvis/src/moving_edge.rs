@@ -436,6 +436,23 @@ impl MovingEdge {
         let (_, _, s) = self.decode(sequence)?;
         self.indices[s].get(swept_frame).copied()
     }
+
+    /// How many speeds the family sweeps. Sequence indices step by this within
+    /// one (angle, intensity) pair.
+    pub fn speed_count(&self) -> usize {
+        self.speeds.len()
+    }
+
+    /// The first frame of `sequence` that selects `offset`, counting from frame
+    /// zero, or `None` if the sweep never selects it.
+    ///
+    /// The resample repeats and skips offsets, so a fast sweep does not visit
+    /// all 21. The slowest speed always does.
+    pub fn first_frame_selecting(&self, sequence: usize, offset: usize) -> Option<usize> {
+        let (_, _, s) = self.decode(sequence)?;
+        let k = self.indices[s].iter().position(|&o| o == offset)?;
+        Some(self.timing[s].n_pre + k)
+    }
 }
 
 impl Stimulus for MovingEdge {

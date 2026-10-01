@@ -119,20 +119,20 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 150 tests, 0 failures
+cargo test --workspace          # 202 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-21 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`
+26 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`
 and `data/flyvis-stimuli/` are absent (all three are gitignored real-data; the
 first is fetched per `RESOURCES.md`, the other two produced by
-`tools/export_build.py` and `tools/export_stimuli.py` respectively). A skip
-prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!` for
-*passing* tests, so under plain `cargo test --workspace` those notices are
-invisible — the suite reports the same "150 passed, 0 failed" whether the data
-is present or absent. They are only visible under
-`cargo test --workspace -- --nocapture`.
+`tools/export_build.py`, and `tools/export_stimuli.py` with
+`tools/export_moving_edges.py` respectively). A skip prints
+`eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
+tests, so under plain `cargo test --workspace` those notices are invisible —
+the suite reports the same "202 passed, 0 failed" whether the data is present
+or absent. They are only visible under `cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
 hard failure instead — CI must set this, or the acceptance gates that prove
@@ -140,6 +140,17 @@ this workspace reproduces flyvis can pass while silently verifying nothing.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.
+
+**One comparison in this workspace carries a tolerance, and only one.** The
+moving-edge stimuli (`crates/flyvis/src/moving_edge_checks.rs`) are gated
+against flyvis at a measured bound rather than element-wise, because flyvis
+rotates a `uint8` raster through Pillow's bilinear resampler and this crate
+rotates the sampling geometry instead — a decision recorded in
+`docs/superpowers/specs/2026-09-30-moving-edge-stimuli-design.md`. That gate
+prints its observed distribution; read it, do not just watch it pass. Every
+other comparison — the connectome's 1,513,231 edges, the flash and dot
+families, the lattice order — is element-wise, and "gated against flyvis"
+means something stronger everywhere else.
 
 Clippy currently has 5 pre-existing warnings (4 `needless_range_loop` in `sim`,
 1 manual char comparison in `connectome`). Do not count those as new.
