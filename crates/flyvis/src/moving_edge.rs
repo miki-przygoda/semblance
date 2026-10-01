@@ -30,6 +30,7 @@
 //! This does the same.
 
 use crate::hex_eye::{HexEye, NO_OWNER};
+use crate::stimuli::{frame_count, Stimulus, StimulusError};
 
 /// Parameters for a family of moving edges.
 ///
@@ -213,10 +214,7 @@ pub(crate) fn inverse_rotate(
 ///
 /// Counting rather than summing intensities also means both intensities come
 /// from one pass: the cartesian image only ever holds two values.
-// Consumed starting in the task that builds frames from these counts; nothing
-// in this crate calls `Coverage` yet outside the `#[cfg(test)]` module below.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct Coverage {
     n_hexals: usize,
     n_offsets: usize,
@@ -225,7 +223,6 @@ pub(crate) struct Coverage {
     kernel_sum: Vec<u32>,
 }
 
-#[allow(dead_code)]
 impl Coverage {
     /// Renders every angle's 21 offsets.
     ///
@@ -279,6 +276,224 @@ impl Coverage {
     /// Pixels owned, per hexal -- the divisor.
     pub(crate) fn kernel_sum(&self) -> &[u32] {
         &self.kernel_sum
+    }
+}
+
+/// One speed's frame layout within the common sequence length.
+#[derive(Clone, Copy, Debug)]
+struct Timing {
+    /// Background frames before the sweep.
+    n_pre: usize,
+    /// Swept frames.
+    n_stim: usize,
+    /// Frames past which the sequence is NaN.
+    n_valid: usize,
+}
+
+/// A family of moving edges: every angle, intensity and speed.
+#[derive(Clone, Debug)]
+pub struct MovingEdge {
+    n_hexals: usize,
+    n_frames: usize,
+    bg_intensity: f64,
+    angles: Vec<i32>,
+    intensities: Vec<f64>,
+    speeds: Vec<f64>,
+    t_stim: Vec<f64>,
+    /// Per speed, the offset index each swept frame selects.
+    indices: Vec<Vec<usize>>,
+    timing: Vec<Timing>,
+    coverage: Coverage,
+}
+
+impl MovingEdge {
+    /// Builds the family. All the geometry is rendered here.
+    ///
+    /// # Panics
+    ///
+    /// If any speed resamples to zero frames, which leaves the `"continue"`
+    /// pad with no frame to hold. flyvis fails the same way, less clearly.
+    pub fn new(params: MovingEdgeParams) -> Self {
+        let eye = HexEye::new(params.extent, params.ppo);
+        let n_hexals = eye.num_hexals();
+        let coverage = Coverage::new(&params, &eye);
+        let n_offsets = (params.offsets.1 - params.offsets.0 + 1) as usize;
+
+        // flyvis: `t_stim = n_offsets * led_width / (speed * omm_width)`. The
+        // ONLY place omm_width is used.
+        let t_stim: Vec<f64> = params
+            .speeds
+            .iter()
+            .map(|&s| (n_offsets as f64 * params.led_width) / (s * params.omm_width))
+            .collect();
+        let t_stim_max = t_stim.iter().copied().fold(f64::MIN, f64::max);
+        let n_frames = frame_count(t_stim_max + params.t_pre + params.t_post, params.dt);
+
+        let mut indices = Vec::with_capacity(t_stim.len());
+        let mut timing = Vec::with_capacity(t_stim.len());
+        for (i, &t) in t_stim.iter().enumerate() {
+            let n_stim = frame_count(t, params.dt);
+            assert!(
+                n_stim > 0,
+                "speed {} resamples to zero frames at dt {}",
+                params.speeds[i], params.dt
+            );
+            // flyvis: `torch.linspace(0, n_offsets - 1, n_stim).long()`, whose
+            // `.long()` truncates toward zero rather than rounding to nearest.
+            let last = (n_offsets - 1) as f64;
+            let step = if n_stim > 1 { last / (n_stim - 1) as f64 } else { 0.0 };
+            indices.push((0..n_stim).map(|k| (k as f64 * step) as usize).collect());
+
+            // Each pad is the DIFFERENCE of two truncations, exactly as
+            // flyvis's `pad` computes `int(t_stim / dt) - stim.shape[-2]`.
+            // Computing `int(t_pre / dt)` directly would differ at some
+            // duration/step combinations.
+            let through_pre = frame_count(t + params.t_pre, params.dt);
+            let through_post = frame_count(t + params.t_pre + params.t_post, params.dt);
+            timing.push(Timing {
+                n_pre: through_pre - n_stim,
+                n_stim,
+                n_valid: through_post,
+            });
+        }
+
+        MovingEdge {
+            n_hexals,
+            n_frames,
+            bg_intensity: params.bg_intensity,
+            angles: params.angles,
+            intensities: params.intensities,
+            speeds: params.speeds,
+            t_stim,
+            indices,
+            timing,
+            coverage,
+        }
+    }
+
+    /// `(angle, intensity, speed)` indices for a sequence.
+    ///
+    /// flyvis orders its sequences angle-major, then intensity, then speed --
+    /// `product` varies its last argument fastest.
+    fn decode(&self, sequence: usize) -> Option<(usize, usize, usize)> {
+        if sequence >= self.num_sequences() {
+            return None;
+        }
+        let n_speeds = self.speeds.len();
+        let n_intensities = self.intensities.len();
+        Some((
+            sequence / (n_speeds * n_intensities),
+            (sequence / n_speeds) % n_intensities,
+            sequence % n_speeds,
+        ))
+    }
+
+    /// The sweep direction for a sequence, in degrees.
+    pub fn angle_of(&self, sequence: usize) -> Option<i32> {
+        self.decode(sequence).map(|(a, _, _)| self.angles[a])
+    }
+
+    /// The edge intensity for a sequence.
+    pub fn intensity_of(&self, sequence: usize) -> Option<f32> {
+        self.decode(sequence).map(|(_, i, _)| self.intensities[i] as f32)
+    }
+
+    /// The sweep speed for a sequence, in half-ommatidia per second.
+    pub fn speed_of(&self, sequence: usize) -> Option<f64> {
+        self.decode(sequence).map(|(_, _, s)| self.speeds[s])
+    }
+
+    /// How long the sweep itself lasts, in seconds.
+    pub fn t_stim_of(&self, sequence: usize) -> Option<f64> {
+        self.decode(sequence).map(|(_, _, s)| self.t_stim[s])
+    }
+
+    /// How many of this sequence's [`num_frames`](Stimulus::num_frames) frames
+    /// are real.
+    ///
+    /// Every sequence is padded to a common length so the family is
+    /// rectangular, but a fast sweep finishes early and the rest is `NaN`.
+    /// Stepping an integrator past this point produces a real-looking trace
+    /// from frames that do not exist.
+    pub fn valid_frames(&self, sequence: usize) -> Option<usize> {
+        self.decode(sequence).map(|(_, _, s)| self.timing[s].n_valid)
+    }
+
+    /// Which offset position a swept frame selects, counting from the first
+    /// swept frame. `None` past the end of the sweep.
+    pub fn resample_index(&self, sequence: usize, swept_frame: usize) -> Option<usize> {
+        let (_, _, s) = self.decode(sequence)?;
+        self.indices[s].get(swept_frame).copied()
+    }
+}
+
+impl Stimulus for MovingEdge {
+    fn num_sequences(&self) -> usize {
+        self.angles.len() * self.intensities.len() * self.speeds.len()
+    }
+
+    fn num_frames(&self) -> usize {
+        self.n_frames
+    }
+
+    fn num_hexals(&self) -> usize {
+        self.n_hexals
+    }
+
+    fn frame_into(
+        &self,
+        sequence: usize,
+        frame: usize,
+        out: &mut [f32],
+    ) -> Result<(), StimulusError> {
+        let Some((a, i, s)) = self.decode(sequence) else {
+            return Err(StimulusError::SequenceOutOfRange {
+                index: sequence,
+                count: self.num_sequences(),
+            });
+        };
+        if frame >= self.n_frames {
+            return Err(StimulusError::FrameOutOfRange { index: frame, count: self.n_frames });
+        }
+        if out.len() != self.n_hexals {
+            return Err(StimulusError::BufferLengthMismatch {
+                expected: self.n_hexals,
+                actual: out.len(),
+            });
+        }
+
+        let t = self.timing[s];
+        let offset = if frame < t.n_pre {
+            None
+        } else if frame < t.n_pre + t.n_stim {
+            Some(self.indices[s][frame - t.n_pre])
+        } else if frame < t.n_valid {
+            // `post_pad_mode = "continue"`: hold the last SWEPT frame, which is
+            // the last resampled offset -- not necessarily the last offset, and
+            // never the background.
+            Some(*self.indices[s].last().expect("n_stim > 0, checked in new"))
+        } else {
+            out.fill(f32::NAN);
+            return Ok(());
+        };
+
+        match offset {
+            None => out.fill(self.bg_intensity as f32),
+            Some(o) => {
+                let intensity = self.intensities[i];
+                let counts = self.coverage.counts(a, o);
+                let totals = self.coverage.kernel_sum();
+                for (slot, (&covered, &total)) in
+                    out.iter_mut().zip(counts.iter().zip(totals))
+                {
+                    let covered = covered as f64;
+                    let total = total as f64;
+                    *slot = ((covered * intensity + (total - covered) * self.bg_intensity)
+                        / total) as f32;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -551,5 +766,192 @@ mod tests {
         for o in 0..21 {
             assert_eq!(alone.counts(0, o), beside.counts(1, o), "offset index {o}");
         }
+    }
+
+    fn edge_for(angles: Vec<i32>) -> MovingEdge {
+        MovingEdge::new(params_for(angles))
+    }
+
+    #[test]
+    fn moving_edges_have_flyvis_dimensions() {
+        let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(1.0 / 200.0));
+        assert_eq!(e.num_sequences(), 144, "12 angles x 2 intensities x 6 speeds");
+        assert_eq!(e.num_frames(), 1078, "t_stim_max + t_pre + t_post at dt = 1/200");
+        assert_eq!(e.num_hexals(), 721);
+    }
+
+    /// flyvis builds its `arg_df` with `product(angles, widths, intensities,
+    /// zip(t_stim, speeds))`, and `product` varies its LAST argument fastest.
+    /// So: angle-major, then intensity, then speed. Any other grouping
+    /// mislabels 143 of the 144 sequences while producing arrays of identical
+    /// shape.
+    #[test]
+    fn sequences_are_angle_major_then_intensity_then_speed() {
+        let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(1.0 / 200.0));
+        assert_eq!(
+            (e.angle_of(0), e.intensity_of(0), e.speed_of(0)),
+            (Some(0), Some(0.0), Some(2.4))
+        );
+        assert_eq!(
+            (e.angle_of(1), e.intensity_of(1), e.speed_of(1)),
+            (Some(0), Some(0.0), Some(4.8)),
+            "speed varies fastest"
+        );
+        assert_eq!(
+            (e.angle_of(6), e.intensity_of(6), e.speed_of(6)),
+            (Some(0), Some(1.0), Some(2.4)),
+            "intensity varies next"
+        );
+        assert_eq!(
+            (e.angle_of(12), e.intensity_of(12), e.speed_of(12)),
+            (Some(30), Some(0.0), Some(2.4)),
+            "angle varies slowest"
+        );
+        assert_eq!(
+            (e.angle_of(143), e.intensity_of(143), e.speed_of(143)),
+            (Some(330), Some(1.0), Some(25.0))
+        );
+        assert_eq!(e.angle_of(144), None);
+        assert_eq!(e.intensity_of(144), None);
+        assert_eq!(e.speed_of(144), None);
+    }
+
+    /// `t_stim = n_offsets * led_width / (speed * omm_width)`. This is the only
+    /// place `omm_width` appears, and using `led_width` here instead would make
+    /// every sweep 2.6x too long.
+    #[test]
+    fn t_stim_follows_from_the_speed_through_omm_width() {
+        let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(1.0 / 200.0));
+        let want = [3.394397, 1.697198, 0.839851, 0.626658, 0.428766, 0.325862];
+        for (s, w) in want.iter().enumerate() {
+            let got = e.t_stim_of(s).unwrap();
+            assert!((got - w).abs() < 1e-6, "speed index {s}: got {got}, want {w}");
+        }
+    }
+
+    /// Every sequence is 1078 frames, but a fast sweep's real content ends far
+    /// earlier and the rest is NaN. Measured against flyvis.
+    #[test]
+    fn valid_frames_shorten_as_the_speed_rises() {
+        let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(1.0 / 200.0));
+        let want = [1078, 739, 567, 525, 485, 465];
+        for (s, w) in want.iter().enumerate() {
+            assert_eq!(e.valid_frames(s), Some(*w), "speed index {s}");
+        }
+        assert_eq!(e.valid_frames(144), None);
+    }
+
+    /// Past its own end a sequence is NaN, not background and not a held
+    /// frame. flyvis uses NaN as a stacking sentinel and strips it before use;
+    /// so must any consumer here.
+    #[test]
+    fn frames_past_a_sequences_end_are_nan() {
+        let e = edge_for(vec![0]);
+        let mut out = vec![0.0f32; 721];
+        // Sequence 5 is angle 0, intensity 0, speed 25 -- 465 valid frames.
+        e.frame_into(5, 464, &mut out).unwrap();
+        assert!(out.iter().all(|x| x.is_finite()), "frame 464 is the last real one");
+        e.frame_into(5, 465, &mut out).unwrap();
+        assert!(out.iter().all(|x| x.is_nan()), "frame 465 is past the end");
+        e.frame_into(5, 1077, &mut out).unwrap();
+        assert!(out.iter().all(|x| x.is_nan()));
+    }
+
+    /// The first 200 frames are uniform background at every speed.
+    #[test]
+    fn the_first_200_frames_are_uniform_background() {
+        let e = edge_for(vec![0]);
+        let mut out = vec![0.0f32; 721];
+        for s in [0usize, 5] {
+            e.frame_into(s, 0, &mut out).unwrap();
+            assert!(out.iter().all(|&x| x == 0.5), "sequence {s} frame 0");
+            e.frame_into(s, 199, &mut out).unwrap();
+            assert!(out.iter().all(|&x| x == 0.5), "sequence {s} frame 199");
+            e.frame_into(s, 200, &mut out).unwrap();
+            assert!(
+                out.iter().any(|&x| x != 0.5),
+                "sequence {s} frame 200 is the first stimulus frame"
+            );
+        }
+    }
+
+    /// `post_pad_mode = "continue"` holds the LAST swept frame, not the
+    /// background. Padding with background instead would make every edge appear
+    /// to vanish at the end of its sweep -- during exactly the window an offset
+    /// response is measured in.
+    #[test]
+    fn the_post_pad_holds_the_final_frame_rather_than_the_background() {
+        let e = edge_for(vec![0]);
+        let mut last_stim = vec![0.0f32; 721];
+        let mut padded = vec![0.0f32; 721];
+        // Sequence 5: angle 0, intensity 0, speed 25. 200 pre + 65 stim = 265.
+        e.frame_into(5, 264, &mut last_stim).unwrap();
+        e.frame_into(5, 464, &mut padded).unwrap();
+        assert_eq!(padded, last_stim, "the pad repeats the last swept frame");
+        assert!(padded.iter().any(|&x| x != 0.5), "and it is not the background");
+    }
+
+    /// Verified against `torch.linspace(0, 20, n).long()` for all six speeds:
+    /// computing `(k * step) as usize` in `f64` gives the identical index at
+    /// every tick, even though torch builds the linspace in `float32`. The
+    /// fixture gate in `moving_edge_checks` compares them element-wise anyway.
+    /// `linspace(0, 20, n).long()` TRUNCATES toward zero rather than rounding
+    /// to nearest, so the source offsets are picked slightly early. Rounding
+    /// would choose a different offset for some ticks at every speed.
+    #[test]
+    fn the_resample_truncates_rather_than_rounds() {
+        let e = MovingEdge::new(MovingEdgeParams::flyvis_defaults(1.0 / 200.0));
+        // Speed 25 gives 65 resampled frames, step 20/64 = 0.3125.
+        // Tick 4 is at 1.25 -> offset 1 by truncation, 1 by rounding;
+        // tick 2 is at 0.625 -> 0 by truncation, 1 by rounding.
+        assert_eq!(e.resample_index(5, 2), Some(0), "0.625 truncates to 0");
+        assert_eq!(e.resample_index(5, 4), Some(1));
+        assert_eq!(e.resample_index(5, 0), Some(0));
+        assert_eq!(e.resample_index(5, 64), Some(20), "the sweep always ends at +10");
+    }
+
+    /// A background hexal reads exactly 0.5 here. flyvis reads 127/255 =
+    /// 0.498039, because it casts its image to uint8 and 255 * 0.5 = 127.5
+    /// truncates to 127. That difference is the floor of the tolerance gate and
+    /// is deliberate -- do not introduce it here to make the numbers match.
+    #[test]
+    fn our_background_is_exactly_one_half() {
+        let e = edge_for(vec![0]);
+        let mut out = vec![0.0f32; 721];
+        e.frame_into(0, 0, &mut out).unwrap();
+        assert_eq!(out[0], 0.5);
+        assert_ne!(out[0], 127.0 / 255.0);
+    }
+
+    /// A bright edge brightens and a dark edge darkens, from the same geometry.
+    #[test]
+    fn the_two_intensities_move_in_opposite_directions() {
+        let e = edge_for(vec![0]);
+        let (mut dark, mut bright) = (vec![0.0f32; 721], vec![0.0f32; 721]);
+        // Sequences 0..5 are intensity 0; 6..11 are intensity 1. Speed 2.4.
+        e.frame_into(0, 877, &mut dark).unwrap();
+        e.frame_into(6, 877, &mut bright).unwrap();
+        assert!(dark[360] < 0.5, "a dark edge darkens the swept hexal");
+        assert!(bright[360] > 0.5, "a bright edge brightens it");
+        assert!((dark[360] + bright[360] - 1.0).abs() < 1e-6, "mirrored about 0.5");
+    }
+
+    #[test]
+    fn moving_edges_reject_a_bad_sequence_frame_or_buffer() {
+        let e = edge_for(vec![0]);
+        let mut out = vec![0.0f32; 721];
+        assert_eq!(
+            e.frame_into(12, 0, &mut out),
+            Err(StimulusError::SequenceOutOfRange { index: 12, count: 12 })
+        );
+        assert_eq!(
+            e.frame_into(0, 1078, &mut out),
+            Err(StimulusError::FrameOutOfRange { index: 1078, count: 1078 })
+        );
+        let mut short = vec![0.0f32; 720];
+        assert_eq!(
+            e.frame_into(0, 0, &mut short),
+            Err(StimulusError::BufferLengthMismatch { expected: 721, actual: 720 })
+        );
     }
 }

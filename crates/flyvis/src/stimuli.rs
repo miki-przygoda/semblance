@@ -89,7 +89,11 @@ pub(crate) fn disc_indices(extent: i32, centre: (i32, i32), radius: i32) -> Vec<
 ///
 /// flyvis computes `int(t / dt)`, which **truncates** toward zero. Rounding
 /// instead would add a spurious frame at many duration/step combinations.
-pub(crate) fn frame_count(duration: f32, dt: f32) -> usize {
+///
+/// `f64` because the moving-edge pads are *differences* of truncations --
+/// `int((t_stim + t_pre) / dt) - int(t_stim / dt)` -- where a last-bit
+/// difference can move a boundary by a whole frame.
+pub(crate) fn frame_count(duration: f64, dt: f64) -> usize {
     (duration / dt) as usize
 }
 
@@ -172,8 +176,8 @@ impl Flashes {
             }
         }
 
-        let n_pre = frame_count(params.t_pre, params.dt);
-        let n_stim = frame_count(params.t_stim, params.dt);
+        let n_pre = frame_count(params.t_pre as f64, params.dt as f64);
+        let n_stim = frame_count(params.t_stim as f64, params.dt as f64);
         let blocks: Vec<(usize, bool)> = params
             .alternations
             .iter()
@@ -324,9 +328,9 @@ impl Dots {
             .map(|&c| disc_indices(params.extent, c, params.dot_column_radius))
             .collect();
 
-        let n_pre = frame_count(params.t_pre, params.dt);
-        let n_stim = frame_count(params.t_stim, params.dt);
-        let n_post = frame_count(params.t_post, params.dt);
+        let n_pre = frame_count(params.t_pre as f64, params.dt as f64);
+        let n_stim = frame_count(params.t_stim as f64, params.dt as f64);
+        let n_post = frame_count(params.t_post as f64, params.dt as f64);
 
         Dots {
             n_hexals,

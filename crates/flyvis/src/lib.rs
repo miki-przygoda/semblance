@@ -32,3 +32,4 @@ pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, S
 pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
 };
+pub use moving_edge::{MovingEdge, MovingEdgeParams};
