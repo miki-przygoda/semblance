@@ -29,6 +29,8 @@
 //! selection. A six-speed sweep costs 21 renders, not six sequences' worth.
 //! This does the same.
 
+use crate::hex_eye::{HexEye, NO_OWNER};
+
 /// Parameters for a family of moving edges.
 ///
 /// Every real-valued field is `f64`. This family's correctness is geometric --
@@ -109,11 +111,7 @@ impl MovingEdgeParams {
 /// The row band is fixed; only the columns move. flyvis's bar is 775 px wide on
 /// a 775 px monitor, so its left edge is always off-monitor and `start` clamps
 /// to 0 -- what sweeps is the right edge.
-// This task produces `BarGeometry` and `inverse_rotate` for the rasteriser
-// built in Task 4; nothing in this crate calls them yet, so rustc sees
-// them as dead outside the `#[cfg(test)]` module below.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct BarGeometry {
     /// `[first, last)` rows.
     pub rows: (i64, i64),
@@ -121,7 +119,6 @@ pub(crate) struct BarGeometry {
     pub cols: Vec<(i64, i64)>,
 }
 
-#[allow(dead_code)]
 impl BarGeometry {
     /// Reproduces flyvis's integer pixel arithmetic exactly.
     ///
@@ -192,8 +189,6 @@ impl BarGeometry {
 /// this is the identity; at 90, 180 and 270 the residual sine or cosine is
 /// around 1e-16, which shifts the source by at most 5e-14 px and cannot change
 /// a rounded integer.
-// Consumed starting in Task 4; unused in production code within this task.
-#[allow(dead_code)]
 pub(crate) fn inverse_rotate(
     angle_deg: i32,
     monitor_px: usize,
@@ -207,6 +202,84 @@ pub(crate) fn inverse_rotate(
     let x = (cos * dx - sin * dy + centre).round() as i64;
     let y = (sin * dx + cos * dy + centre).round() as i64;
     (x.clamp(0, last), y.clamp(0, last))
+}
+
+/// How many of each ommatidium's pixels the bar covers, per angle and offset.
+///
+/// This is the whole of the geometric work: 12 angles x 21 offsets, built once.
+/// A frame is then arithmetic on these counts -- an ommatidium's value is
+/// `(covered * intensity + uncovered * background) / total`, computed from
+/// integers, so it does not depend on the order pixels are summed in.
+///
+/// Counting rather than summing intensities also means both intensities come
+/// from one pass: the cartesian image only ever holds two values.
+// Consumed starting in the task that builds frames from these counts; nothing
+// in this crate calls `Coverage` yet outside the `#[cfg(test)]` module below.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct Coverage {
+    n_hexals: usize,
+    n_offsets: usize,
+    /// `angles.len() * n_offsets * n_hexals`, angle-major then offset.
+    counts: Vec<u32>,
+    kernel_sum: Vec<u32>,
+}
+
+#[allow(dead_code)]
+impl Coverage {
+    /// Renders every angle's 21 offsets.
+    ///
+    /// One pass over the monitor per angle finds the pixels whose rotated
+    /// source lands in the bar's row band -- about 11% of the owned pixels --
+    /// and the 21 offsets are then cheap sweeps over that band alone.
+    pub(crate) fn new(params: &MovingEdgeParams, eye: &HexEye) -> Self {
+        let geometry = BarGeometry::new(params, eye.monitor_px());
+        let n_offsets = geometry.num_offsets();
+        let n_hexals = eye.num_hexals();
+        let monitor = eye.monitor_px();
+        let owners = eye.owners();
+
+        let mut counts = vec![0u32; params.angles.len() * n_offsets * n_hexals];
+        let mut band: Vec<(u16, i64)> = Vec::new();
+
+        for (a, &angle) in params.angles.iter().enumerate() {
+            band.clear();
+            for row in 0..monitor {
+                for col in 0..monitor {
+                    let owner = owners[row * monitor + col];
+                    if owner == NO_OWNER {
+                        continue;
+                    }
+                    let (x, y) = inverse_rotate(angle, monitor, col, row);
+                    if y < geometry.rows.0 || y >= geometry.rows.1 {
+                        continue;
+                    }
+                    band.push((owner, x));
+                }
+            }
+            for (o, &(start, stop)) in geometry.cols.iter().enumerate() {
+                let base = (a * n_offsets + o) * n_hexals;
+                for &(owner, x) in &band {
+                    if x >= start && x < stop {
+                        counts[base + owner as usize] += 1;
+                    }
+                }
+            }
+        }
+
+        Coverage { n_hexals, n_offsets, counts, kernel_sum: eye.kernel_sum().to_vec() }
+    }
+
+    /// The per-hexal bar-pixel counts for one angle and offset.
+    pub(crate) fn counts(&self, angle_index: usize, offset_index: usize) -> &[u32] {
+        let base = (angle_index * self.n_offsets + offset_index) * self.n_hexals;
+        &self.counts[base..base + self.n_hexals]
+    }
+
+    /// Pixels owned, per hexal -- the divisor.
+    pub(crate) fn kernel_sum(&self) -> &[u32] {
+        &self.kernel_sum
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +424,100 @@ mod tests {
                 assert!((0..775).contains(&x) && (0..775).contains(&y), "angle {angle} at ({c}, {r})");
             }
         }
+    }
+
+    /// Building all twelve angles is the expensive part; most tests only need
+    /// one or two.
+    fn params_for(angles: Vec<i32>) -> MovingEdgeParams {
+        let mut p = MovingEdgeParams::flyvis_defaults(1.0 / 200.0);
+        p.angles = angles;
+        p
+    }
+
+    #[test]
+    fn coverage_never_exceeds_an_ommatidiums_own_pixels() {
+        let p = params_for(vec![0, 30]);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        let ks = c.kernel_sum();
+        for a in 0..2 {
+            for o in 0..21 {
+                for (h, (&n, &total)) in c.counts(a, o).iter().zip(ks).enumerate() {
+                    assert!(n <= total, "angle {a} offset {o} hexal {h}: {n} of {total}");
+                }
+            }
+        }
+    }
+
+    /// The bar only ever grows as the offset advances, at every angle. This is
+    /// what makes the sweep an edge passing over the eye rather than a bar
+    /// appearing and disappearing.
+    #[test]
+    fn coverage_is_monotonic_in_the_offset() {
+        let p = params_for(vec![0, 90, 150]);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        for a in 0..3 {
+            for o in 1..21 {
+                for (h, (&prev, &now)) in
+                    c.counts(a, o - 1).iter().zip(c.counts(a, o)).enumerate()
+                {
+                    assert!(now >= prev, "angle {a} offset {o} hexal {h}: {prev} -> {now}");
+                }
+            }
+        }
+    }
+
+    /// At 0 degrees the bar is a vertical edge sweeping rightward over a
+    /// horizontal band 88 rows tall. The origin hexal (index 360, at pixel
+    /// 387, 387) sits inside that band and is uncovered early in the sweep and
+    /// covered late.
+    #[test]
+    fn the_origin_hexal_is_swept_partway_through() {
+        let p = params_for(vec![0]);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        let total = c.kernel_sum()[360];
+        assert_eq!(c.counts(0, 0)[360], 0, "offset -10: the edge has not arrived");
+        assert_eq!(c.counts(0, 20)[360], total, "offset +10: fully swept");
+    }
+
+    /// A hexal well above the bar's row band never sees it at 0 degrees, at any
+    /// offset. Hexal (u, v) = (-14, 0) sits at row 37, far above rows 343..431.
+    #[test]
+    fn hexals_outside_the_row_band_are_never_covered_at_zero_degrees() {
+        let p = params_for(vec![0]);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        let h = crate::expand::hex_coords(15).position(|q| q == (-14, 0)).unwrap();
+        assert_eq!(eye.centre(h), Some((387.0, 37.0)));
+        for o in 0..21 {
+            assert_eq!(c.counts(0, o)[h], 0, "offset index {o}");
+        }
+    }
+
+    /// Rotating the band by 90 degrees must move which hexals it touches. If
+    /// the rotation were dropped, every angle would give the same coverage --
+    /// and 144 identical-looking sequences.
+    #[test]
+    fn different_angles_cover_different_hexals() {
+        let p = params_for(vec![0, 90]);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        let touched = |a: usize| -> Vec<bool> {
+            c.counts(a, 20).iter().zip(c.kernel_sum()).map(|(&n, &t)| n > 0 && n < t).collect()
+        };
+        assert_ne!(touched(0), touched(1), "0 and 90 degrees must differ");
+    }
+
+    /// The whole family's totals: 12 angles x 21 offsets.
+    #[test]
+    fn coverage_holds_one_array_per_angle_and_offset() {
+        let p = MovingEdgeParams::flyvis_defaults(1.0 / 200.0);
+        let eye = HexEye::new(p.extent, p.ppo);
+        let c = Coverage::new(&p, &eye);
+        assert_eq!(c.counts(11, 20).len(), 721);
+        assert_eq!(c.kernel_sum().len(), 721);
+        assert_eq!(c.kernel_sum().iter().sum::<u32>(), 383_613);
     }
 }
