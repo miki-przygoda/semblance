@@ -141,16 +141,21 @@ this workspace reproduces flyvis can pass while silently verifying nothing.
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.
 
-**One comparison in this workspace carries a tolerance, and only one.** The
-moving-edge stimuli (`crates/flyvis/src/moving_edge_checks.rs`) are gated
-against flyvis at a measured bound rather than element-wise, because flyvis
-rotates a `uint8` raster through Pillow's bilinear resampler and this crate
-rotates the sampling geometry instead — a decision recorded in
+**One comparison in this workspace is tolerance-gated on a magnitude, and only
+one.** The moving-edge geometry gate
+(`moving_edge_offsets_match_flyvis_within_tolerance` in
+`crates/flyvis/src/moving_edge_checks.rs`) is gated against flyvis at a
+measured bound rather than exact equality, because flyvis rotates a `uint8`
+raster through Pillow's bilinear resampler and this crate rotates the
+sampling geometry instead — a decision recorded in
 `docs/superpowers/specs/2026-09-30-moving-edge-stimuli-design.md`. That gate
-prints its observed distribution; read it, do not just watch it pass. Every
-other comparison — the connectome's 1,513,231 edges, the flash and dot
-families, the lattice order — is element-wise, and "gated against flyvis"
-means something stronger everywhere else.
+prints its observed distribution; read it, do not just watch it pass. One
+other test in that file, `the_ownership_map_agrees_with_flyviss_fp16_mask`,
+also carries slack — it bounds how many pixels may disagree, not how far a
+value may be off, because flyvis's mask is `float16` and this crate's is
+`f64`. Every other comparison — the connectome's 1,513,231 edges, the flash
+and dot families, the lattice order — is exact, element-wise equality, and
+"gated against flyvis" means something stronger everywhere else.
 
 Clippy currently has 5 pre-existing warnings (4 `needless_range_loop` in `sim`,
 1 manual char comparison in `connectome`). Do not count those as new.

@@ -1,12 +1,14 @@
 //! Moving edges: a wide bar whose leading edge sweeps across the eye, at
 //! twelve directions and six speeds.
 //!
-//! # This family is gated at a tolerance, and it is the only one that is
+//! # This family's geometry is gated on a magnitude tolerance, and it is the only one that is
 //!
-//! Every other comparison in this workspace is element-wise: the connectome's
-//! 1,513,231 edges, the flash and dot families, the lattice ordering. This one
-//! is not, and reading "moving edges are gated against flyvis" as the same
-//! claim would be wrong.
+//! Every other comparison in this workspace is exact, element-wise equality:
+//! the connectome's 1,513,231 edges, the flash and dot families, the lattice
+//! ordering. The geometry gate is not, and reading "moving edges are gated
+//! against flyvis" as the same claim would be wrong. See
+//! `moving_edge_checks` for the detail, including the one other test in this
+//! family that also carries slack and why it is a different kind.
 //!
 //! flyvis rasterises the bar into a 775x775 image, casts it to `uint8` --
 //! truncating, so its background 0.5 becomes 127/255 = 0.498039 -- and rotates

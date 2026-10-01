@@ -1,11 +1,17 @@
 //! Acceptance criteria for the moving edge generator.
 //!
-//! **This module holds the only tolerance-gated comparison in the workspace.**
-//! Everywhere else -- the connectome's 1,513,231 edges, the flash and dot
-//! families, the lattice order -- agreement with flyvis is element-wise. Here
-//! it cannot be: flyvis rotates a `uint8` raster through Pillow's bilinear
-//! resampler and this crate rotates the sampling geometry instead, by an
-//! explicit decision recorded in the spec.
+//! **This module holds the only comparison in the workspace whose pass
+//! criterion is a magnitude tolerance.** Everywhere else -- the connectome's
+//! 1,513,231 edges, the flash and dot families, the lattice order --
+//! agreement with flyvis is exact, element-wise equality. The geometry gate
+//! below cannot be: flyvis rotates a `uint8` raster through Pillow's
+//! bilinear resampler and this crate rotates the sampling geometry instead,
+//! by an explicit decision recorded in the spec.
+//! (`the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, also
+//! carries slack, but as a bound on *how many* pixels may disagree, not on
+//! how far any one value may be off -- a different kind of tolerance, for a
+//! different reason: `float16` vs `f64`, not a rasteriser this crate cannot
+//! reproduce.)
 //!
 //! So the geometry gate prints its observed distribution rather than merely
 //! asserting a bound. The difference between 0.002 and 0.009 agreement is the
@@ -42,7 +48,12 @@ const GATE_ANGLES: [i32; 4] = [0, 30, 90, 150];
 /// mean the analytic and rasterised renderers differ by more than quantisation,
 /// and the cause needs finding before the gate means anything. The likeliest
 /// cause is the rotation centre: `monitor/2` instead of `monitor/2 - 0.5` moves
-/// the maximum to 0.032 and puts up to 39 hexals over 0.01.
+/// the maximum to 0.031848 and puts 1,316 hexals over 0.01, concentrated in
+/// angles 90 and 150 -- measured by this gate's own full 21-offset sweep
+/// across its four angles. A narrower 3-offset probe (angles 0/30/90/150/210,
+/// offsets -10/3/10) sees only 39 such hexals; both figures are correct for
+/// what they measured, but this gate's assertion message will cite the first
+/// angle in `GATE_ANGLES` order to exceed `TOLERANCE`, not the worst one.
 const TOLERANCE: f64 = 0.005;
 
 fn f32s(bytes: &[u8]) -> Vec<f32> {
@@ -86,10 +97,31 @@ fn json_array(s: &str, key: &str) -> Vec<i64> {
     json_ints(&s[open + 1..close])
 }
 
+/// Every integer that follows a `"key":` in the document, in order.
+/// `json_field` finds only the first.
+fn json_field_all(s: &str, key: &str) -> Vec<i64> {
+    let needle = format!("\"{key}\":");
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(&needle) {
+        rest = &rest[i + needle.len()..];
+        let end = rest.find([',', '}', '\n']).unwrap_or(rest.len());
+        out.push(rest[..end].trim().parse().expect("integer after key"));
+    }
+    out
+}
+
+/// The numeric value immediately at the start of a speed block -- the text
+/// right after the `"speed":` the block was split on.
+fn block_speed(block: &str) -> f64 {
+    let end = block.find([',', '}', '\n']).unwrap_or(block.len());
+    block[..end].trim().parse().expect("speed value")
+}
+
 /// The geometry gate. Tolerance-gated, and it prints what it observed.
 #[test]
 fn moving_edge_offsets_match_flyvis_within_tolerance() {
-    let (Some(bytes), Some(_manifest)) = (
+    let (Some(bytes), Some(manifest)) = (
         load_stimulus_bytes("moving_edge_offsets.bin"),
         load_stimulus_fixture("moving_edge_offsets.json"),
     ) else {
@@ -97,6 +129,26 @@ fn moving_edge_offsets_match_flyvis_within_tolerance() {
     };
     let want = f32s(&bytes);
     assert_eq!(want.len(), 8 * 21 * 721, "fixture value count");
+
+    // The fixture's own account of what it holds, against what this gate
+    // assumes. Without this, reordering GATE_ANGLES without regenerating the
+    // fixtures would surface only as a tolerance failure blaming the rotation
+    // centre.
+    assert_eq!(
+        json_array(&manifest, "shape"),
+        vec![(GATE_ANGLES.len() * 2) as i64, 21, 721],
+        "fixture shape"
+    );
+    assert_eq!(
+        json_field_all(&manifest, "index"),
+        (0..(GATE_ANGLES.len() * 2) as i64).collect::<Vec<_>>(),
+        "fixture group indices"
+    );
+    assert_eq!(
+        json_field_all(&manifest, "angle"),
+        GATE_ANGLES.iter().flat_map(|&a| [a as i64, a as i64]).collect::<Vec<_>>(),
+        "fixture group order must be angle-major, intensity-minor"
+    );
 
     let mut params = MovingEdgeParams::flyvis_defaults(DT);
     params.angles = GATE_ANGLES.to_vec();
@@ -234,12 +286,19 @@ fn the_timing_matches_flyvis_frame_for_frame() {
     assert_eq!(blocks.len(), 6, "six speeds");
 
     for (s, block) in blocks.iter().enumerate() {
+        // Sequence `s` is angle 0, intensity 0, speed index `s` -- but only if
+        // this block really is that speed. Check it rather than assume it.
+        assert_eq!(
+            e.speed_of(s),
+            Some(block_speed(block)),
+            "speed index {s}: block position does not match MovingEdge's own order"
+        );
+
         let n_stim: usize = json_field(block, "n_stim").parse().unwrap();
         let n_valid: usize = json_field(block, "n_valid").parse().unwrap();
         let indices = json_array(block, "indices");
         assert_eq!(indices.len(), n_stim, "speed index {s}: index count");
 
-        // Sequence `s` is angle 0, intensity 0, speed index `s`.
         assert_eq!(e.valid_frames(s), Some(n_valid), "speed index {s}: valid frames");
         for (k, &want) in indices.iter().enumerate() {
             assert_eq!(
@@ -263,6 +322,12 @@ fn the_nan_boundary_matches_flyvis() {
     let blocks: Vec<&str> = json.split("\"speed\":").skip(1).collect();
     let mut out = vec![0.0f32; 721];
     for (s, block) in blocks.iter().enumerate() {
+        assert_eq!(
+            e.speed_of(s),
+            Some(block_speed(block)),
+            "speed index {s}: block position does not match MovingEdge's own order"
+        );
+
         let n_valid: usize = json_field(block, "n_valid").parse().unwrap();
         e.frame_into(s, n_valid - 1, &mut out).unwrap();
         assert!(out.iter().all(|x| x.is_finite()), "speed index {s}: frame {} must be real", n_valid - 1);
