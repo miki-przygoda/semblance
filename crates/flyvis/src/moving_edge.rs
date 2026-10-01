@@ -311,9 +311,20 @@ impl MovingEdge {
     ///
     /// # Panics
     ///
+    /// If `offsets.1 < offsets.0`: `n_offsets` is computed as `offsets.1 -
+    /// offsets.0 + 1` cast to `usize`, which would wrap to an enormous value
+    /// instead of going negative, while `BarGeometry` would build an empty
+    /// range from the same inverted bounds -- the two would silently
+    /// disagree rather than both failing the same way.
+    ///
     /// If any speed resamples to zero frames, which leaves the `"continue"`
     /// pad with no frame to hold. flyvis fails the same way, less clearly.
     pub fn new(params: MovingEdgeParams) -> Self {
+        assert!(
+            params.offsets.1 >= params.offsets.0,
+            "offsets {:?} are inverted: last must be >= first",
+            params.offsets
+        );
         let eye = HexEye::new(params.extent, params.ppo);
         let n_hexals = eye.num_hexals();
         let coverage = Coverage::new(&params, &eye);
@@ -473,6 +484,8 @@ impl Stimulus for MovingEdge {
             // never the background.
             Some(*self.indices[s].last().expect("n_stim > 0, checked in new"))
         } else {
+            // Past `n_valid`: flyvis's stacking sentinel, not a held frame or
+            // background. See `valid_frames`.
             out.fill(f32::NAN);
             return Ok(());
         };
@@ -889,6 +902,50 @@ mod tests {
         e.frame_into(5, 464, &mut padded).unwrap();
         assert_eq!(padded, last_stim, "the pad repeats the last swept frame");
         assert!(padded.iter().any(|&x| x != 0.5), "and it is not the background");
+    }
+
+    /// The pads are DIFFERENCES of truncations --
+    /// `int((t_stim + t_pre) / dt) - int(t_stim / dt)` -- not `int(t_pre /
+    /// dt)`. Both give 200 at the default dt for every speed, so nothing else
+    /// in this module can tell them apart. At dt = 0.7 the correct form gives
+    /// n_pre = 2 and the naive one gives 1.
+    #[test]
+    fn the_pre_pad_is_a_difference_of_truncations_not_a_truncated_difference() {
+        let mut p = MovingEdgeParams::flyvis_defaults(0.7);
+        p.angles = vec![0];
+        // Speed 13 resamples to zero frames at this dt and trips the panic in
+        // `new`; this test is about speed 2.4 alone.
+        p.speeds = vec![2.4];
+        let e = MovingEdge::new(p);
+        assert_eq!(e.num_frames(), 7);
+        assert_eq!(e.valid_frames(0), Some(7));
+        let mut out = vec![0.0f32; 721];
+        e.frame_into(0, 0, &mut out).unwrap();
+        assert!(out.iter().all(|&x| x == 0.5), "frame 0 is background");
+        e.frame_into(0, 1, &mut out).unwrap();
+        assert!(out.iter().all(|&x| x == 0.5), "frame 1 is still background: n_pre is 2, not 1");
+    }
+
+    /// `post_pad_mode = "continue"` holds the last SWEPT frame, which is not
+    /// the last OFFSET. They coincide at every default speed because
+    /// `linspace(0, 20, n)` always ends on 20. At dt = 0.2 the fastest sweep
+    /// resamples to a single frame, so the pad must hold offset index 0 --
+    /// `n_offsets - 1` would hold the fully swept frame instead.
+    #[test]
+    fn the_continue_pad_holds_the_last_swept_frame_not_the_last_offset() {
+        let mut p = MovingEdgeParams::flyvis_defaults(0.2);
+        p.angles = vec![0];
+        let e = MovingEdge::new(p);
+        assert_eq!(e.num_frames(), 26);
+        assert_eq!(e.valid_frames(5), Some(11));
+        assert_eq!(e.resample_index(5, 0), Some(0), "n_stim is 1, so only offset index 0 is swept");
+        let mut swept = vec![0.0f32; 721];
+        let mut padded = vec![0.0f32; 721];
+        e.frame_into(5, 5, &mut swept).unwrap();
+        for f in 6..11 {
+            e.frame_into(5, f, &mut padded).unwrap();
+            assert_eq!(padded, swept, "frame {f}: the pad must hold offset index 0");
+        }
     }
 
     /// Verified against `torch.linspace(0, 20, n).long()` for all six speeds:

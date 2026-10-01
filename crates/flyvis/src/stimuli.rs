@@ -55,6 +55,13 @@ pub trait Stimulus {
     fn num_hexals(&self) -> usize;
     /// Writes one frame's intensities into `out`, which must be
     /// [`num_hexals`](Stimulus::num_hexals) long.
+    ///
+    /// `num_frames` is uniform across a family, but not every sequence fills
+    /// it with real content: an implementation may write `f32::NAN` for
+    /// frames past a sequence's own end, as a stacking sentinel borrowed from
+    /// flyvis's own padding. Before treating a frame as data, a consumer
+    /// should check whether the implementation exposes a per-sequence valid
+    /// length -- `MovingEdge::valid_frames`, for instance -- and stop there.
     fn frame_into(
         &self,
         sequence: usize,
