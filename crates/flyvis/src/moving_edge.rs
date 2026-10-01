@@ -110,7 +110,7 @@ impl MovingEdgeParams {
 /// a 775 px monitor, so its left edge is always off-monitor and `start` clamps
 /// to 0 -- what sweeps is the right edge.
 // This task produces `BarGeometry` and `inverse_rotate` for the rasteriser
-// built in Tasks 4 and 5; nothing in this crate calls them yet, so rustc sees
+// built in Task 4; nothing in this crate calls them yet, so rustc sees
 // them as dead outside the `#[cfg(test)]` module below.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -273,7 +273,11 @@ mod tests {
 
     /// `int()` truncates toward zero, so offset -1 gives -9 px and offset +1
     /// gives +9. `floor` would give -10 for the negative half and shift the
-    /// whole negative sweep by a pixel.
+    /// whole negative sweep by a pixel. This guards both truncation sites in
+    /// `BarGeometry::new`: `loc_horizontal_px` (the gap assertions, which pin
+    /// its symmetry either side of zero) and `loc_w` (the absolute assertion,
+    /// which pins its value directly -- a flooring regression there shifts
+    /// every stop by a uniform one pixel and leaves the gaps untouched).
     #[test]
     fn offsets_truncate_toward_zero_rather_than_flooring() {
         let g = BarGeometry::new(&params(), 775);
@@ -282,6 +286,10 @@ mod tests {
         // side would make it 10.
         assert_eq!(g.cols[10].1 - g.cols[9].1, 9);
         assert_eq!(g.cols[11].1 - g.cols[10].1, 9);
+        // `loc_w = trunc(h_px - 775/2)`. At offset 0 that is `trunc(-387.5)`,
+        // which is -387 toward zero and -388 under `floor` -- a uniform
+        // one-pixel shift of every stop, which the gaps above cannot see.
+        assert_eq!(g.cols[10], (0, 389));
     }
 
     /// No rotation at 0 degrees: the source pixel is the query pixel.
