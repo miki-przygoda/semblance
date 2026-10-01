@@ -1,14 +1,18 @@
 //! Moving edges: a wide bar whose leading edge sweeps across the eye, at
 //! twelve directions and six speeds.
 //!
-//! # This family's geometry is gated on a magnitude tolerance, and it is the only one that is
+//! # This family's geometry is gated on a magnitude tolerance, not exact equality
 //!
-//! Every other comparison in this workspace is exact, element-wise equality:
-//! the connectome's 1,513,231 edges, the flash and dot families, the lattice
-//! ordering. The geometry gate is not, and reading "moving edges are gated
-//! against flyvis" as the same claim would be wrong. See
+//! That bound exists because flyvis and this crate are computing different
+//! functions -- flyvis rasterises and rotates a `uint8` image, this crate
+//! rotates the sampling geometry instead -- not because of floating-point
+//! imprecision, and it would still be there on a machine with perfect
+//! arithmetic. "Gated against flyvis" does not mean the same thing
+//! everywhere in this workspace, and this family's bound is not precedent
+//! for widening some other comparison that could be exact. See
 //! `moving_edge_checks` for the detail, including the one other test in this
-//! family that also carries slack and why it is a different kind.
+//! family that also carries slack and why it is a different kind, and
+//! `CLAUDE.md` for the fuller version of that distinction.
 //!
 //! flyvis rasterises the bar into a 775x775 image, casts it to `uint8` --
 //! truncating, so its background 0.5 becomes 127/255 = 0.498039 -- and rotates

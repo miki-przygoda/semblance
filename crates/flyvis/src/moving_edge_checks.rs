@@ -1,20 +1,18 @@
 //! Acceptance criteria for the moving edge generator.
 //!
-//! **This module holds the only comparison in the workspace whose pass
-//! criterion is a magnitude tolerance.** Everywhere else -- the connectome's
-//! 1,513,231 edges, the flash and dot families, the lattice order --
-//! agreement with flyvis is exact, element-wise equality. The geometry gate
-//! below cannot be: flyvis rotates a `uint8` raster through Pillow's
-//! bilinear resampler and this crate rotates the sampling geometry instead,
-//! by an explicit decision recorded in the spec.
-//! (`the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, also
-//! carries slack, but as a bound on *how many* pixels may disagree, not on
-//! how far any one value may be off -- a different kind of tolerance, for a
-//! different reason: `float16` vs `f64`, not a rasteriser this crate cannot
-//! reproduce. `expand_checks::trained_synapse_counts_match_the_expanded_network`
-//! carries a third kind again: a `1e-6` relative epsilon on trained synapse
-//! counts that are supposed to be numerically identical, an f32 round-trip
-//! artifact rather than a bound on disagreement.)
+//! The geometry gate below, `moving_edge_offsets_match_flyvis_within_tolerance`,
+//! is bounded rather than exact: flyvis rotates a `uint8` raster through
+//! Pillow's bilinear resampler and this crate rotates the sampling geometry
+//! instead, by an explicit decision recorded in the spec. The two renderers
+//! are not computing the same function, so this bound would still exist on a
+//! machine with perfect arithmetic -- it is not a precision artifact, and it
+//! is not precedent for loosening a comparison that could be exact elsewhere.
+//! See `CLAUDE.md` for the fuller version of that distinction.
+//!
+//! `the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, carries a
+//! different kind of slack again: a bound on *how many* pixels may disagree,
+//! not on how far any one value may be off, because flyvis builds that mask
+//! in `float16` and this crate in `f64`.
 //!
 //! So the geometry gate prints its observed distribution rather than merely
 //! asserting a bound. The difference between 0.002 and 0.009 agreement is the

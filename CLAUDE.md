@@ -141,26 +141,33 @@ this workspace reproduces flyvis can pass while silently verifying nothing.
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.
 
-**One comparison in this workspace is tolerance-gated on a magnitude, and only
-one.** The moving-edge geometry gate
-(`moving_edge_offsets_match_flyvis_within_tolerance` in
-`crates/flyvis/src/moving_edge_checks.rs`) is gated against flyvis at a
-measured bound rather than exact equality, because flyvis rotates a `uint8`
-raster through Pillow's bilinear resampler and this crate rotates the
-sampling geometry instead — a decision recorded in
-`docs/superpowers/specs/2026-09-30-moving-edge-stimuli-design.md`. That gate
-prints its observed distribution; read it, do not just watch it pass. Two
-other tests carry a different kind of slack, neither a magnitude tolerance:
-`the_ownership_map_agrees_with_flyviss_fp16_mask`, in that same file, bounds
-how many pixels may disagree, not how far a value may be off, because
-flyvis's mask is `float16` and this crate's is `f64`; and
-`trained_synapse_counts_match_the_expanded_network`, in
-`crates/flyvis/src/expand_checks.rs`, allows a `1e-6` relative epsilon on
-trained synapse counts that are supposed to be numerically identical, an f32
-round-trip artifact rather than a bound on disagreement. Every other
-comparison — the connectome's 1,513,231 edges, the flash and dot families,
-the lattice order — is exact, element-wise equality, and "gated against
-flyvis" means something stronger everywhere else.
+**The moving-edge geometry gate is not precedent for loosening a comparison
+that could be exact.** `moving_edge_offsets_match_flyvis_within_tolerance`,
+in `crates/flyvis/src/moving_edge_checks.rs`, is bounded rather than exact
+because flyvis rasterises into `uint8` and rotates through Pillow's bilinear
+resampler, while this crate rotates the sampling geometry instead — a
+decision recorded in
+`docs/superpowers/specs/2026-09-30-moving-edge-stimuli-design.md`. The two
+renderers are not computing the same function, so that bound would still be
+there on a machine with perfect arithmetic: it is not a precision artifact,
+and it does not get tighter by trying harder. That gate prints its observed
+distribution; read it, do not just watch it pass. The same file's
+`the_ownership_map_agrees_with_flyviss_fp16_mask` carries a different kind of
+slack again: it bounds how many pixels may disagree, not how far any one
+value may be off, because flyvis builds that mask in `float16` and this
+crate in `f64`.
+
+Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
+float comparisons, for reasons specific to each one. Most are round-trip
+epsilons on values that are supposed to be numerically identical — a value
+re-read through flyvis's own `f32` export, say, or a closed-form check
+against flyvis's published formula — and those are precision artifacts, not
+evidence of a different algorithm; they should get tighter over time, not
+looser. A few, in `semblance-rng`, bound how closely a statistic converges to
+its true value over a finite number of random draws, which cannot be driven
+to zero no matter how precise the arithmetic — a different question again.
+Neither kind, and nothing about the geometry gate above, is reason to widen
+a comparison that could be exact instead.
 
 Clippy currently has 5 pre-existing warnings (4 `needless_range_loop` in `sim`,
 1 manual char comparison in `connectome`). Do not count those as new.
