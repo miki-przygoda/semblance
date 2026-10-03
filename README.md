@@ -42,13 +42,17 @@ Everything runs on a **synthetic** connectome out of the box, so you don't need 
 download anything to see the pipeline work. Wire in real data when you're ready
 (`RESOURCES.md` → "Getting the data").
 
+The flyvis acceptance tests read gitignored fixture data; `ci/fetch-fixtures.sh`
+fetches and checksum-verifies it (needs `gh` access to this repo), and CI runs
+the full suite against it with `SEMBLANCE_REQUIRE_FIXTURES=1`.
+
 ## What runs today vs. what's yours
 
 | Crate | Built and working | Left for you (the research) |
 |-------|-------------------|------------------------------|
 | `rng` | `semblance-rng` — SplitMix64-seeded xoshiro256++, frozen stream pinned by test vectors | — |
-| `connectome` | graph type, CSR view, edge-list loader, synthetic generator | load a real FlyWire/MaleCNS export |
-| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec, no external dependencies; carries its curated ground truth | — |
+| `connectome` | graph type, CSR view, edge-list loader, synthetic generator; `TypedNetwork` — a realised network that keeps flyvis's parameter sharing (cell type per neuron, connection type per edge) instead of flattening it | load a real FlyWire/MaleCNS export |
+| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec and expands it exactly as flyvis builds it (45,669 neurons, 1,513,231 synapses, 604 connection types); carries the trained parameters, the curated ground truth, and the three stimulus families (flashes, dots, moving edges), all gated against flyvis's own output | graded dynamics that reproduce flyvis's traces (0.3.0) |
 | `sim` | LIF neurons, decaying-current synapses, tick loop | sensory encoding + motor decoding ("make it act like an ant") |
 | `codec` | `WeightCodec` — lossless baseline, directly evolvable | `ReducedCodec` — the actual compression (`todo!()`) |
 | `evo` | gaussian mutation + truncation selection + elitism, seedable | your `Fitness` (environment + reward) |
