@@ -127,7 +127,7 @@ impl Connectome {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let mut it = line.split(|ch| ch == ',' || ch == '\t' || ch == ' ').filter(|t| !t.is_empty());
+            let mut it = line.split([',', '\t', ' ']).filter(|t| !t.is_empty());
             let parse_err = || io::Error::new(io::ErrorKind::InvalidData, format!("bad edge line: {line}"));
             let pre: NeuronId = it.next().ok_or_else(parse_err)?.parse().map_err(|_| parse_err())?;
             let post: NeuronId = it.next().ok_or_else(parse_err)?.parse().map_err(|_| parse_err())?;

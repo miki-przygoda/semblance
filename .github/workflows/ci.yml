@@ -1,0 +1,107 @@
+# Every flyvis acceptance gate, with fixtures present and verified.
+# Design: docs/superpowers/specs/2026-10-01-ci-design.md
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, not stable: with -D warnings a new stable lint would turn CI
+      # red with no change in the repo. Bumping this is a deliberate edit.
+      - name: Install Rust 1.97
+        run: |
+          rustup toolchain install 1.97 --profile minimal --component clippy
+          rustup override set 1.97
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-1.97-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.97-${{ hashFiles('Cargo.lock') }}-
+
+      - uses: actions/cache@v4
+        with:
+          path: data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
+          key: connectome-json-e609438ef261f4d12bf12556f4edb7a898ca4720029f9b882868967e6a0bbc73
+
+      - name: Fetch and verify fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/fetch-fixtures.sh
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test, with every fixture required
+        env:
+          SEMBLANCE_REQUIRE_FIXTURES: "1"
+        run: cargo test --workspace
+
+      # The geometry gate exists to be read, not just passed. Its table in the
+      # log is also the evidence that the fixture gates ran rather than skipped.
+      # --exact plus a required "1 passed": a rename must fail here, not
+      # quietly match zero tests.
+      - name: Moving-edge gate distribution
+        shell: bash
+        env:
+          SEMBLANCE_REQUIRE_FIXTURES: "1"
+        run: |
+          cargo test -p semblance-flyvis -- --exact --nocapture \
+            moving_edge_checks::moving_edge_offsets_match_flyvis_within_tolerance \
+            | tee moving-edge.log
+          grep -q '1 passed' moving-edge.log
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Lossless means exactly zero, matched as a literal string.
+      - name: Roundtrip is lossless
+        run: |
+          out="$(cargo run --quiet -- roundtrip)"
+          echo "$out"
+          grep -qF 'structural distance:  0.000000' <<<"$out"
+          grep -qF 'behavioural distance: 0.000000' <<<"$out"
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.85
+        run: |
+          rustup toolchain install 1.85 --profile minimal
+          rustup override set 1.85
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-1.85-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.85-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Build on the declared rust-version
+        run: cargo build --workspace --all-targets
