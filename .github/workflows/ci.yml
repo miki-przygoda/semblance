@@ -13,9 +13,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +37,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-1.97-${{ hashFiles('Cargo.lock') }}
+          key: cargo-1.97-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.97-${{ hashFiles('Cargo.lock') }}-
 
       - uses: actions/cache@v4
         with:
@@ -54,10 +60,17 @@ jobs:
 
       # The geometry gate exists to be read, not just passed. Its table in the
       # log is also the evidence that the fixture gates ran rather than skipped.
+      # --exact plus a required "1 passed": a rename must fail here, not
+      # quietly match zero tests.
       - name: Moving-edge gate distribution
+        shell: bash
         env:
           SEMBLANCE_REQUIRE_FIXTURES: "1"
-        run: cargo test -p semblance-flyvis moving_edge_offsets_match_flyvis_within_tolerance -- --nocapture
+        run: |
+          cargo test -p semblance-flyvis -- --exact --nocapture \
+            moving_edge_checks::moving_edge_offsets_match_flyvis_within_tolerance \
+            | tee moving-edge.log
+          grep -q '1 passed' moving-edge.log
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -72,6 +85,7 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -86,7 +100,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-1.85-${{ hashFiles('Cargo.lock') }}
+          key: cargo-1.85-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.85-${{ hashFiles('Cargo.lock') }}-
 
       - name: Build on the declared rust-version
         run: cargo build --workspace --all-targets

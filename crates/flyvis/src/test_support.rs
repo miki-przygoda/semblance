@@ -35,7 +35,8 @@ pub(crate) fn load_real_spec() -> Option<String> {
             eprintln!(
                 "skipping: {path} not found. Download \
                  https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip \
-                 and extract Lappalainen_et_al_connectome_avg_filters.json into data/flyvis-supplementary/"
+                 and extract Lappalainen_et_al_connectome_avg_filters.json into data/flyvis-supplementary/, \
+                 or run ci/fetch-fixtures.sh"
             );
             None
         }
@@ -58,7 +59,7 @@ pub(crate) fn load_build_fixture(name: &str) -> Option<String> {
             );
             eprintln!(
                 "skipping: {path} not found. Run \
-                 `uv run --project tools tools/export_build.py` to generate it."
+                 `uv run --project tools tools/export_build.py` to generate it, or run ci/fetch-fixtures.sh."
             );
             None
         }
@@ -81,7 +82,7 @@ pub(crate) fn load_build_bytes(name: &str) -> Option<Vec<u8>> {
             );
             eprintln!(
                 "skipping: {path} not found. Run \
-                 `uv run --project tools tools/export_build.py` to generate it."
+                 `uv run --project tools tools/export_build.py` to generate it, or run ci/fetch-fixtures.sh."
             );
             None
         }
@@ -106,7 +107,7 @@ pub(crate) fn load_stimulus_fixture(name: &str) -> Option<String> {
                 "skipping: {path} not found. Run \
                  `uv run --project tools tools/export_stimuli.py` and \
                  `uv run --project tools tools/export_moving_edges.py` \
-                 to generate the stimulus fixtures."
+                 to generate the stimulus fixtures, or run ci/fetch-fixtures.sh."
             );
             None
         }
@@ -130,7 +131,7 @@ pub(crate) fn load_stimulus_bytes(name: &str) -> Option<Vec<u8>> {
                 "skipping: {path} not found. Run \
                  `uv run --project tools tools/export_stimuli.py` and \
                  `uv run --project tools tools/export_moving_edges.py` \
-                 to generate the stimulus fixtures."
+                 to generate the stimulus fixtures, or run ci/fetch-fixtures.sh."
             );
             None
         }
