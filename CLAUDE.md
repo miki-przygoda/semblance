@@ -4,7 +4,7 @@ Rust workspace for connectome compression research. Take a connectome-constraine
 model that predicts real neural recordings, compress its representation, and
 measure how far it can shrink before it stops behaving like the fly.
 
-Current: **v0.1.1**, crate versions `0.1.0`. See "Version bumps" below — they
+Current: **v0.2.0**, crate versions `0.2.0`. See "Version bumps" below — they
 mean something specific here.
 
 ---
