@@ -119,20 +119,20 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 150 tests, 0 failures
+cargo test --workspace          # 203 tests, 0 failures
 cargo clippy --workspace --all-targets
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-21 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`
+26 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`
 and `data/flyvis-stimuli/` are absent (all three are gitignored real-data; the
 first is fetched per `RESOURCES.md`, the other two produced by
-`tools/export_build.py` and `tools/export_stimuli.py` respectively). A skip
-prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!` for
-*passing* tests, so under plain `cargo test --workspace` those notices are
-invisible — the suite reports the same "150 passed, 0 failed" whether the data
-is present or absent. They are only visible under
-`cargo test --workspace -- --nocapture`.
+`tools/export_build.py`, and `tools/export_stimuli.py` with
+`tools/export_moving_edges.py` respectively). A skip prints
+`eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
+tests, so under plain `cargo test --workspace` those notices are invisible —
+the suite reports the same "203 passed, 0 failed" whether the data is present
+or absent. They are only visible under `cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
 hard failure instead — CI must set this, or the acceptance gates that prove
@@ -140,6 +140,34 @@ this workspace reproduces flyvis can pass while silently verifying nothing.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.
+
+**The moving-edge geometry gate is not precedent for loosening a comparison
+that could be exact.** `moving_edge_offsets_match_flyvis_within_tolerance`,
+in `crates/flyvis/src/moving_edge_checks.rs`, is bounded rather than exact
+because flyvis rasterises into `uint8` and rotates through Pillow's bilinear
+resampler, while this crate rotates the sampling geometry instead — a
+decision recorded in
+`docs/superpowers/specs/2026-09-30-moving-edge-stimuli-design.md`. The two
+renderers are not computing the same function, so that bound would still be
+there on a machine with perfect arithmetic: it is not a precision artifact,
+and it does not get tighter by trying harder. That gate prints its observed
+distribution; read it, do not just watch it pass. The same file's
+`the_ownership_map_agrees_with_flyviss_fp16_mask` carries a different kind of
+slack again: it bounds how many pixels may disagree, not how far any one
+value may be off, because flyvis builds that mask in `float16` and this
+crate in `f64`.
+
+Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
+float comparisons, for reasons specific to each one. Most are round-trip
+epsilons on values that are supposed to be numerically identical — a value
+re-read through flyvis's own `f32` export, say, or a closed-form check
+against flyvis's published formula — and those are precision artifacts, not
+evidence of a different algorithm; they should get tighter over time, not
+looser. A few, in `semblance-rng`, bound how closely a statistic converges to
+its true value over a finite number of random draws, which cannot be driven
+to zero no matter how precise the arithmetic — a different question again.
+Neither kind, and nothing about the geometry gate above, is reason to widen
+a comparison that could be exact instead.
 
 Clippy currently has 5 pre-existing warnings (4 `needless_range_loop` in `sim`,
 1 manual char comparison in `connectome`). Do not count those as new.

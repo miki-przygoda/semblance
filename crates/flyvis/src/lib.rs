@@ -15,6 +15,10 @@ mod json;
 pub mod expand;
 #[cfg(test)]
 mod expand_checks;
+pub mod hex_eye;
+pub mod moving_edge;
+#[cfg(test)]
+mod moving_edge_checks;
 pub mod pretrained;
 #[cfg(test)]
 mod pretrained_checks;
@@ -30,3 +34,4 @@ pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, S
 pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
 };
+pub use moving_edge::{MovingEdge, MovingEdgeParams};

@@ -104,7 +104,9 @@ pub(crate) fn load_stimulus_fixture(name: &str) -> Option<String> {
             );
             eprintln!(
                 "skipping: {path} not found. Run \
-                 `uv run --project tools tools/export_stimuli.py` to generate it."
+                 `uv run --project tools tools/export_stimuli.py` and \
+                 `uv run --project tools tools/export_moving_edges.py` \
+                 to generate the stimulus fixtures."
             );
             None
         }
@@ -126,7 +128,9 @@ pub(crate) fn load_stimulus_bytes(name: &str) -> Option<Vec<u8>> {
             );
             eprintln!(
                 "skipping: {path} not found. Run \
-                 `uv run --project tools tools/export_stimuli.py` to generate it."
+                 `uv run --project tools tools/export_stimuli.py` and \
+                 `uv run --project tools tools/export_moving_edges.py` \
+                 to generate the stimulus fixtures."
             );
             None
         }
