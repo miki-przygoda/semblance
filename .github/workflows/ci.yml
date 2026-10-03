@@ -44,6 +44,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ci/fetch-fixtures.sh
 
+      - name: Throwaway - remove one fixture after verification
+        run: rm data/flyvis-stimuli/flashes.bin
+
       - name: Build
         run: cargo build --workspace
 
