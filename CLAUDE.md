@@ -120,7 +120,7 @@ a real implementation ships, `cargo yank` that version.
 ```bash
 cargo build --workspace
 cargo test --workspace          # 203 tests, 0 failures
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
@@ -169,8 +169,10 @@ to zero no matter how precise the arithmetic — a different question again.
 Neither kind, and nothing about the geometry gate above, is reason to widen
 a comparison that could be exact instead.
 
-Clippy currently has 5 pre-existing warnings (4 `needless_range_loop` in `sim`,
-1 manual char comparison in `connectome`). Do not count those as new.
+Clippy is clean, and CI enforces it with `-D warnings` on a pinned toolchain
+(see `.github/workflows/ci.yml`). The four `needless_range_loop` sites in `sim`
+carry scoped `#[allow]`s rather than rewrites, because `sim` is on the way out;
+they go when it does.
 
 `demo` and `evolve` print numbers that depend on the RNG stream. They change
 when the stream legitimately changes; they are not regression baselines.

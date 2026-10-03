@@ -67,6 +67,8 @@ impl NeuronModel for Lif {
         self.spikes = vec![false; n];
     }
 
+    // sim is replaced in 0.4.0 (CLAUDE.md: do not invest in it); not rewriting these loops.
+    #[allow(clippy::needless_range_loop)]
     fn step(&mut self, input: &[f32], dt: f32) -> &[bool] {
         debug_assert_eq!(input.len(), self.v.len());
         for i in 0..self.v.len() {
@@ -148,6 +150,8 @@ impl Engine {
     /// Each tick: decay synaptic current; input = synaptic current (× gain) +
     /// stimulus injection; integrate the model; add new spikes' weights to the
     /// postsynaptic synaptic current for subsequent ticks.
+    // sim is replaced in 0.4.0 (CLAUDE.md: do not invest in it); not rewriting these loops.
+    #[allow(clippy::needless_range_loop)]
     pub fn run<M: NeuronModel>(
         &mut self,
         model: &mut M,
@@ -229,6 +233,8 @@ impl SpikeReadout {
 }
 
 impl Readout for SpikeReadout {
+    // sim is replaced in 0.4.0 (CLAUDE.md: do not invest in it); not rewriting these loops.
+    #[allow(clippy::needless_range_loop)]
     fn observe(&mut self, _tick: u64, spikes: &[bool]) {
         self.ticks += 1;
         for i in 0..self.num_neurons {
