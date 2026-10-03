@@ -135,8 +135,15 @@ the suite reports the same "203 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
-hard failure instead — CI must set this, or the acceptance gates that prove
+hard failure instead — CI sets this (`.github/workflows/ci.yml`); anywhere else
+that runs the suite must too, or the acceptance gates that prove
 this workspace reproduces flyvis can pass while silently verifying nothing.
+
+To get the fixtures without installing Python, flyvis or PyTorch, run
+`ci/fetch-fixtures.sh`. It needs `gh` access to this repo, fetches only what
+is missing, and verifies every file against `ci/fixtures.sha256`. It never
+overwrites a file that fails verification. CI runs the same script, then the
+suite with `SEMBLANCE_REQUIRE_FIXTURES=1`.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
 stopped being lossless — that is a real break, not a tolerance to adjust.
