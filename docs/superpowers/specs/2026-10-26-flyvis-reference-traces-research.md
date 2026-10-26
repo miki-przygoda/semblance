@@ -86,8 +86,9 @@ How the evidence was gathered:
   which does `torch.load(...).pop("network")` followed by `load_state_dict`.
   - Source: `network_view.py:85-123,290-305,428-457`;
     `F/utils/chkpt_utils.py:17-42,122-150`.
-  - The checkpoint is loaded with `map_location=flyvis.device`
-    (`chkpt_utils.py:141-143`).
+  - The checkpoint is loaded with `map_location=flyvis.device` and
+    `weights_only=False`, passed explicitly (`chkpt_utils.py:139-143`), so
+    this path unpickles with full pickle semantics.
 - **F11.** "best" means `argmin` over the 0-d `validation/loss` (after the
   epe→loss fallback), which picks `chkpts/chkpt_00000`.
   - Source: `chkpt_utils.py:218-263`; default `loss_file_name="epe"` at

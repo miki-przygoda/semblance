@@ -211,7 +211,9 @@ The checkpoint is byte-checked against the original. Nothing under `data/` is
 written except the outputs.
 
 On a "no", section 1 reverts to the brief's root. The model copy and the
-sha256 check are then dropped. Every other assertion is unchanged.
+sha256 check are then dropped, and the `weights_only=True` load in step 3 of
+Process setup runs on the two original `chkpts/chkpt_00000` files instead.
+Every other assertion is unchanged.
 
 **O4. Store the input movies flyvis actually fed (C24, P20).** *Default in
 this spec: stored, as `input.f64.bin`, +47.6 MB.* This is an addition to the
@@ -264,7 +266,12 @@ It follows the exporter pattern (R1–R6):
    - `best_chkpt`
    - `validation_loss.h5`
 
-   Assert that each copied file's sha256 equals its source's.
+   Assert that each copied file's sha256 equals its source's. Then load each
+   scratch copy of `chkpts/chkpt_00000` with
+   `torch.load(path, map_location="cpu", weights_only=True)` and assert it
+   succeeds. These are the exact files that every later `nv.init_network`
+   unpickles with `weights_only=False` (see [Security notes](#security-notes)),
+   so this safe load runs before the first `init_network`.
 4. `import flyvis`, then assert:
    - `flyvis.device.type == "cpu"`
    - `flyvis.root_dir` resolves to the scratch root
@@ -1140,9 +1147,13 @@ match.
 ## Security notes
 
 - **Pickle.** Checkpoints are read with `torch.load(..., weights_only=True)`
-  in A1. flyvis's own `recover()` uses `torch.load` with torch 2.14's default,
-  which is `weights_only=True`. Only the local, sha256-verified checkpoints
-  that `download_pretrained.py` fetched are ever loaded.
+  in A1. flyvis 1.2.0's recovery path (`recover_network` ->
+  `get_from_state_dict`, `flyvis/utils/chkpt_utils.py:139-143`) calls
+  `torch.load(..., weights_only=False)` explicitly, so every `init_network`
+  unpickles the checkpoint with full pickle semantics. The protection on that
+  path is that only the local, sha256-verified copies are loaded, and that
+  each of those copies has first loaded successfully with
+  `weights_only=True` (Process setup, step 3).
 - **No network.** The exporter makes no network requests. flyvis needs none
   when the models are on disk. The copied checkpoints are checked against
   their originals.
