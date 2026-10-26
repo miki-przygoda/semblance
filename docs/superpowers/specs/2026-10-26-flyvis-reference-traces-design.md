@@ -141,11 +141,28 @@ None of them is silently applied.
 
 ## Owner decision needed (before the export is run)
 
-None of these blocks writing the plan or the script. Each one blocks *running*
-the export, because each changes what lands in `fixtures-2`. Changing it
-afterwards would cost a re-export and a `fixtures-3`. The spec is written in
-full with the default shown for each, so a "yes" or a "no" is all that is
-needed.
+Each one blocks *running* the export, because each changes what lands in
+`fixtures-2`. Changing it afterwards would cost a re-export and a
+`fixtures-3`.
+
+Not every answer is written out in full. A "no" to O1 or O2, and either
+answer to O3 or O4, needs no further spec change: O3 lists every place its
+"no" changes, and O4 lists what its "no" drops, including every fixture
+count (marked "with O4" where it appears). On those answers none of the four
+blocks writing the plan or the script.
+
+A "yes" to O1 or O2 has no contract here yet. It needs a spec amendment
+before the plan is written, which defines:
+
+- the new files' names, their block shapes and order, and their `manifest.json`
+  fields (for O1 also the settling-frame file)
+- for O2, the distance metric and tie-break that choose the column, and how
+  the column's count check (A5 checks exactly 65 for the centre) and the
+  manifest handle the 63-type fallback, since every column shape here
+  assumes 65 nodes
+- the adjusted [Sizes](#sizes) table and every fixture count (the manifest's
+  lines, the `--numstat` diff, the tarball listing and the fetch messages in
+  §3, flows 1 and 5–8, and Done when).
 
 **O1. Event-anchored all-cell snapshots (C8).** *Default: no. The approved 6
 evenly spaced frames stay as they are.*
@@ -256,7 +273,12 @@ whose tolerance is the arithmetic gap. Storing the inputs keeps both options
 open for task 6 (deferred question D1).
 
 On a "no", the file, its manifest blocks and the matching assertion are
-dropped.
+dropped. The fixture set then has one file fewer, so every count marked
+"with O4" takes its other value: `data/flyvis-reference/` holds 10 files,
+not 11; `ci/fixtures.sha256` has 34 lines, not 35, and its diff reads
+`14 0`; the tarball listing has 33 entries; the fetch messages read 34 and
+14 of 34 where they read 35 and 15 of 35. The binaries total
+173,281,056 B ([Sizes](#sizes)).
 
 ## Design
 
@@ -668,10 +690,12 @@ It contains:
 The tarball is built from local files that already pass `ci/fetch-fixtures.sh`
 against the *old* manifest. The 20 fixtures-1 files are therefore
 byte-identical, and the fetch script's upgrade path holds: on a machine that
-has fixtures-1, those files verify and only the 15 new ones are fetched.
+has fixtures-1, those files verify and only the 15 new ones (with O4) are
+fetched.
 
 **The manifest and the tag** change together in one commit (R17).
-`ci/fixtures.sha256` grows from 20 lines to 35 (exact contract below), and
+`ci/fixtures.sha256` grows from 20 lines to 35 (with O4; exact contract
+below), and
 `ci/fixtures-tag` becomes `fixtures-2`. The release must exist before that
 commit is pushed.
 
@@ -945,8 +969,8 @@ sys.exit(0 if a == b else "export_id mismatch: %s vs %s" % (a, b))'
 )
 ```
 
-- It has 35 lines. The 20 fixtures-1 lines are unchanged, so
-  `git diff --numstat ci/fixtures.sha256` reads `15 0`.
+- It has 35 lines (with O4). The 20 fixtures-1 lines are unchanged, so
+  `git diff --numstat ci/fixtures.sha256` reads `15 0` (with O4).
 - `find` is never run over `flyvis-pretrained/` (R14).
 
 `ci/fixtures-tag` holds `fixtures-2`. Both files change in **one** commit.
@@ -960,7 +984,7 @@ diff <(sed -n '2,$p' ci/fixtures.sha256 | awk '{print $2}' | LC_ALL=C sort) list
 grep -c '\._' listing                                                                # 0
 ```
 
-The listing has 34 entries. The release is created like this:
+The listing has 34 entries (with O4). The release is created like this:
 
 ```bash
 gh release create fixtures-2 "$out" --latest=false \
@@ -1084,7 +1108,7 @@ Each flow runs end to end on the real program.
    - one line per written file with its bytes
    - `  all assertions passed`
 
-   It exits 0. `data/flyvis-reference/` holds the 11 files of §2, and
+   It exits 0. `data/flyvis-reference/` holds the 11 files of §2 (with O4), and
    `data/flyvis-stimuli/` holds the three `_h80` files. Nothing else under
    `data/` changed. `data/` is gitignored, so `git status` cannot show
    this, and the fetch script checks only pinned files. Instead, run this
@@ -1131,7 +1155,7 @@ Each flow runs end to end on the real program.
 5. **Publish fixtures-2.**
    1. Run the fixture-manifest block. Its pair check must pass, or it exits
       non-zero and leaves `ci/fixtures.sha256` untouched. Then check
-      `15 0`.
+      `15 0` (with O4).
    2. Build and check the tarball.
    3. **Stop for owner sign-off**, quoting the asset size and the file count.
    4. Run `gh release create fixtures-2 …`.
@@ -1140,10 +1164,10 @@ Each flow runs end to end on the real program.
 6. **Fresh clone.** In a clean checkout with `gh` authenticated, run
    `SEMBLANCE_DATA_DIR=$(mktemp -d) /bin/bash ci/fetch-fixtures.sh`. It
    prints both fetch messages, then `fetched 35 of 35 fixtures; all 35
-   verified`.
+   verified` (with O4).
 7. **Upgrade from fixtures-1.** Use a scratch data dir holding only the
    fixtures-1 set. The script fetches only the 15 new files, `fetched 15 of
-   35`, and leaves the other 20 untouched (their sha256 is the same before
+   35` (with O4), and leaves the other 20 untouched (their sha256 is the same before
    and after).
 8. **CI, cache miss then hit.**
    - The first PR run after the commit logs `Cache not found` for
@@ -1151,7 +1175,7 @@ Each flow runs end to end on the real program.
      log shows both height tables.
    - "Re-run all jobs" on the same PR logs `Cache restored from key:
      fixtures-<hash>`, and the fetch step prints `all 35 fixtures present and
-     verified`. No release download happens.
+     verified` (with O4). No release download happens.
 9. **A corrupt cache is caught.** On a throwaway branch, flipping one byte of
    a restored fixture before the fetch step fails that step, naming the file.
    It is not merged.
@@ -1341,8 +1365,9 @@ match.
 
 ## Done when
 
-- [ ] O1–O4 are answered, and the spec is updated to match before the export
-      runs.
+- [ ] O1–O4 are answered. A "yes" to O1 or O2 has its spec amendment (see
+      [Owner decision needed](#owner-decision-needed-before-the-export-is-run))
+      made before the plan is written; no other answer needs one.
 - [ ] `uv run --project tools tools/export_reference.py` exits 0 with
       `  all assertions passed`. All of A1–A9 ran and none was skipped.
 - [ ] `data/flyvis-reference/` holds exactly the files in §2, and their
@@ -1361,11 +1386,12 @@ match.
       `cargo run --quiet -- roundtrip` (both distances `0.000000`) all pass.
       `Cargo.lock` still has 8 packages.
 - [ ] fixtures-2 is published after owner sign-off. `ci/fixtures.sha256`
-      (35 lines, `15 0` diff) and `ci/fixtures-tag` are committed in one
+      (35 lines, `15 0` diff, with O4) and `ci/fixtures-tag` are committed in one
       commit.
-- [ ] Flows 6 and 7 pass: 35 of 35 from empty, and 15 of 35 from fixtures-1.
+- [ ] Flows 6 and 7 pass: 35 of 35 from empty, and 15 of 35 from fixtures-1
+      (with O4).
 - [ ] CI is green on the PR with fixtures-2. A rerun shows the cache hit
-      and `all 35 fixtures present and verified`.
+      and `all 35 fixtures present and verified` (with O4).
 - [ ] `tools/README.md`, `CLAUDE.md`'s fixture paragraph, the fetch script's
       header, the `moving_edge.rs:240` comment and the module doc's debug
       timing are updated.
