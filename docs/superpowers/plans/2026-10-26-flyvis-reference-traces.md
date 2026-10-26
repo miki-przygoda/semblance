@@ -2596,7 +2596,7 @@ wc -c data/flyvis-stimuli/moving_edge_offsets_h80.bin
 python3 -I -c 'import json; a=json.load(open("data/flyvis-reference/PROVENANCE.json")); b=json.load(open("data/flyvis-stimuli/moving_edges_h80_provenance.json")); print(a["export_id"] == b["export_id"], a["git"]["dirty"], a["threads"])'
 ```
 
-Expected: `<repo>/data/flyvis-reference: manifest valid, 9 files verified, 11 files in all`; `11`; `484512 data/flyvis-stimuli/moving_edge_offsets_h80.bin`; `True False {'default': ..., 'determinism_check': [1, ...], 'bit_equal': True, 'runs_checked': [0, 1]}`. `--validate` checks every top-level field, every `files[]` entry, dtype against name, contiguous blocks, `bytes == Σ blocks`, each block against the storage layout (so every length equals the Sizes table), and each file's length and sha256.
+Expected: `data/flyvis-reference: manifest valid, 9 files verified, 11 files in all`; `11`; `484512 data/flyvis-stimuli/moving_edge_offsets_h80.bin`; `True False {'default': ..., 'determinism_check': [1, ...], 'bit_equal': True, 'runs_checked': [0, 1]}`. `--validate` checks every top-level field, every `files[]` entry, dtype against name, contiguous blocks, `bytes == Σ blocks`, each block against the storage layout (so every length equals the Sizes table), and each file's length and sha256.
 
 - [ ] **Step 7: Rerun without `--force` (flow 2)**
 
