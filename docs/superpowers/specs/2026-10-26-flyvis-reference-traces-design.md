@@ -1086,10 +1086,31 @@ Each flow runs end to end on the real program.
 
    It exits 0. `data/flyvis-reference/` holds the 11 files of §2, and
    `data/flyvis-stimuli/` holds the three `_h80` files. Nothing else under
-   `data/` changed: `ci/fetch-fixtures.sh` still reports the 20 fixtures-1
-   files verified, and `git status` shows no change made by the export. On
-   an O3 "no", the flyvis-written paths listed in O3 item 2 are the one
-   exception.
+   `data/` changed. `data/` is gitignored, so `git status` cannot show
+   this, and the fetch script checks only pinned files. Instead, run this
+   listing from the repo root with `/bin/bash` before the export and again
+   after it. It prints every path under `data/`, including ignored files,
+   dot files and empty directories, with a sha256 for each file. It leaves
+   out only `flyvis-reference/` and the three `_h80` files:
+
+   ```sh
+   ( cd data && find . \( -path ./flyvis-reference \
+         -o -path ./flyvis-stimuli/moving_edge_offsets_h80.bin \
+         -o -path ./flyvis-stimuli/moving_edge_offsets_h80.json \
+         -o -path ./flyvis-stimuli/moving_edges_h80_provenance.json \) -prune \
+       -o \( -type f -exec shasum -a 256 {} + \) \
+       -o -print | LC_ALL=C sort )
+   ```
+
+   The two listings must be identical. In particular,
+   `data/flyvis-pretrained/connectome/`, `data/flyvis-pretrained/renderings/`
+   and `data/flyvis-pretrained/results/flow/0000/{000,049}/__cache__/` must
+   not appear in the second, and no `.flyvis-reference.*` leftover may
+   either. On an O3 "no", the flyvis-written paths listed in O3 item 2 are
+   the one exception: add each of those four paths (the `__cache__` line
+   names two) as one more `-o -path ./flyvis-pretrained/...` term in the
+   prune group, in both listings. As a separate integrity check,
+   `ci/fetch-fixtures.sh` still reports the 20 fixtures-1 files verified.
 2. **Rerun without `--force`.** It exits 1 before importing flyvis, naming
    `data/flyvis-reference` or the first existing `_h80` file. Nothing is
    touched.
