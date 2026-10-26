@@ -3187,12 +3187,9 @@ git diff --numstat ci/fixtures.sha256
 git diff ci/fixtures.sha256 | grep '^+[0-9a-f]' | awk '{print $2}'
 ```
 
-Expected: `35`; `15	0	ci/fixtures.sha256`; and exactly these 15 added paths, in this order:
+Expected: `35`; `15	0	ci/fixtures.sha256`; and exactly these 15 added paths, in this order. The block sorts `flyvis-build`, `flyvis-stimuli` and `flyvis-reference` as one `LC_ALL=C` stream, so `flyvis-reference/` (`r`) comes before `flyvis-stimuli/` (`s`), and each `_h80` line sorts in among the existing stimuli lines, so the diff has several hunks:
 
 ```text
-flyvis-stimuli/moving_edge_offsets_h80.bin
-flyvis-stimuli/moving_edge_offsets_h80.json
-flyvis-stimuli/moving_edges_h80_provenance.json
 flyvis-reference/PROVENANCE.json
 flyvis-reference/centre.f32.bin
 flyvis-reference/centre.f64.bin
@@ -3204,10 +3201,13 @@ flyvis-reference/settling_centre.f32.bin
 flyvis-reference/settling_centre.f64.bin
 flyvis-reference/snapshots.f32.bin
 flyvis-reference/snapshots.f64.bin
+flyvis-stimuli/moving_edge_offsets_h80.bin
+flyvis-stimuli/moving_edge_offsets_h80.json
+flyvis-stimuli/moving_edges_h80_provenance.json
 flyvis-pretrained/ensemble.csv
 ```
 
-If the count or the numstat differs, stop: `git checkout ci/fixtures.sha256` and find out why before going on.
+If the count, the numstat or this list (paths or order) differs, stop: `git checkout ci/fixtures.sha256` and find out why before going on.
 
 - [ ] **Step 3: Set the tag**
 
