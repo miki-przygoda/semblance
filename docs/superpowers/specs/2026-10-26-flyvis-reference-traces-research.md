@@ -625,7 +625,8 @@ How the evidence was gathered:
     `json_array` (`:74-135`). Because `json_field_all("index")` scans the whole
     document, key names must not collide.
   - `crate::json::parse` (`json.rs:39`, `pub(crate)`) exists. Tasks 4 and 6
-    should use it for `manifest.json`.
+    should use it for `manifest.json`, reached from wherever the design spec's D3 places the
+    loaders (it is not visible outside `semblance-flyvis` as it stands).
 - **R13. One CI step greps a single test's output.** It runs
   `cargo test -p semblance-flyvis -- --exact --nocapture moving_edge_checks::moving_edge_offsets_match_flyvis_within_tolerance`
   and requires `1 passed` (`ci.yml:65-73`).

@@ -798,8 +798,8 @@ Written with `json.dumps(..., indent=2, allow_nan=False, sort_keys=False)`
 plus a trailing `\n`. Integers are written as integers. Every float is
 written as Python's `repr`, which round-trips exactly. The manifest is a
 deterministic function of the inputs, so a rerun produces the same bytes
-(P15). Tasks 4 and 6 parse it with `crate::json::parse`, not the ad-hoc
-scanners (R12).
+(P15). Tasks 4 and 6 parse it with the workspace's `json::parse` (reached
+as D3 decides), not the ad-hoc scanners (R12).
 
 | field | type | value |
 |---|---|---|
@@ -1083,8 +1083,9 @@ In `.github/workflows/ci.yml`, job `test`, the existing step
   and `sequences`. Which input drives the Rust run is D1.
 - **Task 7 (record):** `PROVENANCE.json`, both manifests, and the
   freeze-check figures.
-- **Loaders**, whichever task adds them first: add `load_reference_bytes(name)`
-  and `load_reference_fixture(name)` to `test_support.rs`. They follow R10.
+- **Loaders**, whichever task adds them first, in the place D3 settles (task
+  4's first design question): `load_reference_bytes(name)` and
+  `load_reference_fixture(name)`. They follow R10.
   Their skip message names `tools/export_reference.py` and
   `ci/fetch-fixtures.sh`. Every loader asserts `file length ==
   manifest.files[].bytes == Σ blocks[].bytes` and `dtype` against the file
