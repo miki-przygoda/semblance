@@ -411,9 +411,10 @@ array's length. It reads `ensemble.csv` (3 `#` lines, a header, 36,700 rows).
 **A3. Inputs, at the two levels (C2).** For each dt and sequence:
 
 - The model-000 f64 run's `x`, as float64, is stored.
-- The f32 run's `x`, widened to f64, must be bit-equal to
-  `float64(float32(stored))`. That is the *dataset* level. Flashes are equal
-  outright.
+- The f32 run's `x` must be bit-equal to `stored`. Edges are float64 in both
+  precisions (A2, F32). Flashes follow the default dtype (F31) and are
+  compared after widening the f32 run's `x`, which is exact. So `x` does not
+  depend on the default dtype. That is the *dataset* level.
 - The f32 run's `buffer[0, :, input_index[j]]` must be bit-equal to
   `float32(stored)` for every one of the 8 photoreceptor rows j. That is the
   *buffer* level.

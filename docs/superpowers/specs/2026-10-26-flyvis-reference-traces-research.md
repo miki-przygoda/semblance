@@ -687,7 +687,9 @@ convention or another source. The spec must settle each one.
   run does not.
   - So the f32/f64 gap includes input rounding.
   - The "f64 input == upcast f32 input, bitwise" assert (P13 and prior art)
-    holds at the dataset-tensor level only, not at the buffer level. The spec
+    holds at the dataset-tensor level only, not at the buffer level. At the
+    dataset-tensor level the edge `x` is f64 in both runs (F32), so the two
+    are equal outright, with no upcast involved. The spec
     must say which level it asserts, and record the effect in provenance.
 - **C3. The brief says setting `stim_dataset.dt = dt` is "ignored by these
   datasets". That is false for MovingEdge**: setting an equal dt re-runs
