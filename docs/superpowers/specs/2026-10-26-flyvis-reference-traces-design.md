@@ -599,8 +599,9 @@ A mismatch means the script read the checkpoints differently from the
 research pass. That is a bug to find, not a number to update.
 
 The check only records. It does not interpret. Whether the exact zeros are
-"frozen" in the time-constant sense is the owner's reading, and it goes into
-the epic README (see [Done when](#done-when)).
+"frozen" in the time-constant sense is the owner's reading. The owner records
+it in the local epic README from the PR's report of the A8 table (see
+[Done when](#done-when)); this task does not modify `docs/project-outline/`.
 
 **A9. Height-80 geometry.**
 
@@ -1396,5 +1397,7 @@ match.
 - [ ] `tools/README.md`, `CLAUDE.md`'s fixture paragraph, the fetch script's
       header, the `moving_edge.rs:240` comment and the module doc's debug
       timing are updated.
-- [ ] The 0.3.0 epic README (local) records the freeze-check result and the
-      exact sizes. The owner makes the D7 corrections.
+- [ ] The implementer reports the A8 freeze-check table and the exact file
+      sizes in the PR description. The owner records them, with the freeze
+      reading, in the local 0.3.0 epic README, along with the D7 corrections.
+      This task does not modify `docs/project-outline/`.
