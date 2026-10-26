@@ -272,8 +272,11 @@ agree with flyvis's edges only to ≤ 0.005, so stimulus error mixes into a gate
 whose tolerance is the arithmetic gap. Storing the inputs keeps both options
 open for task 6 (deferred question D1).
 
-On a "no", the file, its manifest blocks and the matching assertion are
-dropped. The fixture set then has one file fewer, so every count marked
+On a "no", only the write of `input.f64.bin` and its manifest blocks are
+dropped. Nothing else changes: the model-000 f64 run's `x` is still computed
+and kept in memory as `stored`, so every A3 bullet, the PROVENANCE
+`input_rounding` record and the `input frame` axis definition stay exactly as
+written. The fixture set then has one file fewer, so every count marked
 "with O4" takes its other value: `data/flyvis-reference/` holds 10 files,
 not 11; `ci/fixtures.sha256` has 34 lines, not 35, and its diff reads
 `14 0`; the tarball listing has 33 entries; the fetch messages read 34 and
@@ -1191,8 +1194,10 @@ the check, the run and the sequence. What it leaves behind depends on where
 it stopped (see the write steps below):
 
 - before write step 4, the `finally` removes the staging directory, and
-  `data/` is left exactly as it was. The staging directory is the only path
-  created before step 4; a missing `flyvis-stimuli/` is created in step 5.
+  `data/` is left exactly as it was. The staging directory, and `<OUT>`
+  itself when it did not exist (write step 1 creates it), are the only paths
+  created before step 4, and the `finally` removes both; a missing
+  `flyvis-stimuli/` is created in step 5.
   On an O3 "no", the flyvis-written paths listed in O3 item 2 are exempt:
   they stay as flyvis left them, and the next run deletes them.
 - from step 4 on, the `finally` deletes nothing. It keeps the staging
@@ -1216,7 +1221,8 @@ left in place for inspection, and the next run wipes it.
 
 **Writing the set atomically.**
 
-1. Create `<OUT>/.flyvis-reference.staging-<pid>/`, a sibling of the output
+1. Create `<OUT>` if it does not exist (recording that this run created
+   it), then `<OUT>/.flyvis-reference.staging-<pid>/`, a sibling of the output
    on the same filesystem. Inside it, create `flyvis-reference/` and
    `flyvis-stimuli/`.
 2. Write each `.bin` with `astype("<f4"|"<f8").tobytes(order="C")`, then
