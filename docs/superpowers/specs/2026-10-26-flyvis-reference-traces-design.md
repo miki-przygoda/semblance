@@ -239,7 +239,8 @@ uv run --project tools tools/export_reference.py [--force] [--out DIR]
 
 - `--out DIR` sets where the outputs go. The default is `<repo>/data`. The
   script writes `DIR/flyvis-reference/` and three files in
-  `DIR/flyvis-stimuli/`, and creates `DIR/flyvis-stimuli/` if it is missing.
+  `DIR/flyvis-stimuli/`, and creates `DIR/flyvis-stimuli/` if it is missing
+  (in write step 5, not before; see [Failure handling](#failure-handling)).
 - `--force` allows replacing outputs that already exist (see
   [Failure handling](#failure-handling)).
 
@@ -821,7 +822,7 @@ and machine. It is pinned by sha256, so any re-export needs a new fixtures tag
 | field | contents |
 |---|---|
 | `exported` | ISO date |
-| `export_id` | `<UTC timestamp>-<pid>`, the same value as in `moving_edges_h80_provenance.json`, so a mismatched pair is detectable |
+| `export_id` | `<UTC timestamp>-<pid>`, the same value as in `moving_edges_h80_provenance.json`. Write step 6 and the fixture-manifest step both refuse a mismatched pair |
 | `generator` | `{"path": "tools/export_reference.py", "sha256": ...}` |
 | `git` | `{"head": <rev-parse HEAD>, "dirty": bool}` |
 | `versions` | python, flyvis, torch, numpy, h5py, datamate |
@@ -888,14 +889,29 @@ syn_count are not in the file. They are the same for every model and live in
 
 ### The fixture manifest, tag and tarball
 
-`ci/fixtures.sha256` is generated from `data/`:
+`ci/fixtures.sha256` is generated from `data/`, after the pair check that
+write step 6 also runs. The block runs in a subshell under `set -euo
+pipefail`, from the repo root. It exits non-zero, before
+`ci/fixtures.sha256` is opened, unless all three `_h80` files exist and the
+two `export_id`s are equal. Its `exit` leaves only the subshell, so pasting
+it into an interactive shell is safe:
 
 ```bash
+(
+set -euo pipefail
 cd data
+for f in moving_edge_offsets_h80.bin moving_edge_offsets_h80.json moving_edges_h80_provenance.json; do
+  test -f "flyvis-stimuli/$f" || { echo "missing flyvis-stimuli/$f" >&2; exit 1; }
+done
+python3 -I -c 'import json, sys
+a = json.load(open("flyvis-reference/PROVENANCE.json"))["export_id"]
+b = json.load(open("flyvis-stimuli/moving_edges_h80_provenance.json"))["export_id"]
+sys.exit(0 if a == b else "export_id mismatch: %s vs %s" % (a, b))'
 { shasum -a 256 flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
   find flyvis-build flyvis-stimuli flyvis-reference -type f ! -name '.*' | LC_ALL=C sort | xargs shasum -a 256
   shasum -a 256 flyvis-pretrained/ensemble.csv
 } > ../ci/fixtures.sha256
+)
 ```
 
 - It has 35 lines. The 20 fixtures-1 lines are unchanged, so
@@ -1059,7 +1075,9 @@ Each flow runs end to end on the real program.
    rerunning with `SEMBLANCE_REQUIRE_FIXTURES=1` fails, naming the missing
    path. Without the variable, the height-9 half still prints its table.
 5. **Publish fixtures-2.**
-   1. Regenerate `ci/fixtures.sha256` and check `15 0`.
+   1. Run the fixture-manifest block. Its pair check must pass, or it exits
+      non-zero and leaves `ci/fixtures.sha256` untouched. Then check
+      `15 0`.
    2. Build and check the tarball.
    3. **Stop for owner sign-off**, quoting the asset size and the file count.
    4. Run `gh release create fixtures-2 …`.
@@ -1088,12 +1106,16 @@ Each flow runs end to end on the real program.
 
 **Fail closed, all in memory first (P14).** The script computes every array
 and runs every assertion (A1–A9) before it creates any output path. Any
-failed assertion or exception:
+failed assertion or exception raises and exits 1 with a message that names
+the check, the run and the sequence. What it leaves behind depends on where
+it stopped (see the write steps below):
 
-- raises, exits 1 with a message that names the check, the run and the
-  sequence
-- removes its staging directory in a `finally`
-- leaves `data/` exactly as it was
+- before write step 4, the `finally` removes the staging directory, and
+  `data/` is left exactly as it was. The staging directory is the only path
+  created before step 4; a missing `flyvis-stimuli/` is created in step 5.
+- from step 4 on, the `finally` deletes nothing. It keeps the staging
+  directory and the `.incomplete-<pid>` marker, and does at most the one
+  rename described below.
 
 `KeyboardInterrupt` takes the same path. The scratch root under `target/` is
 left in place for inspection, and the next run wipes it.
@@ -1102,9 +1124,10 @@ left in place for inspection, and the next run wipes it.
 
 - If `<OUT>/flyvis-reference` exists, or any of the three `_h80` files
   exists, the script exits 1 naming it, unless `--force` is given.
-- If any `<OUT>/.flyvis-reference.staging-*` or `.flyvis-reference.old-*`
-  exists, the script exits 1 naming it, even with `--force`. That is a
-  previous interrupted run, and a human removes it.
+- If any `<OUT>/.flyvis-reference.staging-*`, `.flyvis-reference.old-*` or
+  `.flyvis-reference.incomplete-*` exists, the script exits 1 naming it,
+  even with `--force`. That is a previous interrupted run, and a human
+  recovers from it (below).
 - If `FLYVIS_ROOT_DIR` is already set, the script exits 1.
 
 **Writing the set atomically.**
@@ -1118,19 +1141,53 @@ left in place for inspection, and the next run wipes it.
    file and both directories.
 3. Re-read every staged `.bin` and check its sha256 and length against the
    manifest.
-4. If `<OUT>/flyvis-reference` exists (`--force`), rename it to
+4. Create the marker file `<OUT>/.flyvis-reference.incomplete-<pid>`
+   (holding the `export_id`) and `fsync` `<OUT>`. From here on the `finally`
+   deletes neither the staging directory nor the marker. If
+   `<OUT>/flyvis-reference` exists (`--force`), rename it to
    `<OUT>/.flyvis-reference.old-<pid>`. Rename the staged
    `flyvis-reference/` into place, then `fsync` `<OUT>`.
-5. `os.replace` each staged `_h80` file into `<OUT>/flyvis-stimuli/`, in this
-   order: `.bin`, `.json`, then provenance. `fsync` the directory.
-6. Remove the `.old-<pid>` directory and the staging directory, then print
-   `  all assertions passed`.
+5. Create `<OUT>/flyvis-stimuli/` if it is missing. `os.replace` each staged
+   `_h80` file into it, in this order: `.bin`, `.json`, then provenance.
+   `fsync` the directory.
+6. Check the pair: all three `_h80` files exist in `<OUT>/flyvis-stimuli/`,
+   and the `export_id` in `<OUT>/flyvis-reference/PROVENANCE.json` equals
+   the one in `<OUT>/flyvis-stimuli/moving_edges_h80_provenance.json`;
+   otherwise exit 1. Remove the `.old-<pid>` directory and the staging
+   directory, remove the marker last, then print `  all assertions passed`.
 
-An interruption inside steps 4–6 can leave a new `flyvis-reference/` beside
-old or missing `_h80` files. The `export_id` in the two provenance files
-then differs, and `.flyvis-reference.old-*` or `.staging-*` remains, so the
-next run's preflight refuses until a human looks. Recovery is to remove the
-leftovers and rerun with `--force`.
+If an exception or `KeyboardInterrupt` arrives inside steps 4–6, the
+`finally` deletes nothing, so the new set is never lost with the staging
+directory. It does one thing: if `.old-<pid>` exists and
+`<OUT>/flyvis-reference` does not (the stop fell between the two renames of
+step 4), it renames `.old-<pid>` back to `flyvis-reference`. Step 5 has not
+started then, so the previous set is whole again.
+
+Once the staged `flyvis-reference/` is in place, the previous set is given
+up. `.old-<pid>` holds only its `flyvis-reference/`, and under `--force`
+step 5 overwrites its `_h80` files with no backup, so it cannot be restored
+as a whole. The remedy is the new set, not a restore: rerun with `--force`.
+Once fixtures-2 is published, the published set can be fetched instead, by
+deleting `flyvis-reference/` and the three `_h80` files and running
+`ci/fetch-fixtures.sh`.
+
+**Recovering from an interrupted run.** After an exception or Ctrl-C in
+steps 4–6, the marker remains, with `.staging-<pid>` and, under `--force`,
+possibly `.old-<pid>`. After a hard kill (no `finally`), any of the three
+can remain, including a `.staging-*` from steps 1–3. The next preflight
+refuses on any of them. Recovery:
+
+1. If `<OUT>/flyvis-reference` is missing and a `.flyvis-reference.old-*`
+   exists, the kill fell between the two renames of step 4. Rename that
+   `.old-*` back to `flyvis-reference`; the previous set is then whole.
+2. Otherwise any `.old-*` is the given-up previous `flyvis-reference/`.
+   Remove the remaining `.staging-*`, `.old-*` and `.incomplete-*`
+   leftovers and rerun with `--force` (or fetch the published set, above).
+
+Until that rerun succeeds, `flyvis-reference/` may be new while the `_h80`
+files are old or missing. That mixed set never reaches the fixture
+manifest, because the fixture-manifest block runs the same pair check as
+step 6 first and exits before writing.
 
 **Reruns.** A rerun is the only way to change the output, and it needs
 `--force`. Its binaries and manifest are byte-identical (flow 3), but its two
