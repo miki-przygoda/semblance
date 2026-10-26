@@ -210,10 +210,41 @@ The spec instead does three things:
 The checkpoint is byte-checked against the original. Nothing under `data/` is
 written except the outputs.
 
-On a "no", section 1 reverts to the brief's root. The model copy and the
-sha256 check are then dropped, and the `weights_only=True` load in step 3 of
-Process setup runs on the two original `chkpts/chkpt_00000` files instead.
-Every other assertion is unchanged.
+On a "no", section 1 reverts to the brief's root, and exactly these places
+change with it:
+
+1. **Process setup.** Step 1 and the preflight's `FLYVIS_ROOT_DIR` rule
+   accept the variable only when it is unset or resolves to
+   `<repo>/data/flyvis-pretrained`; any other value exits 1 naming it. If it
+   is unset, step 2 sets it to that path. Step 2's scratch wipe and step 3's
+   model copy and sha256 check are dropped, and the `weights_only=True` load
+   in step 3 runs on the two original `chkpts/chkpt_00000` files instead.
+   Step 4 asserts that `flyvis.root_dir` resolves to
+   `<repo>/data/flyvis-pretrained`.
+2. **Stale caches (F6).** In step 2, before `import flyvis`, the script
+   deletes these paths if they exist, and nothing else:
+   - `data/flyvis-pretrained/connectome/`
+   - `data/flyvis-pretrained/renderings/`
+   - `data/flyvis-pretrained/results/flow/0000/{000,049}/__cache__/`
+
+   The datamate cache key ignores dtype, so a cache left by an earlier run
+   would otherwise be reused silently.
+3. **PROVENANCE.** `flyvis_root` records `data/flyvis-pretrained` and that
+   no copy was made. `models` records only the sha256 of each original
+   `chkpts/chkpt_00000`.
+4. **The "`data/` unchanged" promise.** Flow 1 and Failure handling exempt
+   exactly the paths in item 2: the script deletes them and flyvis recreates
+   them, and a failed run leaves them as flyvis left them (the next run
+   deletes them again). None of them is in the fixture set, and the tarball
+   listing check keeps them out. Every other path under `data/` keeps the
+   promise.
+5. **Security notes.** The Pickle bullet's protection becomes the safe load
+   of the two originals, and the No-network bullet's copy check is dropped.
+   The Environment bullet's O3 "no" sentence applies.
+6. **`tools/README.md`.** Its note says the script runs flyvis with
+   `FLYVIS_ROOT_DIR=data/flyvis-pretrained`, not a scratch root.
+
+Every assertion A1–A9 is unchanged.
 
 **O4. Store the input movies flyvis actually fed (C24, P20).** *Default in
 this spec: stored, as `input.f64.bin`, +47.6 MB.* This is an addition to the
@@ -256,7 +287,7 @@ It follows the exporter pattern (R1–R6):
 
 1. If `FLYVIS_ROOT_DIR` is already set in the environment, abort and name the
    variable. A caller's root would bypass O3, so the script takes no root
-   from outside.
+   from outside. (On an O3 "no", steps 1–4 change as O3 lists.)
 2. Delete `ROOT/target/flyvis-reference-root/` and recreate it empty. Set
    `FLYVIS_ROOT_DIR` to it. Set `CUDA_VISIBLE_DEVICES=""` (F26).
 3. Copy `data/flyvis-pretrained/results/flow/0000/000/` and `.../049/` into
@@ -1056,7 +1087,9 @@ Each flow runs end to end on the real program.
    It exits 0. `data/flyvis-reference/` holds the 11 files of §2, and
    `data/flyvis-stimuli/` holds the three `_h80` files. Nothing else under
    `data/` changed: `ci/fetch-fixtures.sh` still reports the 20 fixtures-1
-   files verified, and `git status` shows no change made by the export.
+   files verified, and `git status` shows no change made by the export. On
+   an O3 "no", the flyvis-written paths listed in O3 item 2 are the one
+   exception.
 2. **Rerun without `--force`.** It exits 1 before importing flyvis, naming
    `data/flyvis-reference` or the first existing `_h80` file. Nothing is
    touched.
@@ -1113,6 +1146,8 @@ it stopped (see the write steps below):
 - before write step 4, the `finally` removes the staging directory, and
   `data/` is left exactly as it was. The staging directory is the only path
   created before step 4; a missing `flyvis-stimuli/` is created in step 5.
+  On an O3 "no", the flyvis-written paths listed in O3 item 2 are exempt:
+  they stay as flyvis left them, and the next run deletes them.
 - from step 4 on, the `finally` deletes nothing. It keeps the staging
   directory and the `.incomplete-<pid>` marker, and does at most the one
   rename described below.
@@ -1128,7 +1163,9 @@ left in place for inspection, and the next run wipes it.
   `.flyvis-reference.incomplete-*` exists, the script exits 1 naming it,
   even with `--force`. That is a previous interrupted run, and a human
   recovers from it (below).
-- If `FLYVIS_ROOT_DIR` is already set, the script exits 1.
+- If `FLYVIS_ROOT_DIR` is already set, the script exits 1. On an O3 "no",
+  it exits 1 only when the value does not resolve to
+  `<repo>/data/flyvis-pretrained`.
 
 **Writing the set atomically.**
 
@@ -1217,7 +1254,10 @@ match.
 - **Environment.** flyvis loads `.env` from the cwd (F1). The script sets
   `FLYVIS_ROOT_DIR` itself and refuses an inherited one, and `load_dotenv`
   does not override a variable that is already set. So a stray `.env` cannot
-  redirect where flyvis writes.
+  redirect where flyvis writes. On an O3 "no", the script accepts an
+  inherited value only when it resolves to `<repo>/data/flyvis-pretrained`,
+  exits 1 on any other value, and sets that path itself before the import
+  when the variable is unset, so the same holds.
 - **Fixture integrity.** Every fixture is pinned by sha256 in a committed
   file. A restored CI cache is untrusted until `ci/fetch-fixtures.sh`
   re-verifies it. Cache scope is the branch plus the default branch (F52),
