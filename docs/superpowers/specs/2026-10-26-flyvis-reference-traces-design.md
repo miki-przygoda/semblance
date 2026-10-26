@@ -515,18 +515,21 @@ checkpoints, the script computes and records the following.
   - the configured clamp, read from the model's `_meta.yaml`, which must be
     none
 
-It asserts the figures F46–F48 already measured from the same files:
+It asserts the figures F46–F48 already measured from the same files.
+"Median" here is `statistics.median` over the 50 per-model counts: the mean
+of the 25th and 26th sorted values, so a half-integer is the exact expected
+value.
 
 | figure | value |
 |---|---|
 | time_const below the floor, total | 2,396 |
-| per model (min / median / max) | 36 / 49 / 55 |
+| per model (min / median / max) | 36 / 48.5 / 55 |
 | models 000 / 049 | 51 / 36 |
 | in `[f32(0.02), 0.02]` | 0 |
 | below `f32(1/200)` | 0 |
 | syn_strength exact zeros | 919 |
 | syn_strength negative | 0 |
-| zeros per model (min / median / max) | 8 / 18 / 40 |
+| zeros per model (min / median / max) | 8 / 17.5 / 40 |
 | zeros for models 000 / 049 | 31 / 15 |
 | connection types zero in some model | 418 |
 | connection types zero in all 50 | 0 |

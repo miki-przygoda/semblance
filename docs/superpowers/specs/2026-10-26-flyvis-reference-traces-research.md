@@ -357,6 +357,9 @@ How the evidence was gathered:
   - Range 0.018780678 to 0.543077.
   - 2,396 (model, type) pairs fall below f32(0.02): 51 in model 000 and 36 in
     model 049.
+  - Per model: min 36, median 48.5, max 55. Median here and in F47 is
+    `statistics.median` over the 50 per-model counts, the mean of the 25th
+    and 26th sorted values (48 and 49).
   - None lies in [f32(0.02), 0.02].
   - The largest value below the floor is 0.019996209. The smallest at or above
     it is 0.020369984.
@@ -364,7 +367,8 @@ How the evidence was gathered:
 - **F47.** syn_strength:
   - 919 of 30,200 values are exactly 0.0, on the `non_negative` boundary. None
     are negative.
-  - Every model has some: min 8, median 18, max 40 (model 000 has 31, model 049
+  - Every model has some: min 8, median 17.5 (25th and 26th sorted
+    values 17 and 18), max 40 (model 000 has 31, model 049
     has 15).
   - 418 connection types are zero in at least one model, and none is zero in
     all 50.
