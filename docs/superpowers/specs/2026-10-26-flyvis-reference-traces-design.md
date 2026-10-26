@@ -1,7 +1,7 @@
 # flyvis reference traces, exported for the graded-dynamics gate
 
 **Date:** 2026-10-26
-**Status:** draft — under review
+**Status:** reviewed; owner decisions O1–O4 answered 2026-10-26
 **Epic:** 0.3.0 graded dynamics, task 1 —
 `docs/project-outline/0.3.0-graded-dynamics/`
 **Research file:**
@@ -140,6 +140,10 @@ under [Owner decision needed](#owner-decision-needed-before-the-export-is-run).
 None of them is silently applied.
 
 ## Owner decision needed (before the export is run)
+
+**Answered 2026-10-26: O1 no, O2 no, O3 yes, O4 yes.** Every default below
+stands, so no amendment is needed, and the "with O4" counts are the ones that
+apply.
 
 Each one blocks *running* the export, because each changes what lands in
 `fixtures-2`. Changing it afterwards would cost a re-export and a
@@ -1080,9 +1084,10 @@ In `.github/workflows/ci.yml`, job `test`, the existing step
   - mid-settling agreement from `settling_centre` (the epic's "wrong reason"
     risk)
 
-  It must take the f32-comparison floor as ≈ 2× the measured gap, not 1×
-  (C11, P1). It must report per cell type with a mixed tolerance (P3), and
-  look at the error against step index (P4).
+  Its pass bound is task 4's to design. Epic decision 2 (1× the measured
+  f32/f64 gap) stands until then. The research behind a wider bound, per-type
+  mixed tolerances and error against step index (C11, P1, P3, P4) is input
+  for that design, not a requirement set here.
 - **Task 6 (stage 2):** `centre.<p>.bin`, `snapshots.<p>.bin`, `input.f64.bin`
   and `sequences`. Which input drives the Rust run is D1.
 - **Task 7 (record):** `PROVENANCE.json`, both manifests, and the
