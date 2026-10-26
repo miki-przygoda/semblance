@@ -390,15 +390,20 @@ array's length. It reads `ensemble.csv` (3 `#` lines, a header, 36,700 rows).
      widening `float64(float32 value)`.
   3. after the run's last sequence, to catch an in-place clamp (F18)
 
-  In f64 runs, every tensor reachable from `network._param_api()` must also
-  have dtype float64. That covers the values the dynamics actually read (F17).
+  In f64 runs, every floating-point tensor reachable from
+  `network._param_api()` must also have dtype float64. That means the
+  `.values` of every `RefTensor` in nodes/edges/sources/targets, plus every
+  plain tensor that `write_derived_params` adds (`edges.weight`). The integer
+  `RefTensor.indices` tensors are excluded and must stay int64. That covers
+  the values the dynamics actually read (F17).
 - `syn_count` stays log-space throughout. Its semantic value is `exp(raw)` (F16).
 
 **A2. Precision is what it claims, throughout (C1, C2).** For each run, with
 `want` = float32 or float64:
 
 - `torch.get_default_dtype() == want` at run start.
-- Every parameter and every `_param_api()` tensor has dtype `want`.
+- Every parameter, and every floating-point `_param_api()` tensor as A1
+  defines it, has dtype `want`. The `RefTensor.indices` stay int64.
 - `network.stimulus.buffer` has dtype `want`, checked after each `zero()` and
   `add_input`.
 - Every settling state and every trace has dtype `want`.

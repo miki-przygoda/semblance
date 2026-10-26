@@ -715,8 +715,9 @@ convention or another source. The spec must settle each one.
   - Check equality **before** `.double()`, or after an exact widen (F16).
   - Check it **again after the runs**, because `clamp()` mutates parameters in
     place (F18).
-  - For f64, assert on the `_param_api()` tensors, not only on `parameters()`
-    (F17).
+  - For f64, assert on the floating-point `_param_api()` tensors (the
+    `RefTensor.values` and `edges.weight`, not the int64 `.indices`), not only
+    on `parameters()` (F17).
 - **C7. The brief's NaN-trimming step is moot when the edge dataset is subset
   in the constructor.** `MovingEdge(speeds=[13], angles=[...])` produces no NaN
   padding at all (F38). Keep the no-NaN assertion, and say in the spec why no
