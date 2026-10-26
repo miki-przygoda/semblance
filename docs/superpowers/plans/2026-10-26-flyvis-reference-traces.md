@@ -821,6 +821,10 @@ def test_pack_file_keeps_bits_and_refuses_a_silent_cast():
     raises(lambda: er.pack_file(entry, bad), "float64", "<f4")
     bad[(2, "1/50", None)] = np.array([0.5, 0.5], dtype=np.float32)
     raises(lambda: er.pack_file(entry, bad), "shape")
+    # The widening direction: a float32 array into an <f8 file is refused too.
+    e64 = er._file_entry("x.f64.bin", "<f8", ["a"], [(1, "1/200", None, [1])])
+    assert er.pack_file(e64, {(1, "1/200", None): np.array([0.5], dtype=np.float64)}) == bytes.fromhex("000000000000e03f")
+    raises(lambda: er.pack_file(e64, {(1, "1/200", None): np.array([0.5], dtype=np.float32)}), "float32", "<f8")
 
 
 def test_verify_files_catches_length_and_sha256():
