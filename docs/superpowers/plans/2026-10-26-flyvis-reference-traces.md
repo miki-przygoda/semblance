@@ -2578,11 +2578,14 @@ Expected: `rc=0`, and the indented lines, in this order (flyvis's own log lines,
     -o \( -type f -exec shasum -a 256 {} + \) \
     -o -print | LC_ALL=C sort )' > target/data-after.txt
 diff target/data-before.txt target/data-after.txt && echo data-unchanged
-grep -c -e 'connectome' -e 'renderings' -e '__cache__' -e '\.flyvis-reference\.' target/data-after.txt
+grep -c -e '\./flyvis-pretrained/connectome' -e '\./flyvis-pretrained/renderings' \
+  -e '\./flyvis-pretrained/results/flow/0000/000/__cache__' \
+  -e '\./flyvis-pretrained/results/flow/0000/049/__cache__' \
+  -e '\./\.flyvis-reference\.' target/data-after.txt
 /bin/bash ci/fetch-fixtures.sh
 ```
 
-Expected: `data-unchanged`, then `0`, then `fetch-fixtures: all 20 fixtures present and verified in <repo>/data`.
+Expected: `data-unchanged`, then `0` (the patterns are anchored to the paths the spec's O3 item 2 and flow 1 name, so the two pinned `flyvis-supplementary/Lappalainen_et_al_connectome_*` files do not count; `grep -c` exits 1 on a `0`, which is expected), then `fetch-fixtures: all 20 fixtures present and verified in <repo>/data`.
 
 - [ ] **Step 6: Validate the set against the manifest field table and the Sizes table**
 
