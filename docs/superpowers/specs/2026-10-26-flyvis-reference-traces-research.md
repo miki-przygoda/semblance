@@ -182,8 +182,10 @@ How the evidence was gathered:
   0.019999999552965164 at dt 0.02.
   - Even under the f64 default, `torch.tensor(0.02).float()` is still f32.
     `torch.max(f64, f32)` promotes the result to f64. Both were measured.
-  - The Euler step itself uses the Python-float dt (`vel * dt`,
-    `network.py:406`). Only the floor sees f32(dt).
+  - The Euler step itself passes the Python-float dt (`vel * dt`,
+    `network.py:406`), and PyTorch casts that scalar to the tensor's dtype.
+    So f32 runs step with f32(dt) and f64 runs with the f64 dt. Only in f64
+    runs is the floor the sole place f32(dt) appears.
 - **F24.** `target_sum` is built with `torch.zeros(...)` in the default dtype
   and then `scatter_add_` (`network.py:333-351`). A dtype mismatch raises (torch
   semantics).

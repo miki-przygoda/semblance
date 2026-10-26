@@ -72,7 +72,7 @@ into a live process. The ids point at the research file.
 | `steady_state(return_last=False)` returns `int(t_pre/dt)` states: 200 at 1/200 and 50 at 0.02. The first state is already one Euler step in | F19, F20 |
 | output frame i is the state after step i+1, driven by input frame i. The initial state is not included | F21 |
 | `stimulus_response` = settle once at batch 1, then `forward` from the settled state for each batch | F22 |
-| the time-constant floor uses `f32(dt)`: 0.019999999552965164 at 0.02 and 0.004999999888241291 at 1/200. The Euler step uses the Python-float dt | F23 |
+| the time-constant floor is `max(tau, f32(dt))` in both precisions: f32(dt) is 0.019999999552965164 at 0.02 and 0.004999999888241291 at 1/200. The Euler step's `vel * dt` uses dt in the run's precision: f32(dt) in f32 runs, because PyTorch casts the Python scalar to the tensor dtype, and the f64 dt in f64 runs | F23 |
 | the default dtype matters **at call time**: in the stimulus buffer, `target_sum`, `Flashes.get_item` and `render_flash` | F29 |
 | `Stimulus.zero()` reuses an existing buffer of the same shape **and keeps its dtype** | F30 |
 | `Flashes.get_item` returns the default dtype. Its values 0, 0.5 and 1 are exact in both | F31 |
@@ -554,9 +554,11 @@ the epic README (see [Done when](#done-when)).
 
 #### Recorded for the port, not handled here
 
-flyvis's floor is `max(tau, f32(dt))`, while the Euler step uses the
-Python-float dt (F23). PROVENANCE.json records both values for each dt and
-the source lines. Task 3's spec must reproduce it.
+The floor is `max(tau, f32(dt))` in both precisions. The Euler step's
+`vel * dt` uses dt in the run's precision: f32(dt) in f32 runs, because
+PyTorch casts the Python scalar to the tensor dtype, and the f64 dt in f64
+runs (F23). PROVENANCE.json records both values for each dt and the source
+lines. Task 3's spec must reproduce it.
 
 ### 2. What gets stored
 
@@ -824,7 +826,7 @@ and machine. It is pinned by sha256, so any re-export needs a new fixtures tag
 | `dts` | per dt: the float, the rational, n_settle, `floor_dt_f32` |
 | `settling` | `{"t_pre": 1.0, "value": 0.5, "t_fade_in": 0.0, "batch_size": 1}` |
 | `stimuli` | each dataset's `config.to_dict()` and its arg rows |
-| `f32_floor_trap` | for each dt: `{"dt", "f32_dt", "source": "flyvis/network/dynamics.py:207-218", "euler_step_uses": "python float dt (network.py:406)", "note": "task 3 must reproduce max(tau, f32(dt))"}` |
+| `f32_floor_trap` | for each dt: `{"dt", "f32_dt", "source": "flyvis/network/dynamics.py:207-218", "euler_step_dt": {"f32": f32_dt, "f64": dt, "source": "network.py:406"}, "note": "task 3 must reproduce max(tau, f32(dt))"}` |
 | `parameter_equality` | per model and parameter: count, the reference it was checked against, and true for each phase (loaded, widened, after_runs). Also `"all_50_checkpoints_equal_ensemble_csv": true` |
 | `equivalence` | `{"stimulus_response_bit_equal": true, "sequences": [0, 4]}` |
 | `input_rounding` | max \|x − f64(f32(x))\| over the edge inputs, per dt (A3) |
