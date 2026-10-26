@@ -22,7 +22,7 @@
 - **Never `--force`** a git push, and never delete or replace the `fixtures-1` release.
 - **Creating or uploading the `fixtures-2` release needs the owner's explicit sign-off at the point it happens** (Task 9, Step 7), even though this plan is approved. STOP and ask; never do it silently.
 - **Running the export needs the owner's go-ahead** (Task 6, Step 3). It runs flyvis for several minutes and writes under `data/`.
-- **Pushing the branch and merging the PR happen only on the owner's go-ahead** (Task 10).
+- **Pushing any branch (including the Task 10 throwaway), opening or commenting on PRs, deleting remote branches or caches, and merging the PR happen only on the owner's go-ahead** (Task 10, Step 1; the merge, Step 7).
 - **Never loosen an existing comparison.** `TOLERANCE` stays `0.005`; the A7 bound stays `1e-2`; the A9 background tolerance stays `1e-6`; the A8 expected figures are never edited to match. If one fires: stop and report to the owner.
 - **Never work around a check that measures flyvis or torch.** A bit-equality check against flyvis (A1, A3, A5, A6, A9, P17, `equivalence`) is never turned into a tolerance; A6's two runs (0 and 1) are never removed or skipped; `torch.set_num_threads` is never called outside A6's `thread_check`, which restores the default, and `torch.use_deterministic_algorithms` is never called at all (spec item 24). If one of these checks fires: stop and report to the owner.
 - **`semblance-rng`'s test vectors are untouched**, and no version is bumped.
@@ -3415,7 +3415,15 @@ Expected: `fetch-fixtures: all 35 fixtures present and verified in <repo>/data`,
 
 - [ ] **Step 1: STOP and get the owner's go-ahead to push**
 
-Pushing starts CI, which downloads `fixtures-2`. Confirm with the owner before pushing. Never use `--force`.
+Pushing starts CI, which downloads `fixtures-2`. Ask the owner for one go-ahead that names every outward action Steps 2-6 take:
+
+- push `reference-traces` and open its PR into `main` (Step 2), and re-run its CI (Step 4);
+- push the throwaway branch `ci-break-cache`, whose `ci.yml` adds a step that corrupts one restored fixture (Step 5);
+- open a draft PR from it into `reference-traces` and re-run its CI (Step 5);
+- post the flow-9 comment on the main PR (Step 6);
+- close the throwaway PR, delete its remote branch, and delete the cache entry it saved (Step 6).
+
+If the owner approves only the main push and PR, do Steps 2-4, then stop before Step 5 and ask again. Merging is not part of this go-ahead (Step 7). Never use `--force`.
 
 - [ ] **Step 2: Push and open the PR**
 
