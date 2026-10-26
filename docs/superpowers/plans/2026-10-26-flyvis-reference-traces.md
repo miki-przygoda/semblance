@@ -3351,13 +3351,22 @@ Expected: the release URL.
 
 ```bash
 out="$PWD/target/fixtures-2/flyvis-fixtures.tar.gz"
+gh release list --limit 1000 --json tagName --jq '[.[] | select(.tagName == "fixtures-2")] | length'
+gh release view fixtures-2 --json isDraft,tagName --jq '"\(.isDraft) \(.tagName)"'
+git ls-remote --tags origin fixtures-2
 gh release view fixtures-2 --json assets --jq '.assets[] | "\(.name) \(.size)"'
 rm -rf target/fixtures-2/check && mkdir target/fixtures-2/check
 gh release download fixtures-2 --pattern flyvis-fixtures.tar.gz --dir target/fixtures-2/check
 cmp "$out" target/fixtures-2/check/flyvis-fixtures.tar.gz && echo asset-verified
 ```
 
-Expected: `flyvis-fixtures.tar.gz <size from Step 6>`, then `asset-verified`. If `gh release create` failed or was interrupted after the release was created (a rerun says the release already exists), or the listed asset is missing or a different size, re-upload the same signed-off file, `shasum -a 256 "$out"` first to confirm it is the one from Step 6, with `gh release upload fixtures-2 "$out" --clobber`, then repeat this step. Never delete the release, and never upload any other file, without a new sign-off.
+Expected: `1`; `false fixtures-2` (published, not a draft); one line ending `refs/tags/fixtures-2` (the tag exists on the remote); `flyvis-fixtures.tar.gz <size from Step 6>`; then `asset-verified`. The draft and tag checks matter because the download and `cmp` run with the owner's credentials, which can read a draft; CI's read-only token cannot, so a release left as a draft would pass this step and flows 6 and 7 and still fail in CI. If `gh release create` failed or was interrupted, or any line differs, run `shasum -a 256 "$out"` first and confirm it is the sha256 from Step 6 (if not, stop and ask the owner), then recover by the first line's count:
+
+- `0` (no release was created): rerun Step 8 unchanged, with the same file. The Step 7 sign-off covers this rerun, since it is the same signed-off action on the same file.
+- more than `1` (several `fixtures-2` drafts): stop and ask the owner. Do not publish or delete any of them.
+- `1`: if the listed asset is missing or a different size, re-upload the same signed-off file with `gh release upload fixtures-2 "$out" --clobber`. Then, if the second line reads `true fixtures-2` (`gh` left the release as a draft, which has no tag yet), publish it with `gh release edit fixtures-2 --draft=false --latest=false`; that completes the signed-off action, and is not a new one.
+
+Then repeat this step from the top. Never delete the release, and never upload any other file, without a new sign-off.
 
 - [ ] **Step 10: Fresh fetch from empty (flow 6)**
 
@@ -3567,7 +3576,7 @@ The spec review's minor open items, and where each is settled.
 | failure-4 + scope-9 (Save paths placeholder; `frame_semantics` bytes) | Save step's five paths written literally, same order, checked equal by `target/check-ci-cache.py`; `FRAME_SEMANTICS` fixed as three ASCII strings, no markdown, no F/P ids, tested | Task 8 Steps 1-2; Task 2 `FRAME_SEMANTICS` and `test_manifest_is_deterministic_and_valid` |
 | consistency-10 + failure-3 (no recovery for a bad cache entry) | the ci.yml comment names it: `gh cache list --key fixtures-`, `gh cache delete <key>`, re-run; flow 9 proves the bad entry fails loudly and is never re-saved | Task 8 Step 2; Task 10 Step 5 |
 | failure-1 (a locally re-exported `ensemble.csv` fails the fetch) | documented in `tools/README.md` and the fetch script's header: never re-export a pinned fixture by hand; delete and re-fetch, or cut a new tag | Task 1 Step 5; Task 9 Step 4 |
-| failure-5 (release upload has no verification or retry) | `gh release view` size check, `gh release download` + `cmp`; retry with `gh release upload --clobber` of the same signed-off file only | Task 9 Step 9 |
+| failure-5 (release upload has no verification or retry) | one `fixtures-2` release, published (`isDraft` false) with its tag on the remote, `gh release view` size check, `gh release download` + `cmp`; recovery of the same signed-off file only: rerun Step 8 if no release exists, `gh release upload --clobber` for a bad asset, `gh release edit --draft=false --latest=false` for a leftover draft, stop for the owner if several drafts exist | Task 9 Step 9 |
 | failure-6 (two exports collide on the scratch root) | an exclusive `flock` on `target/flyvis-reference.lock`, taken after preflight and before the scratch wipe, released by the OS on any exit; tested | Task 1 `acquire_lock`; Task 5 `main` |
 | consistency-9 (REQUIRE panics would hide the h9 table) | each half prints as soon as it is computed; sidecar and tolerance problems are collected, not asserted; a loader panic is caught with `catch_unwind` and recorded; one assert at the end; proven by moving the h80 pair aside | Task 7 Steps 2 and 4 |
 | contracts-8 (no proof every assertion ran; no manifest validator) | one printed line per assertion id A1–A9; `validate_manifest` (field table) and `verify_files` run at write step 3 and on the real set via `test_export_reference.py --validate` | Task 5; Task 2; Task 6 Steps 4 and 6 |
