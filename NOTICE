@@ -37,7 +37,7 @@ remain under flyvis's licence:
 
 They were exported from flyvis and its published pretrained models and
 reformatted; the reference traces were produced by running flyvis's
-models. Each fixture directory's PROVENANCE.json records how. The
+models. The provenance JSON files beside the fixtures record how. The
 pretrained models carry no licence statement of their own; the paper
 states that its trained models are available from the flyvis repository,
 whose licence is the MIT licence above.

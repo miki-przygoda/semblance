@@ -12,8 +12,8 @@ they explain decisions the code alone does not.
 Both were written with an AI coding-agent workflow: the
 [superpowers](https://github.com/obra/superpowers) skills framework with
 Claude Code, which is where the directory name and the "For agentic
-workers" header at the top of each plan come from. `CLAUDE.md` at the repository root is that
-workflow's standing instructions. Plans record what was intended at the time;
+workers" header at the top of each plan come from. `CLAUDE.md` at the
+repository root is that workflow's standing instructions. Plans record what was intended at the time;
 git history records what was built, and where the two differ, the code and its
 tests are authoritative.
 

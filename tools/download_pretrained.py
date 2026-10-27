@@ -21,7 +21,7 @@ from flyvis_cli.download_pretrained_models import download_and_unpack_files, che
 # Drive API key flyvis ships for anyone downloading its pretrained models; it
 # is not this project's credential.
 FOLDER_ID = "15_8gPaVVJV6wGAspwkrdN8r-2NxMY4Kj"
-API_KEY ="AIzaSyDOy2_N7B5UjxKy5Xxeyd9WZfnDWzQ4-54"
+API_KEY = "AIzaSyDOy2_N7B5UjxKy5Xxeyd9WZfnDWzQ4-54"
 
 DEST = pathlib.Path(__file__).resolve().parent.parent / "data" / "flyvis-pretrained"
 

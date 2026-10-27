@@ -132,8 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          # Nothing after checkout uses git with credentials; the fixture
-          # fetch passes GH_TOKEN to gh directly.
+          # Nothing after checkout uses git with credentials.
           persist-credentials: false
 
       - name: Install Rust 1.85
