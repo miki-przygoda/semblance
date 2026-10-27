@@ -607,3 +607,108 @@ def h80_sidecar() -> dict:
 
 def json_bytes(obj) -> bytes:
     return (json.dumps(obj, indent=2, allow_nan=False) + "\n").encode()
+
+
+# -- writing the set atomically ------------------------------------------------
+
+def _fsync_dir(path: pathlib.Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_synced(path: pathlib.Path, data: bytes) -> None:
+    with open(path, "xb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def check_pair(out: pathlib.Path) -> None:
+    """All three _h80 files exist and the two export_ids agree."""
+    for name in H80_FILES:
+        require((out / "flyvis-stimuli" / name).is_file(), "pair", f"{out / 'flyvis-stimuli' / name} is missing")
+    a = json.loads((out / "flyvis-reference" / "PROVENANCE.json").read_text())["export_id"]
+    b = json.loads((out / "flyvis-stimuli" / "moving_edges_h80_provenance.json").read_text())["export_id"]
+    require(a == b, "pair", f"export_id mismatch: {a} vs {b}")
+
+
+def write_outputs(out: pathlib.Path, ref_bins: list, provenance: bytes, manifest: dict,
+                  h80: list, export_id: str, hook=lambda point: None) -> None:
+    """Write steps 1-6 of the spec's Failure handling.
+
+    ref_bins: [(name, bytes)] in manifest order. h80: [(name, bytes)] for the
+    .bin, the .json and the provenance, in that order. `hook(point)` is called
+    at each named point; tests raise from it to simulate a crash there."""
+    pid = os.getpid()
+    staging = out / f".flyvis-reference.staging-{pid}"
+    marker = out / f".flyvis-reference.incomplete-{pid}"
+    old = out / f".flyvis-reference.old-{pid}"
+    final = out / "flyvis-reference"
+    stimuli = out / "flyvis-stimuli"
+    created_out = False
+    committed = False          # True from write step 4 on: the finally then deletes nothing
+    try:
+        # 1. <OUT>, then the staging directory beside the outputs.
+        if not out.exists():
+            try:
+                out.mkdir()
+            except FileNotFoundError as e:
+                raise ExportError(f"the parent of --out {out} does not exist; create it first") from e
+            created_out = True
+        staging.mkdir()
+        sref = staging / "flyvis-reference"
+        sstim = staging / "flyvis-stimuli"
+        sref.mkdir()
+        sstim.mkdir()
+        # 2. Binaries, then PROVENANCE, then the manifest last; the _h80 files
+        #    the same way, provenance last.
+        for name, data in ref_bins:
+            _write_synced(sref / name, data)
+        _write_synced(sref / "PROVENANCE.json", provenance)
+        _write_synced(sref / "manifest.json", manifest_bytes(manifest))
+        for name, data in h80:
+            _write_synced(sstim / name, data)
+        for d in (sref, sstim, staging):
+            _fsync_dir(d)
+        hook("staged")
+        # 3. Re-read every staged .bin against the manifest.
+        verify_files(manifest["files"], sref)
+        hook("verified")
+        # 4. The marker, then the swap.
+        committed = True
+        _write_synced(marker, (export_id + "\n").encode())
+        _fsync_dir(out)
+        if final.exists():
+            os.rename(final, old)
+        hook("old_moved")
+        os.rename(sref, final)
+        _fsync_dir(out)
+        hook("reference_placed")
+        # 5. The _h80 files, .bin first and provenance last.
+        stimuli.mkdir(exist_ok=True)
+        for name, _ in h80:
+            os.replace(sstim / name, stimuli / name)
+        _fsync_dir(stimuli)
+        hook("h80_placed")
+        # 6. The pair check, then clean up, marker last.
+        check_pair(out)
+        if old.exists():
+            shutil.rmtree(old)
+        shutil.rmtree(staging)
+        marker.unlink()
+        _fsync_dir(out)
+    except Exception as e:
+        if committed:
+            raise ExportError(f"write failed after the swap began: {e}\n{RECOVERY}") from e
+        raise
+    finally:
+        if not committed:
+            shutil.rmtree(staging, ignore_errors=True)
+            if created_out:
+                with contextlib.suppress(OSError):
+                    out.rmdir()
+        elif old.exists() and not final.exists():
+            os.rename(old, final)

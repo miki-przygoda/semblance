@@ -7,6 +7,7 @@ Run by hand:  uv run --project tools tools/test_export_reference.py [test_name .
 Validate an export:  uv run --project tools tools/test_export_reference.py --validate data/flyvis-reference
 """
 
+import hashlib
 import json
 import os
 import pathlib
@@ -310,6 +311,128 @@ def test_h80_sidecar_is_the_h9_format_plus_height():
     h9 = er.DATA / "flyvis-stimuli" / "moving_edge_offsets.json"
     needs(h9)
     assert json.loads(h9.read_text()) == {k: v for k, v in side.items() if k != "height"}
+
+
+# -- Task 3: the atomic write --------------------------------------------------------
+
+def _tiny_set(export_id="E1", h80_id=None, payload=b"\1\2\3\4"):
+    entry = er._file_entry("a.f32.bin", "<f4", ["a"], [(0, "1/200", None, [1])])
+    entry["sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest = {"files": [entry]}
+    prov = er.json_bytes({"export_id": export_id})
+    h80 = [("moving_edge_offsets_h80.bin", b"\0" * 4),
+           ("moving_edge_offsets_h80.json", b"{}\n"),
+           ("moving_edges_h80_provenance.json", er.json_bytes({"export_id": h80_id or export_id}))]
+    return [("a.f32.bin", payload)], prov, manifest, h80
+
+
+def _listing(root: pathlib.Path):
+    return sorted((str(p.relative_to(root)), p.read_bytes() if p.is_file() else None)
+                  for p in root.rglob("*"))
+
+
+def _crash_at(point):
+    def hook(p):
+        if p == point:
+            raise RuntimeError(f"crash at {p}")
+    return hook
+
+
+def test_write_into_a_missing_out_leaves_only_the_outputs():
+    out = tmpdir() / "fresh"
+    er.write_outputs(out, *_tiny_set(), "E1")
+    names = sorted(str(p.relative_to(out)) for p in out.rglob("*"))
+    assert names == ["flyvis-reference", "flyvis-reference/PROVENANCE.json", "flyvis-reference/a.f32.bin",
+                     "flyvis-reference/manifest.json", "flyvis-stimuli",
+                     "flyvis-stimuli/moving_edge_offsets_h80.bin", "flyvis-stimuli/moving_edge_offsets_h80.json",
+                     "flyvis-stimuli/moving_edges_h80_provenance.json"], names
+    assert (out / "flyvis-reference" / "manifest.json").read_bytes().endswith(b"\n")
+
+
+def test_a_failure_before_the_swap_leaves_out_exactly_as_it_was():
+    for point in ("staged", "verified"):
+        out = tmpdir()
+        (out / "flyvis-stimuli").mkdir()
+        (out / "flyvis-stimuli" / "flashes.bin").write_bytes(b"keep")
+        before = _listing(out)
+        try:
+            er.write_outputs(out, *_tiny_set(), "E1", hook=_crash_at(point))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("no crash")
+        assert _listing(out) == before, point
+    out = tmpdir() / "created-by-this-run"
+    try:
+        er.write_outputs(out, *_tiny_set(), "E1", hook=_crash_at("verified"))
+    except RuntimeError:
+        pass
+    assert not out.exists()
+
+
+def test_a_staged_file_that_differs_from_the_manifest_is_never_published():
+    out = tmpdir()
+
+    def corrupt(point):
+        if point == "staged":
+            staged = next(out.glob(".flyvis-reference.staging-*")) / "flyvis-reference" / "a.f32.bin"
+            staged.write_bytes(b"\x09\x09\x09\x09")
+    raises(lambda: er.write_outputs(out, *_tiny_set(), "E1", hook=corrupt), "sha256")
+    assert _listing(out) == []
+
+
+def test_force_replaces_the_previous_set_and_cleans_up():
+    out = tmpdir()
+    er.write_outputs(out, *_tiny_set("OLD", payload=b"\0\0\0\0"), "OLD")
+    er.write_outputs(out, *_tiny_set("NEW"), "NEW")
+    assert (out / "flyvis-reference" / "a.f32.bin").read_bytes() == b"\1\2\3\4"
+    assert json.loads((out / "flyvis-stimuli" / "moving_edges_h80_provenance.json").read_text())["export_id"] == "NEW"
+    assert sorted(p.name for p in out.iterdir()) == ["flyvis-reference", "flyvis-stimuli"]
+
+
+def test_a_crash_between_the_two_renames_restores_the_previous_set():
+    # Review focus 2.
+    out = tmpdir()
+    er.write_outputs(out, *_tiny_set("OLD", payload=b"\0\0\0\0"), "OLD")
+    msg = raises(lambda: er.write_outputs(out, *_tiny_set("NEW"), "NEW", hook=_crash_at("old_moved")),
+                 "crash at old_moved", "rename that .old-* back")
+    assert (out / "flyvis-reference" / "a.f32.bin").read_bytes() == b"\0\0\0\0", msg
+    left = sorted(p.name.rsplit("-", 1)[0] for p in out.iterdir() if p.name.startswith("."))
+    assert left == [".flyvis-reference.incomplete", ".flyvis-reference.staging"], left
+    raises(lambda: er.preflight(out, True, {}), "interrupted")
+
+
+def test_a_crash_after_the_new_set_is_placed_deletes_nothing():
+    out = tmpdir()
+    er.write_outputs(out, *_tiny_set("OLD", payload=b"\0\0\0\0"), "OLD")
+    raises(lambda: er.write_outputs(out, *_tiny_set("NEW"), "NEW", hook=_crash_at("reference_placed")),
+           "crash at reference_placed")
+    assert (out / "flyvis-reference" / "a.f32.bin").read_bytes() == b"\1\2\3\4"
+    left = sorted(p.name.rsplit("-", 1)[0] for p in out.iterdir() if p.name.startswith("."))
+    assert left == [".flyvis-reference.incomplete", ".flyvis-reference.old", ".flyvis-reference.staging"], left
+
+
+def test_a_mismatched_export_id_pair_fails_the_final_check():
+    out = tmpdir()
+    raises(lambda: er.write_outputs(out, *_tiny_set("A", h80_id="B"), "A"), "export_id mismatch")
+    assert any(p.name.startswith(".flyvis-reference.incomplete-") for p in out.iterdir())
+
+
+def test_a_missing_stimuli_dir_is_created_only_at_step_5():
+    out = tmpdir()
+    seen = {}
+
+    def look(point):
+        seen[point] = (out / "flyvis-stimuli").exists()
+    er.write_outputs(out, *_tiny_set(), "E1", hook=look)
+    assert seen == {"staged": False, "verified": False, "old_moved": False,
+                    "reference_placed": False, "h80_placed": True}, seen
+
+
+def test_a_missing_parent_of_out_fails_before_anything_is_created():
+    base = tmpdir()
+    raises(lambda: er.write_outputs(base / "no" / "such" / "out", *_tiny_set(), "E1"), "parent")
+    assert _listing(base) == []
 
 
 # -- runner (keep last) ---------------------------------------------------------
