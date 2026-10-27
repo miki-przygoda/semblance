@@ -15,11 +15,13 @@
 //! - **The footprints do not tile the monitor.** The lattice pitch is `ppo` in
 //!   both axes while the hexagons are regular, so 36% of the monitor's pixels
 //!   fall inside no ommatidium at all. They are simply never sampled.
-//! - **flyvis builds this mask in `float16`.** We use `f64`. Measured offline
-//!   against flyvis 1.2.0, 2,052 of 600,625 pixels end up assigned
-//!   differently. `the_ownership_map_agrees_with_flyviss_fp16_mask` in
-//!   `moving_edge_checks.rs` compares exactly those two masks and pins that
-//!   count against a bound of 4,000 -- the gate that proves this crate's
+//! - **flyvis builds this mask in `float16`, and so do we.** Every operation
+//!   of flyvis's `is_inside_hex` is emulated here with its result rounded to
+//!   binary16. An `f64` mask assigns 2,052 of the 600,625 pixels differently,
+//!   and that alone was enough to put the moving-edge renderer past its
+//!   tolerance at bar height 80. `the_ownership_map_agrees_with_flyviss_fp16_mask`
+//!   in `moving_edge_checks.rs` compares this mask with flyvis's own and
+//!   requires every pixel to agree -- the gate that proves this crate's
 //!   hexal ordering is flyvis's own.
 //!
 //! What both masks agree on, and what this module depends on, is that **no
@@ -138,60 +140,86 @@ impl HexEye {
     }
 }
 
-/// Whether the point `(x, y)` lies inside the hexagon centred on `centre`.
+/// flyvis's 60-degree rotation, `cos` and `sin` of its float16 third of pi.
 ///
-/// Six half-plane sign tests, one per edge, exactly as flyvis does it: for each
-/// edge, evaluate the edge's line at the query point and at the hexagon's own
-/// centre, and require the two to fall on the same side.
+/// flyvis takes `pi = torch.tensor(np.pi, dtype=float16)`, which is 3.140625,
+/// and divides by 3 in float16, giving 1.046875. Its `cos` and `sin` are
+/// computed in `f32` (0.5002793 and 0.8658641) and rounded back to binary16,
+/// whose spacing in [0.5, 1) is 2^-11: 1025 * 2^-11 = 0.50048828125 and
+/// 1773 * 2^-11 = 0.86572265625. Both `f32` values sit hundreds of `f32` ULPs
+/// from a rounding midpoint, so no libm could disagree, but writing the
+/// results down removes libm from the construction altogether.
+/// `the_rotation_constants_are_flyviss_float16_cos_and_sin` re-derives them.
+const COS_THIRD: f64 = 0.500_488_281_25;
+const SIN_THIRD: f64 = 0.865_722_656_25;
+
+/// Rounds an `f64` to the nearest IEEE binary16 value (ties to even), returned
+/// as `f64`. Normal and subnormal range; no overflow handling, because every
+/// value here stays far below binary16's largest, 65504.
 ///
-/// `tilt` is zero throughout flyvis, so the vertices sit at 0, 60, ... 300
-/// degrees -- a vertex on the horizontal axis, flats above and below. Rather
-/// than build those vertices with `cos`/`sin`, this uses their exact closed
-/// forms in terms of `dist_to_vertex` (the vertex on the horizontal axis) and
-/// `dist_to_edge` (the flats above and below) -- `dist_to_vertex * sin(60deg)`
-/// is mathematically `dist_to_edge`, so no trigonometry is needed to get
-/// there.
+/// Every step is exact in `f64` -- reading the exponent, a power of two,
+/// division by it, `round_ties_even` -- so this is the same on every platform.
+fn round_f16(v: f64) -> f64 {
+    if v == 0.0 || !v.is_finite() {
+        return v;
+    }
+    // Exponent of the leading bit, floored at binary16's minimum normal (-14).
+    let e = (((v.abs().to_bits() >> 52) & 0x7ff) as i32 - 1023).max(-14);
+    // binary16 keeps 10 bits after the leading one.
+    let ulp = 2f64.powi(e - 10);
+    (v / ulp).round_ties_even() * ulp
+}
+
+/// The hexagon's seven vertex offsets (the last closes the loop), exactly as
+/// flyvis's `is_inside_hex` builds them in float16: `[dist_to_vertex, 0]`,
+/// then six successive `R60 @ v`, each product rounded to binary16 once.
 ///
-/// This is not merely style: the half-plane test below compares signs of a
-/// value that passes through exactly zero right at the boundary, so a single
-/// ULP of difference in a vertex coordinate can flip which side of an edge a
-/// boundary pixel falls on. `cos`/`sin` are not required by IEEE 754 to be
-/// correctly rounded, so they are not guaranteed to produce the same bits on
-/// every platform -- measured against the closed form used here, five of the
-/// six vertices differ from what `cos`/`sin` compute, by 1 to 14 ULP
-/// depending on the vertex and axis, and at 180 degrees `cos`/`sin` gives
-/// `-4.64e-15` where the closed form gives an exact `0.0`. `f64::sqrt` (used
-/// to derive `dist_to_vertex` from `dist_to_edge`) *is* required to be
-/// correctly rounded, so this construction -- unlike one built from
-/// `cos`/`sin` -- is **bit-exact**: the same bits on every platform, not
-/// merely the same bits `cos`/`sin` would have produced.
+/// `dist_to_vertex` is `2 / np.sqrt(3) * dist_to_edge`: an `f64` scalar times
+/// a float16 tensor, which torch computes with the scalar as `f32`.
+///
+/// The rounding makes this not quite a regular hexagon, and the seventh vertex
+/// need not land back on the first. That is flyvis's shape, so it is ours.
+fn fp16_vertices(dist_to_edge: f64) -> [(f64, f64); 7] {
+    let dist_to_vertex = round_f16((2.0 / 3.0f64.sqrt()) as f32 as f64 * round_f16(dist_to_edge));
+    let mut v = [(0.0, 0.0); 7];
+    v[0] = (dist_to_vertex, 0.0);
+    for i in 1..7 {
+        let (x, y) = v[i - 1];
+        // torch accumulates a float16 matmul in f32 and rounds once; the
+        // exact sum rounded once is the same binary16 value.
+        v[i] = (
+            round_f16(COS_THIRD * x - SIN_THIRD * y),
+            round_f16(SIN_THIRD * x + COS_THIRD * y),
+        );
+    }
+    v
+}
+
+/// Whether the point `(x, y)` lies inside the hexagon centred on `centre`,
+/// with vertex offsets `verts` from [`fp16_vertices`].
+///
+/// Six half-plane sign tests, one per edge, exactly as flyvis's
+/// `is_inside_hex` runs them with `dtype=torch.float16`: for each edge,
+/// evaluate the edge's line at the query point and at the hexagon's own
+/// centre, and require the two to fall on the same side. Every `+ - * /` is
+/// rounded to binary16, in the order Python evaluates flyvis's expressions.
+/// torch's CPU half arithmetic computes each operation in `f32` and rounds to
+/// binary16; computing it in `f64` and rounding gives the same value, because
+/// both formats carry more than twice binary16's 11 bits, so double rounding
+/// cannot occur. That makes this mask bit-equal to flyvis's by construction.
 ///
 /// A point exactly on an edge has sign 0, which matches neither `+1` nor `-1`,
 /// so it is **excluded**. That is flyvis's behaviour (`torch.sign`), not an
 /// oversight, and it is part of why no pixel gets two owners.
-pub(crate) fn contains(
-    centre: (f64, f64),
-    dist_to_edge: f64,
-    dist_to_vertex: f64,
-    x: f64,
-    y: f64,
-) -> bool {
-    let (xc, yc) = centre;
-    let verts = [
-        (dist_to_vertex, 0.0),
-        (dist_to_vertex / 2.0, dist_to_edge),
-        (-dist_to_vertex / 2.0, dist_to_edge),
-        (-dist_to_vertex, 0.0),
-        (-dist_to_vertex / 2.0, -dist_to_edge),
-        (dist_to_vertex / 2.0, -dist_to_edge),
-        (dist_to_vertex, 0.0),
-    ];
+fn contains_fp16(verts: &[(f64, f64); 7], centre: (f64, f64), x: f64, y: f64) -> bool {
+    let (xc, yc) = (round_f16(centre.0), round_f16(centre.1));
+    let (x, y) = (round_f16(x), round_f16(y));
     for i in 0..6 {
-        let (x1, y1) = (verts[i].0 + xc, verts[i].1 + yc);
-        let (x2, y2) = (verts[i + 1].0 + xc, verts[i + 1].1 + yc);
-        let slope = (y2 - y1) / (x2 - x1);
-        let f_centre = y1 + slope * (xc - x1) - yc;
-        let f_point = y1 + slope * (x - x1) - y;
+        let (x1, y1) = (round_f16(verts[i].0 + xc), round_f16(verts[i].1 + yc));
+        let (x2, y2) = (round_f16(verts[i + 1].0 + xc), round_f16(verts[i + 1].1 + yc));
+        let slope = round_f16(round_f16(y2 - y1) / round_f16(x2 - x1));
+        let f_centre = round_f16(round_f16(y1 + round_f16(slope * round_f16(xc - x1))) - yc);
+        let f_point = round_f16(round_f16(y1 + round_f16(slope * round_f16(x - x1))) - y);
         if sign(f_centre) != sign(f_point) {
             return false;
         }
@@ -232,6 +260,10 @@ fn build_owners(
     let mut owners = vec![NO_OWNER; monitor_px * monitor_px];
     let mut kernel_sum = vec![0u32; centres.len()];
     let last = monitor_px - 1;
+    let verts = fp16_vertices(dist_to_edge);
+    // The float16 vertices reach a few hundredths of a pixel past the exact
+    // ones; one pixel of margin on the scan box covers that.
+    let dist_to_vertex = dist_to_vertex + 1.0;
 
     for (h, &c) in centres.iter().enumerate() {
         let lo_c = (c.0 - dist_to_vertex).floor().max(0.0) as usize;
@@ -243,7 +275,7 @@ fn build_owners(
         }
         for row in lo_r..=hi_r {
             for col in lo_c..=hi_c {
-                if !contains(c, dist_to_edge, dist_to_vertex, col as f64, row as f64) {
+                if !contains_fp16(&verts, c, col as f64, row as f64) {
                     continue;
                 }
                 let slot = &mut owners[row * monitor_px + col];
@@ -346,24 +378,73 @@ mod tests {
         assert_eq!((lo_y, hi_y), (12.0, 762.0));
     }
 
-    /// Re-derives ownership from the module's geometry primitives alone --
-    /// `centre`, `dist_to_edge`, `dist_to_vertex` and `contains` -- without
-    /// reading anything `build_owners` wrote. Returns how many ommatidia claim
-    /// each pixel, and the owner each one would get.
+    /// A second binary16 rounding, written separately from [`round_f16`] so
+    /// the oracle below shares none of the production arithmetic: this one
+    /// rounds the `f64` significand as an integer, by shifting off the bits
+    /// binary16 has no room for and rounding ties to even by hand.
+    fn half(v: f64) -> f64 {
+        if v == 0.0 {
+            return v;
+        }
+        let bits = v.to_bits();
+        let negative = bits >> 63 == 1;
+        let exp = ((bits >> 52) & 0x7ff) as i32 - 1023;
+        assert!(exp > -1023 && exp < 16, "{v} is outside what this oracle handles");
+        let zero = if negative { -0.0 } else { 0.0 };
+        let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+        // v = significand * 2^(exp - 52). binary16's last kept bit is worth
+        // 2^(exp - 10) for normals and 2^-24 for subnormals.
+        let keep_lsb = (exp - 10).max(-24);
+        let drop = (keep_lsb - (exp - 52)) as u32;
+        if drop > 53 {
+            // Below half of binary16's smallest subnormal: rounds to zero.
+            return zero;
+        }
+        let (kept, rest) = (significand >> drop, significand & ((1u64 << drop) - 1));
+        let halfway = 1u64 << (drop - 1);
+        let rounded = if rest > halfway || (rest == halfway && kept & 1 == 1) { kept + 1 } else { kept };
+        let magnitude = rounded as f64 * 2f64.powi(keep_lsb);
+        if negative { -magnitude } else { magnitude }
+    }
+
+    /// Re-derives ownership without reading anything `build_owners` wrote and
+    /// without calling the production float16 path: its own rounding
+    /// ([`half`]), its own `cos`/`sin` of flyvis's float16 third of pi, its
+    /// own vertex construction and its own half-plane test, written from
+    /// flyvis's `is_inside_hex`. Returns how many ommatidia claim each pixel,
+    /// and the owner each one would get.
     fn independent_scan(e: &HexEye) -> (Vec<u8>, Vec<u16>) {
+        let third = half(half(std::f64::consts::PI) / 3.0);
+        let (cos, sin) = (half((third as f32).cos() as f64), half((third as f32).sin() as f64));
+        let mut verts = vec![(half((2.0 / 3.0f64.sqrt()) as f32 as f64 * half(e.dist_to_edge())), 0.0)];
+        for _ in 0..6 {
+            let &(x, y) = verts.last().unwrap();
+            verts.push((half(cos * x - sin * y), half(sin * x + cos * y)));
+        }
+        let side = |v: f64| v.partial_cmp(&0.0).unwrap();
+        let inside = |c: (f64, f64), px: f64, py: f64| {
+            let (xc, yc, px, py) = (half(c.0), half(c.1), half(px), half(py));
+            verts.windows(2).all(|w| {
+                let (x1, y1) = (half(w[0].0 + xc), half(w[0].1 + yc));
+                let (x2, y2) = (half(w[1].0 + xc), half(w[1].1 + yc));
+                let slope = half(half(y2 - y1) / half(x2 - x1));
+                let at = |qx: f64, qy: f64| half(half(y1 + half(slope * half(qx - x1))) - qy);
+                side(at(xc, yc)) == side(at(px, py))
+            })
+        };
         let mut claims = vec![0u8; 775 * 775];
         let mut owner = vec![NO_OWNER; 775 * 775];
         for h in 0..e.num_hexals() {
             let c = e.centre(h).unwrap();
-            let dte = e.dist_to_edge();
-            let dtv = e.dist_to_vertex();
-            let lo_c = (c.0 - dtv).floor().max(0.0) as usize;
-            let hi_c = ((c.0 + dtv).ceil() as usize).min(774);
-            let lo_r = (c.1 - dtv).floor().max(0.0) as usize;
-            let hi_r = ((c.1 + dtv).ceil() as usize).min(774);
+            // Generously wider than any vertex reaches.
+            let reach = e.dist_to_edge() * 1.5;
+            let lo_c = (c.0 - reach).floor().max(0.0) as usize;
+            let hi_c = ((c.0 + reach).ceil() as usize).min(774);
+            let lo_r = (c.1 - reach).floor().max(0.0) as usize;
+            let hi_r = ((c.1 + reach).ceil() as usize).min(774);
             for row in lo_r..=hi_r {
                 for col in lo_c..=hi_c {
-                    if contains(c, dte, dtv, col as f64, row as f64) {
+                    if inside(c, col as f64, row as f64) {
                         let idx = row * 775 + col;
                         claims[idx] += 1;
                         owner[idx] = h as u16;
@@ -405,19 +486,25 @@ mod tests {
         assert_eq!(counts, e.kernel_sum());
     }
 
-    /// Measured against flyvis 1.2.0. If these move, something in the geometry
-    /// moved -- report it, do not re-pin the constants.
+    /// flyvis 1.2.0's own figures, counted from its mask as exported to
+    /// `data/flyvis-stimuli/hex_eye_owner.bin` (and its per-ommatidium
+    /// `hex_eye_kernel_sum.json`, which agrees): 382,383 pixels owned,
+    /// 218,242 owned by none, footprints from 513 to 545 pixels. They are
+    /// written down here so the check runs without the fixture.
+    ///
+    /// If these move, something in the geometry moved -- report it, do not
+    /// re-pin the constants to match the code.
     #[test]
     fn ownership_counts_match_what_was_measured() {
         let e = eye();
         let owned = e.owners().iter().filter(|&&o| o != NO_OWNER).count();
-        assert_eq!(owned, 383_613, "pixels owned by some ommatidium");
-        assert_eq!(775 * 775 - owned, 217_012, "pixels owned by none (36%)");
+        assert_eq!(owned, 382_383, "pixels owned by some ommatidium");
+        assert_eq!(775 * 775 - owned, 218_242, "pixels owned by none (36%)");
         let ks = e.kernel_sum();
         assert_eq!(ks.len(), 721);
         assert_eq!(ks.iter().sum::<u32>() as usize, owned, "kernel sums must total the owned pixels");
-        assert_eq!(*ks.iter().min().unwrap(), 518, "smallest footprint, clipped by the monitor edge");
-        assert_eq!(*ks.iter().max().unwrap(), 541, "largest footprint, fully on the monitor");
+        assert_eq!(*ks.iter().min().unwrap(), 513, "smallest footprint");
+        assert_eq!(*ks.iter().max().unwrap(), 545, "largest footprint");
     }
 
     /// Every ommatidium samples something. A zero here would divide by zero in
@@ -464,18 +551,42 @@ mod tests {
     }
 
     /// Hand-computed: the hexagon has vertices on the horizontal axis at
-    /// +/-dist_to_vertex and flats above and below at +/-dist_to_edge.
+    /// +/-dist_to_vertex (14.4375 in float16) and flats above and below at
+    /// +/-dist_to_edge (12.5).
     #[test]
-    fn contains_agrees_with_hand_computed_cases() {
+    fn contains_fp16_agrees_with_hand_computed_cases() {
         let c = (100.0, 100.0);
-        let dte = 12.5;
-        let dtv = 2.0 / 3.0f64.sqrt() * dte;
-        assert!(contains(c, dte, dtv, 100.0, 100.0), "the centre");
-        assert!(contains(c, dte, dtv, 114.0, 100.0), "just inside the right vertex");
-        assert!(!contains(c, dte, dtv, 115.0, 100.0), "just outside the right vertex");
-        assert!(contains(c, dte, dtv, 100.0, 112.0), "just inside the bottom flat");
-        assert!(!contains(c, dte, dtv, 100.0, 113.0), "just outside the bottom flat");
+        let v = fp16_vertices(12.5);
+        assert_eq!(v[0], (14.4375, 0.0), "f16(2 / sqrt(3) * 12.5)");
+        assert!(contains_fp16(&v, c, 100.0, 100.0), "the centre");
+        assert!(contains_fp16(&v, c, 114.0, 100.0), "just inside the right vertex");
+        assert!(!contains_fp16(&v, c, 115.0, 100.0), "just outside the right vertex");
+        assert!(contains_fp16(&v, c, 100.0, 112.0), "just inside the bottom flat");
+        assert!(!contains_fp16(&v, c, 100.0, 113.0), "just outside the bottom flat");
         // A corner of the bounding box, outside the hexagon.
-        assert!(!contains(c, dte, dtv, 114.0, 112.0));
+        assert!(!contains_fp16(&v, c, 114.0, 112.0));
+        // The right vertex itself lies on two edges; on an edge is outside,
+        // as `torch.sign` makes it.
+        assert!(!contains_fp16(&v, c, 100.0 + v[0].0, 100.0), "on the right vertex");
+    }
+
+    /// The hard-coded rotation is flyvis's: f16(pi) = 3.140625, divided by 3
+    /// in float16 = 1.046875, `cos`/`sin` in `f32`, rounded to binary16. The
+    /// first assertions check the rounding helper itself against binary16's
+    /// grid: 11 significant bits, ties to even, subnormals spaced 2^-24.
+    #[test]
+    fn the_rotation_constants_are_flyviss_float16_cos_and_sin() {
+        assert_eq!(round_f16(1.0 + 2f64.powi(-11)), 1.0, "a tie rounds to even, down");
+        assert_eq!(round_f16(1.0 + 3.0 * 2f64.powi(-11)), 1.0 + 2f64.powi(-9), "a tie rounds to even, up");
+        assert_eq!(round_f16(2049.0), 2048.0, "above 2048 the spacing is 2");
+        assert_eq!(round_f16(-774.3), -774.5, "spacing 0.5 in [512, 1024)");
+        assert_eq!(round_f16(2f64.powi(-24) * 1.4), 2f64.powi(-24), "subnormal");
+
+        let pi = round_f16(std::f64::consts::PI);
+        assert_eq!(pi, 3.140625);
+        let third = round_f16(pi / 3.0);
+        assert_eq!(third, 1.046875);
+        assert_eq!(round_f16((third as f32).cos() as f64), COS_THIRD);
+        assert_eq!(round_f16((third as f32).sin() as f64), SIN_THIRD);
     }
 }

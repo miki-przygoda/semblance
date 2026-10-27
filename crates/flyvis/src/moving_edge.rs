@@ -774,7 +774,7 @@ mod tests {
         let c = Coverage::new(&p, &eye);
         assert_eq!(c.counts(11, 20).len(), 721);
         assert_eq!(c.kernel_sum().len(), 721);
-        assert_eq!(c.kernel_sum().iter().sum::<u32>(), 383_613);
+        assert_eq!(c.kernel_sum().iter().sum::<u32>(), 382_383);
     }
 
     /// An asymmetric hexal (row 412, column 437) that the bar *does* sweep,

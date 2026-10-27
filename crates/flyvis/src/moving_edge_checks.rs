@@ -9,10 +9,9 @@
 //! is not precedent for loosening a comparison that could be exact elsewhere.
 //! See `CLAUDE.md` for the fuller version of that distinction.
 //!
-//! `the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, carries a
-//! different kind of slack again: a bound on *how many* pixels may disagree,
-//! not on how far any one value may be off, because flyvis builds that mask
-//! in `float16` and this crate in `f64`.
+//! `the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, carries
+//! no slack at all: this crate builds that mask in `float16` exactly as flyvis
+//! does, so every pixel must agree.
 //!
 //! So the geometry gate prints its observed distribution rather than merely
 //! asserting a bound. The difference between 0.002 and 0.009 agreement is the
@@ -235,12 +234,14 @@ fn moving_edge_offsets_match_flyvis_within_tolerance() {
     }
 }
 
-/// The ownership map, against flyvis's own. Element-wise, with a bound on the
-/// disagreement rather than on a value.
+/// The ownership map, against flyvis's own. Element-wise and exact.
 ///
-/// This is a localisation aid, not a correctness claim: flyvis builds its mask
-/// in `float16` and this crate builds it in `f64`, so some disagreement is
-/// expected and its size is what matters. Measured: 2,052 of 600,625 pixels.
+/// flyvis builds its mask in `float16`, and `hex_eye` emulates that
+/// construction operation by operation, so the two maps are equal by
+/// construction: every one of the 600,625 pixels, and every kernel sum.
+/// An `f64` mask disagreed on 2,052 pixels -- enough to push the moving-edge
+/// renderer past its tolerance at bar height 80 -- so a single differing
+/// pixel here is a real break, not noise.
 #[test]
 fn the_ownership_map_agrees_with_flyviss_fp16_mask() {
     let (Some(bytes), Some(ks_json)) = (
@@ -270,17 +271,16 @@ fn the_ownership_map_agrees_with_flyviss_fp16_mask() {
         .max()
         .unwrap();
 
-    eprintln!("pixel ownership, f64 here against flyvis's float16:");
+    eprintln!("pixel ownership, float16 here against flyvis's float16:");
     eprintln!("  differing assignments: {differing} of {}", want.len());
     eprintln!("  unowned pixels: {ours_unowned} here, {theirs_unowned} in flyvis");
     eprintln!("  largest per-ommatidium pixel-count difference: {ks_delta}");
 
-    assert!(
-        differing <= 4_000,
-        "{differing} pixels assigned differently; 2,052 was measured. \
-         A large jump means the geometry diverged, not that fp16 got noisier."
+    assert_eq!(
+        differing, 0,
+        "{differing} pixels assigned differently from flyvis; the float16 emulation in hex_eye diverged"
     );
-    assert!(ks_delta <= 24, "largest kernel-sum difference {ks_delta}; 12 was measured");
+    assert_eq!(ks_delta, 0, "largest kernel-sum difference {ks_delta}");
 }
 
 /// The sequence ordering and the published figures.

@@ -1412,3 +1412,36 @@ match.
       sizes in the PR description. The owner records them, with the freeze
       reading, in the local 0.3.0 epic README, along with the D7 corrections.
       This task does not modify `docs/project-outline/`.
+
+## Amendment 2026-10-27 — float16 ownership mask
+
+**Decision.** The owner chose to build the pixel-to-ommatidium ownership mask
+in float16, exactly as flyvis does, rather than keep the `f64` mask. Widening
+`TOLERANCE` was never an option.
+
+**Cause.** With the `f64` mask, the height-80 half of the geometry gate
+failed: angle 30 reached 0.007035, with 3 hexals over 0.005. flyvis builds the
+mask in `float16` (`flyvis/datasets/rendering/utils.py:211`,
+`is_inside_hex(dtype=torch.float16)`, called from `eye.py:282`), and the
+crate's `f64` mask assigned 2,052 of the 600,625 pixels differently. At
+angle 0, where flyvis skips rotation entirely, the whole of the difference
+was the mask. At height 80 the bar first reaches the top rows of hexals,
+where the two masks give a partly covered hexal different pixel counts (524
+against flyvis's 535 for hexal 71), and that moves its mean past the bound.
+The source-row clamp and the slice wrap were ruled out.
+
+**Change.** `crates/flyvis/src/hex_eye.rs` now emulates `is_inside_hex`
+operation by operation, each result rounded to binary16. The mask equals
+flyvis's exported mask in every pixel, and
+`the_ownership_map_agrees_with_flyviss_fp16_mask` is exact (0 differing
+pixels, 0 kernel-sum difference) instead of bounded. The ownership counts
+pinned in `hex_eye.rs` are flyvis's own: 382,383 pixels owned, 218,242
+unowned, footprints from 513 to 545 pixels. The workspace has one more test
+than before: 204, with 26 still fixture-skipping.
+
+**New height-9 figures.** Measured with the float16 mask (max abs per angle,
+angles 0 / 30 / 90 / 150): **0.000000 / 0.002823 / 0.001961 / 0.002903**.
+These supersede the figures given in flow 4 ("unchanged from today's
+figures") and in Done when (0.000794 / 0.002823 / 0.002692 / 0.003057), and
+the 203-test count given there and in the verification commands. The
+original text above is left as written.

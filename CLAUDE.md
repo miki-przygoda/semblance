@@ -119,7 +119,7 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 203 tests, 0 failures
+cargo test --workspace          # 204 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
@@ -131,7 +131,7 @@ first is fetched per `RESOURCES.md`, the other two produced by
 `tools/export_moving_edges.py` respectively). A skip prints
 `eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
 tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "203 passed, 0 failed" whether the data is present
+the suite reports the same "204 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
@@ -159,10 +159,12 @@ renderers are not computing the same function, so that bound would still be
 there on a machine with perfect arithmetic: it is not a precision artifact,
 and it does not get tighter by trying harder. That gate prints its observed
 distribution; read it, do not just watch it pass. The same file's
-`the_ownership_map_agrees_with_flyviss_fp16_mask` carries a different kind of
-slack again: it bounds how many pixels may disagree, not how far any one
-value may be off, because flyvis builds that mask in `float16` and this
-crate in `f64`.
+`the_ownership_map_agrees_with_flyviss_fp16_mask`, by contrast, is exact:
+flyvis builds that mask in `float16`, and `crates/flyvis/src/hex_eye.rs`
+emulates that construction operation by operation, so every pixel must agree.
+It once bounded how many pixels could disagree, while the crate built the
+mask in `f64` -- and that tolerated difference turned out to be what failed
+the geometry gate at bar height 80.
 
 Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
 float comparisons, for reasons specific to each one. Most are round-trip
