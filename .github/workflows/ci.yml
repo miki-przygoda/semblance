@@ -40,8 +40,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-1.97-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: cargo-1.97-${{ hashFiles('Cargo.lock') }}-
+          key: cargo-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
       # The whole fixture set, keyed exactly on the manifest and the tag, with
       # no restore-keys: a key change always starts clean, because stale
@@ -139,8 +139,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-1.85-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: cargo-1.85-${{ hashFiles('Cargo.lock') }}-
+          key: cargo-1.85-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.85-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
       - name: Build on the declared rust-version
         run: cargo build --workspace --all-targets
