@@ -66,8 +66,8 @@ them without `--force`, and holds a lock so two runs cannot share the scratch
 root. Its self-tests need no flyvis:
 `uv run --project tools tools/test_export_reference.py`.
 `uv run --project tools python tools/test_export_reference.py --validate <dir>`
-checks an export's manifest and its 9 binaries; it does not check the three
-`_h80` files or the `export_id` pair.
+checks an export's manifest and its 9 binaries, and, from the directory's
+parent, that the three `_h80` files exist and the `export_id` pair agrees.
 
 **Do not re-export a pinned fixture by hand.** `ci/fetch-fixtures.sh` checks
 every file in `ci/fixtures.sha256` byte for byte, and every export is dated —

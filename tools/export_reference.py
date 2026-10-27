@@ -244,6 +244,8 @@ def preflight(out: pathlib.Path, force: bool, environ) -> None:
     """Refuses to start, before flyvis is imported, when a run would clobber or
     be redirected. Leftovers of an interrupted run are refused even with
     --force: a human recovers from those."""
+    if not (out.is_dir() or out.parent.is_dir()):
+        raise ExportError(f"the parent of --out {out} does not exist; create it first")
     if out.is_dir():
         for entry in sorted(out.iterdir()):
             if entry.name.startswith(LEFTOVER_PREFIXES):
@@ -1301,14 +1303,19 @@ def block_arrays(results: dict) -> dict:
 def git_state() -> dict:
     import subprocess
 
-    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-                          capture_output=True, text=True, check=True).stdout.strip()
-    status = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"],
-                            capture_output=True, text=True, check=True).stdout
+    try:
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        status = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise ExportError(f"git is needed for PROVENANCE and failed: {e}") from e
     return {"head": head, "dirty": bool(status.strip())}
 
 
 def export(args, started: float) -> int:
+    # Asked first, so a missing or broken git fails in seconds, not after the runs.
+    git = git_state()
     # Process setup 2: a fresh scratch root, flyvis pointed at it, CPU only.
     for d in (SCRATCH, MPLCONFIG):
         shutil.rmtree(d, ignore_errors=True)
@@ -1420,7 +1427,7 @@ def export(args, started: float) -> int:
         "exported": now.date().isoformat(),
         "export_id": export_id,
         "generator": {"path": GENERATOR, "sha256": sha256_file(script)},
-        "git": git_state(),
+        "git": git,
         "versions": {"python": platform.python_version(), "flyvis": flyvis.__version__,
                      "torch": torch.__version__, "numpy": np.__version__, "h5py": h5py.__version__,
                      "datamate": importlib.metadata.version("datamate")},
@@ -1511,6 +1518,9 @@ def main(argv=None) -> int:
             lock.close()
     except ExportError as e:
         print(f"export_reference: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:      # setup, readers, an OSError before the commit point
+        print(f"export_reference: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("export_reference: interrupted", file=sys.stderr)

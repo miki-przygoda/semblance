@@ -653,6 +653,85 @@ def test_ctrl_c_prints_recovery_only_when_a_marker_is_left():
     assert rc == 130 and "interrupted" in err and "Recovering" not in err, err
 
 
+def test_preflight_refuses_a_missing_out_parent_up_front():
+    out = tmpdir() / "a" / "b"
+    raises(lambda: er.preflight(out, False, {}), "the parent of --out", "does not exist")
+    er.preflight(tmpdir() / "child", False, {})
+
+
+def test_git_state_fails_before_any_flyvis_work_and_with_a_clean_message():
+    import subprocess
+
+    saved_root, saved_run = er.ROOT, subprocess.run
+    try:
+        er.ROOT = tmpdir()          # not a git repository
+        raises(lambda: er.git_state(), "git")
+
+        def no_git(*a, **k):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+
+        subprocess.run = no_git
+        raises(lambda: er.git_state(), "git")
+    finally:
+        er.ROOT, subprocess.run = saved_root, saved_run
+
+    # export() asks for it first, before it wipes the scratch root
+    marker = er.ExportError("git sentinel")
+    saved = er.git_state
+
+    def boom():
+        raise marker
+
+    er.git_state = boom
+    try:
+        try:
+            er.export(er.parse_args([]), 0.0)
+        except er.ExportError as e:
+            assert e is marker
+        else:
+            raise AssertionError("export() did not call git_state() first")
+    finally:
+        er.git_state = saved
+
+
+def test_errors_outside_located_print_as_export_reference_lines():
+    import contextlib
+    import io
+
+    def run(exc):
+        def fake(args, started):
+            raise exc
+
+        saved, er.export = er.export, fake
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = er.main(["--out", str(tmpdir())])
+        finally:
+            er.export = saved
+        return rc, err.getvalue()
+
+    rc, err = run(PermissionError(13, "Permission denied", "/x"))
+    assert rc == 1 and err.startswith("export_reference: ") and "Permission denied" in err, err
+    assert "Traceback" not in err, err
+    rc, err = run(KeyError("nodes"))
+    assert rc == 1 and err.startswith("export_reference: ") and "KeyError" in err, err
+    assert "Traceback" not in err, err
+
+
+def test_validate_dir_checks_the_h80_files_and_the_export_id_pair():
+    needs(er.DATA / "flyvis-reference" / "manifest.json")
+    root = tmpdir()
+    (root / "flyvis-reference").symlink_to(er.DATA / "flyvis-reference")
+    # no flyvis-stimuli beside it: the pair check must refuse
+    try:
+        validate_dir(root / "flyvis-reference")
+    except er.ExportError as e:
+        assert "pair" in str(e) and "_h80" in str(e), e
+    else:
+        raise AssertionError("validate_dir ignored the missing _h80 files")
+
+
 # -- cross_checks and block_arrays on synthetic runs ---------------------------
 
 def _synthetic_results():
@@ -756,7 +835,8 @@ def validate_dir(directory: pathlib.Path) -> int:
     names = sorted(p.name for p in directory.iterdir())
     want = sorted([f["name"] for f in m["files"]] + ["manifest.json", "PROVENANCE.json"])
     assert names == want, names
-    print(f"{directory}: manifest valid, {len(m['files'])} files verified, {len(names)} files in all")
+    er.check_pair(directory.parent)
+    print(f"{directory}: manifest valid, {len(m['files'])} files verified, {len(names)} files in all, _h80 files and export_id pair checked")
     return 0
 
 
