@@ -18,7 +18,7 @@
 - Crate package name `semblance-rng`; lib name `semblance_rng`.
 - Package metadata is inherited from `[workspace.package]`; `readme = "../../README.md"` is set per-crate.
 - Commit message style matches the repo: plain imperative subject, no `feat:`/`fix:` prefixes.
-- Run all verification from the workspace root, `/Users/miki_przygoda/Projects/GitHub-Projects/semblance`.
+- Run all verification from the workspace root.
 
 ## File Structure
 
