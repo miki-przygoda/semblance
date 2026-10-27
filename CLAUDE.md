@@ -128,7 +128,8 @@ cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 and `data/flyvis-stimuli/` are absent (all three are gitignored real-data; the
 first is fetched per `RESOURCES.md`, the other two produced by
 `tools/export_build.py`, and `tools/export_stimuli.py` with
-`tools/export_moving_edges.py` respectively). A skip prints
+`tools/export_moving_edges.py` respectively; `tools/export_reference.py`
+also writes the three height-80 `_h80` moving-edge files). A skip prints
 `eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
 tests, so under plain `cargo test --workspace` those notices are invisible —
 the suite reports the same "204 passed, 0 failed" whether the data is present
@@ -142,7 +143,10 @@ this workspace reproduces flyvis can pass while silently verifying nothing.
 To get the fixtures without installing Python, flyvis or PyTorch, run
 `ci/fetch-fixtures.sh`. It needs `gh` access to this repo, fetches only what
 is missing, and verifies every file against `ci/fixtures.sha256`. It never
-overwrites a file that fails verification. CI runs the same script, then the
+overwrites a file that fails verification. Since `fixtures-2` it also fetches
+`data/flyvis-reference/` (flyvis's reference traces, from
+`tools/export_reference.py`) and `data/flyvis-pretrained/ensemble.csv`; no
+test reads either yet. CI runs the same script, then the
 suite with `SEMBLANCE_REQUIRE_FIXTURES=1`.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
