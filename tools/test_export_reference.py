@@ -435,6 +435,105 @@ def test_a_missing_parent_of_out_fails_before_anything_is_created():
     assert _listing(base) == []
 
 
+# -- Task 4: models, checkpoints, freeze check -------------------------------------
+
+def test_bits_equal_is_bitwise():
+    a = np.array([0.0, 1.0], dtype=np.float32)
+    assert er.bits_equal(a, a.copy())
+    assert not er.bits_equal(a, np.array([-0.0, 1.0], dtype=np.float32))
+    assert not er.bits_equal(a, a.astype(np.float64))
+    assert not er.bits_equal(a, a[:1])
+    nan = np.array([np.nan], dtype=np.float64)
+    assert er.bits_equal(nan, nan.copy())
+
+
+def test_max_abs_gap_widens_exactly():
+    a = np.array([0.1], dtype=np.float32)
+    assert er.max_abs_gap(a, a.astype(np.float64)) == 0.0
+    assert er.max_abs_gap(np.array([1.0]), np.array([1.5])) == 0.5
+    raises(lambda: er.max_abs_gap(np.zeros(2), np.zeros(3)), "shapes")
+
+
+def _fake_ckpts():
+    f = np.float32
+    return {
+        "000": {"time_const": np.array([0.019, 0.05, 0.02], f), "syn_strength": np.array([0, 0, 1e-5], f),
+                "bias": np.array([-1, 2], f)},
+        "001": {"time_const": np.array([0.019, 0.019, 0.5], f), "syn_strength": np.array([0, 0.1, 0.2], f),
+                "bias": np.array([0, 0], f)},
+        "049": {"time_const": np.array([0.03, 0.03, 0.03], f), "syn_strength": np.array([0, 1e-3, 0], f),
+                "bias": np.array([0.5, 0.5], f)},
+    }
+
+
+def test_freeze_figures_counts_what_the_spec_names():
+    clamps = {m: {"bias": None, "time_const": None, "syn_strength": "non_negative"} for m in ("000", "001", "049")}
+    fig = er.freeze_figures(_fake_ckpts(), clamps)
+    tc, ss, bias = fig["time_const"], fig["syn_strength"], fig["bias"]
+    assert tc["below_f32_0.02_total"] == 3 and tc["below_f32_0.02_000"] == 1 and tc["below_f32_0.02_049"] == 0
+    assert tc["below_f32_0.02_per_model"] == {"min": 0, "median": 1, "max": 2}
+    assert tc["in_f32_0.02_to_0.02"] == 1          # f32(0.02) itself sits in the gap
+    assert tc["largest_below_floor"] == float(np.float32(0.019))
+    assert ss["exact_zeros"] == 5 and ss["zeros_000"] == 2 and ss["zeros_049"] == 2
+    assert ss["conn_types_zero_in_some_model"] == 3 and ss["conn_types_zero_in_all_models"] == 1
+    assert ss["smallest_positive"] == float(np.float32(1e-5))
+    assert ss["positive_at_or_below_1e-4"] == 1 and ss["positive_at_or_below_1e-2"] == 2
+    assert bias == {"min": -1.0, "max": 2.0, "clamp": ["None"]}
+    assert ss["clamp"] == ["non_negative"]
+
+
+def test_check_freeze_reports_the_first_mismatch():
+    clamps = {m: {"bias": None, "time_const": None, "syn_strength": "non_negative"} for m in ("000", "001", "049")}
+    fig = er.freeze_figures(_fake_ckpts(), clamps)
+    raises(lambda: er.check_freeze(fig), "time_const.below_f32_0.02_total is 3, expected 2396")
+    er.check_freeze(fig, {("syn_strength", "exact_zeros"): 5})
+
+
+def test_copy_models_copies_only_the_load_path_and_checks_it():
+    src, dst = tmpdir(), tmpdir()
+    for mid in ("000", "049"):
+        d = src / mid
+        (d / "chkpts").mkdir(parents=True)
+        (d / "validation").mkdir()
+        (d / "__cache__").mkdir()
+        (d / "chkpts" / "chkpt_00000").write_bytes(mid.encode())
+        (d / "validation" / "loss.h5").write_bytes(b"l")
+        for f in ("_meta.yaml", "best_chkpt", "validation_loss.h5"):
+            (d / f).write_bytes(f.encode())
+        (d / "__cache__" / "junk").write_bytes(b"j")
+    shas = er.copy_models(src, dst, ["000", "049"])
+    assert sorted(p.name for p in (dst / "000").iterdir()) == sorted(er.MODEL_ENTRIES)
+    assert shas["049"]["original_sha256"] == shas["049"]["scratch_sha256"] == er.sha256_file(src / "049" / er.CHECKPOINT)
+
+
+def test_models_rank_as_recorded():
+    needs(er.RESULTS)
+    losses = er.read_validation_losses(er.RESULTS)
+    assert len(losses) == 50
+    er.rank_models(losses)
+    bad = dict(losses)
+    bad["020"] = 0.0
+    raises(lambda: er.rank_models(bad), "best 020")
+
+
+def test_all_50_checkpoints_and_the_freeze_figures():
+    needs(er.RESULTS, er.ENSEMBLE_CSV)
+    pre = er.parse_pretrained(er.PRETRAINED_RS.read_text())
+    ens = er.read_ensemble(er.ENSEMBLE_CSV.read_text())
+    ids = sorted(er.read_validation_losses(er.RESULTS))
+    ckpts = {m: er.load_checkpoint(er.RESULTS / m / er.CHECKPOINT) for m in ids}
+    er.check_checkpoints(ckpts, ens, pre)
+    fig = er.freeze_figures(ckpts, er.read_clamps(er.RESULTS, ids))
+    er.check_freeze(fig)
+    assert fig["time_const"]["largest_below_floor"] == float(np.float32(0.019996209))
+    assert fig["time_const"]["smallest_at_or_above_floor"] == float(np.float32(0.020369984))
+    ref = er.reference_params("049", pre, ens)
+    assert er.bits_equal(ckpts["049"]["syn_strength"], ref["syn_strength"])
+    ckpts["007"]["syn_strength"] = ckpts["007"]["syn_strength"].copy()
+    ckpts["007"]["syn_strength"][0] = -0.0 if ckpts["007"]["syn_strength"][0] == 0 else 0.0
+    raises(lambda: er.check_checkpoints(ckpts, ens, pre), "checkpoint 007 syn_strength")
+
+
 # -- runner (keep last) ---------------------------------------------------------
 
 def main(argv) -> int:

@@ -712,3 +712,223 @@ def write_outputs(out: pathlib.Path, ref_bins: list, provenance: bytes, manifest
                     out.rmdir()
         elif old.exists() and not final.exists():
             os.rename(old, final)
+
+
+# -- model ranking, checkpoints and the freeze check -----------------------------
+
+def read_validation_losses(results: pathlib.Path) -> dict:
+    """validation/loss.h5["data"] for every model directory, by id."""
+    import h5py
+
+    dirs = sorted(d for d in results.iterdir() if d.is_dir() and d.name.isdigit())
+    require(len(dirs) == N_MODELS, "models", f"{len(dirs)} model directories in {results}, expected {N_MODELS}")
+    losses = {}
+    for d in dirs:
+        with h5py.File(d / "validation" / "loss.h5", "r") as f:
+            losses[d.name] = float(f["data"][()])
+    return losses
+
+
+def rank_models(losses: dict) -> None:
+    """Asserts that 000 is the best and 049 the worst, at the recorded losses."""
+    best = min(losses, key=losses.get)
+    worst = max(losses, key=losses.get)
+    (b_id, _, b_loss, _), (w_id, _, w_loss, _) = MODELS
+    require((best, worst) == (b_id, w_id), "models", f"best {best}, worst {worst}; expected {b_id}, {w_id}")
+    require(losses[best] == b_loss and losses[worst] == w_loss, "models",
+            f"losses {losses[best]!r} / {losses[worst]!r}; expected {b_loss!r} / {w_loss!r}")
+
+
+PARAM_KEYS = {
+    "bias": "nodes_bias",
+    "time_const": "nodes_time_const",
+    "syn_strength": "edges_syn_strength",
+    "sign": "edges_sign",
+    "syn_count": "edges_syn_count",
+}
+
+
+def load_checkpoint(path: pathlib.Path) -> dict:
+    """The five network tensors of one checkpoint as float32 numpy arrays,
+    loaded with weights_only=True: no pickle code runs."""
+    import torch
+
+    net = torch.load(path, map_location="cpu", weights_only=True)["network"]
+    out = {}
+    for name, key in PARAM_KEYS.items():
+        t = net[key]
+        require(t.dtype == torch.float32, "A1", f"{path}: {key} is {t.dtype}")
+        out[name] = t.detach().cpu().numpy().copy()
+    return out
+
+
+def bits_equal(a, b) -> bool:
+    """Bitwise equality of two arrays (or tensors): same dtype, same shape,
+    same bits. -0.0 and 0.0 differ; NaN equals only the same NaN."""
+    if hasattr(a, "detach"):
+        a = a.detach().cpu().numpy()
+    if hasattr(b, "detach"):
+        b = b.detach().cpu().numpy()
+    a, b = np.ascontiguousarray(a), np.ascontiguousarray(b)
+    if a.dtype != b.dtype or a.shape != b.shape:
+        return False
+    view = {2: np.uint16, 4: np.uint32, 8: np.uint64}[a.dtype.itemsize]
+    return bool(np.array_equal(a.view(view), b.view(view)))
+
+
+def reference_params(model: str, pretrained: dict, ensemble: dict) -> dict:
+    """What a model's five parameters must equal, as float32: 000 from
+    pretrained.rs, any other from its ensemble.csv rows. sign and syn_count
+    are the same in every model and come from pretrained.rs (F15)."""
+    if model == "000":
+        ref = {"bias": pretrained["BIAS"], "time_const": pretrained["TIME_CONST"],
+               "syn_strength": pretrained["SYN_STRENGTH"]}
+    else:
+        ref = {k: ensemble[model][k][1] for k in ("bias", "time_const", "syn_strength")}
+    ref["sign"] = pretrained["SIGN"]
+    ref["syn_count"] = pretrained["SYN_COUNT"]
+    return ref
+
+
+def check_checkpoints(ckpts: dict, ensemble: dict, pretrained: dict) -> None:
+    """A1 over every checkpoint: the free parameters equal ensemble.csv and
+    sign/syn_count equal pretrained.rs, bit for bit; the csv's names equal
+    pretrained.rs's tables; model 000's csv rows equal pretrained.rs."""
+    cells = list(pretrained["CELL_TYPES"])
+    conns = [f"{s}>{t}" for s, t in pretrained["CONN_TYPES"]]
+    for mid in sorted(ckpts):
+        for kind in ("bias", "time_const", "syn_strength"):
+            names, values = ensemble[mid][kind]
+            require(names == (conns if kind == "syn_strength" else cells), "A1",
+                    f"ensemble.csv {mid} {kind} names differ from pretrained.rs")
+            require(bits_equal(ckpts[mid][kind], values), "A1", f"checkpoint {mid} {kind} != ensemble.csv")
+        require(bits_equal(ckpts[mid]["sign"], pretrained["SIGN"]), "A1", f"checkpoint {mid} sign != pretrained.rs")
+        require(bits_equal(ckpts[mid]["syn_count"], pretrained["SYN_COUNT"]), "A1",
+                f"checkpoint {mid} syn_count != pretrained.rs")
+    for kind, rs in (("bias", "BIAS"), ("time_const", "TIME_CONST"), ("syn_strength", "SYN_STRENGTH")):
+        require(bits_equal(ensemble["000"][kind][1], pretrained[rs]), "A1", f"ensemble.csv 000 {kind} != pretrained.rs")
+
+
+def read_clamps(results: pathlib.Path, ids) -> dict:
+    """Each model's configured clamp per parameter, from its _meta.yaml."""
+    import yaml
+
+    out = {}
+    for mid in ids:
+        meta = yaml.safe_load((results / mid / "_meta.yaml").read_text())
+        net = meta["config"]["network"]
+        out[mid] = {
+            "bias": net["node_config"]["bias"].get("clamp"),
+            "time_const": net["node_config"]["time_const"].get("clamp"),
+            "syn_strength": net["edge_config"]["syn_strength"].get("clamp"),
+        }
+    return out
+
+
+def _spread(counts: dict) -> dict:
+    v = [counts[k] for k in sorted(counts)]
+    return {"min": min(v), "median": statistics.median(v), "max": max(v)}
+
+
+def freeze_figures(ckpts: dict, clamps: dict) -> dict:
+    """A8: records how many values sit at or under a boundary. Interprets nothing."""
+    ids = sorted(ckpts)
+    floor = np.float32(0.02)
+    tc = {m: ckpts[m]["time_const"] for m in ids}
+    ss = {m: ckpts[m]["syn_strength"] for m in ids}
+    bias = np.concatenate([ckpts[m]["bias"] for m in ids])
+    all_tc = np.concatenate([tc[m] for m in ids])
+    all_ss = np.concatenate([ss[m] for m in ids])
+    below = {m: int((tc[m] < floor).sum()) for m in ids}
+    zeros = {m: int((ss[m] == 0).sum()) for m in ids}
+    zero_matrix = np.stack([ss[m] == 0 for m in ids])
+    positive = all_ss[all_ss > 0].astype(np.float64)
+    return {
+        "time_const": {
+            "below_f32_0.02_total": int(sum(below.values())),
+            "below_f32_0.02_per_model": _spread(below),
+            "below_f32_0.02_000": below.get("000"),
+            "below_f32_0.02_049": below.get("049"),
+            "in_f32_0.02_to_0.02": int(((all_tc >= floor) & (all_tc.astype(np.float64) <= 0.02)).sum()),
+            "largest_below_floor": float(all_tc[all_tc < floor].max()) if (all_tc < floor).any() else None,
+            "smallest_at_or_above_floor": float(all_tc[all_tc >= floor].min()),
+            "below_f32_1/200": int((all_tc < np.float32(1.0 / 200.0)).sum()),
+        },
+        "syn_strength": {
+            "clamp": sorted({str(clamps[m]["syn_strength"]) for m in ids}),
+            "exact_zeros": int((all_ss == 0).sum()),
+            "negative": int((all_ss < 0).sum()),
+            "zeros_per_model": _spread(zeros),
+            "zeros_000": zeros.get("000"),
+            "zeros_049": zeros.get("049"),
+            "conn_types_zero_in_some_model": int(zero_matrix.any(axis=0).sum()),
+            "conn_types_zero_in_all_models": int(zero_matrix.all(axis=0).sum()),
+            "smallest_positive": float(positive.min()),
+            "positive_at_or_below_1e-6": int((positive <= 1e-6).sum()),
+            "positive_at_or_below_1e-4": int((positive <= 1e-4).sum()),
+            "positive_at_or_below_1e-2": int((positive <= 1e-2).sum()),
+        },
+        "bias": {
+            "min": float(bias.min()),
+            "max": float(bias.max()),
+            "clamp": sorted({str(clamps[m]["bias"]) for m in ids}),
+        },
+    }
+
+
+# A8's asserted figures (F46-F48). A mismatch is a bug in how the checkpoints
+# were read, not a number to update.
+FREEZE_EXPECTED = {
+    ("time_const", "below_f32_0.02_total"): 2396,
+    ("time_const", "below_f32_0.02_per_model"): {"min": 36, "median": 48.5, "max": 55},
+    ("time_const", "below_f32_0.02_000"): 51,
+    ("time_const", "below_f32_0.02_049"): 36,
+    ("time_const", "in_f32_0.02_to_0.02"): 0,
+    ("time_const", "below_f32_1/200"): 0,
+    ("syn_strength", "clamp"): ["non_negative"],
+    ("syn_strength", "exact_zeros"): 919,
+    ("syn_strength", "negative"): 0,
+    ("syn_strength", "zeros_per_model"): {"min": 8, "median": 17.5, "max": 40},
+    ("syn_strength", "zeros_000"): 31,
+    ("syn_strength", "zeros_049"): 15,
+    ("syn_strength", "conn_types_zero_in_some_model"): 418,
+    ("syn_strength", "conn_types_zero_in_all_models"): 0,
+    ("bias", "clamp"): ["None"],
+}
+
+
+def check_freeze(figures: dict, expected: dict = FREEZE_EXPECTED) -> None:
+    for (group, key), want in expected.items():
+        got = figures[group][key]
+        require(got == want, "A8", f"{group}.{key} is {got!r}, expected {want!r}")
+
+
+def copy_models(src: pathlib.Path, dst: pathlib.Path, ids) -> dict:
+    """Copies MODEL_ENTRIES of each model into dst/<id>/ and checks every
+    copied file's sha256 against its source. Returns each model's
+    chkpt_00000 sha256, original and copy."""
+    out = {}
+    for mid in ids:
+        for entry in MODEL_ENTRIES:
+            s, d = src / mid / entry, dst / mid / entry
+            d.parent.mkdir(parents=True, exist_ok=True)
+            if s.is_dir():
+                shutil.copytree(s, d)
+            else:
+                shutil.copy2(s, d)
+        for s in sorted(p for p in (src / mid).rglob("*") if p.is_file()):
+            rel = s.relative_to(src / mid)
+            if rel.parts[0] not in MODEL_ENTRIES:
+                continue
+            require(sha256_file(dst / mid / rel) == sha256_file(s), "setup", f"copy of {s} differs")
+        out[mid] = {"original_sha256": sha256_file(src / mid / CHECKPOINT),
+                    "scratch_sha256": sha256_file(dst / mid / CHECKPOINT)}
+    return out
+
+
+def max_abs_gap(a, b) -> float:
+    """max |a - b| in float64, after the exact widening of either side."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    require(a.shape == b.shape, "A7", f"shapes {a.shape} vs {b.shape}")
+    return float(np.max(np.abs(a - b)))
