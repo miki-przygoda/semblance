@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import traceback
@@ -43,8 +44,19 @@ def raises(fn, *needles):
     raise AssertionError("no ExportError raised")
 
 
+_TMPDIRS = []
+
+
 def tmpdir() -> pathlib.Path:
-    return pathlib.Path(tempfile.mkdtemp(prefix="export-reference-test-"))
+    """A fresh temp directory, removed by the runner when the test finishes."""
+    d = pathlib.Path(tempfile.mkdtemp(prefix="export-reference-test-"))
+    _TMPDIRS.append(d)
+    return d
+
+
+def cleanup_tmpdirs():
+    while _TMPDIRS:
+        shutil.rmtree(_TMPDIRS.pop(), ignore_errors=True)
 
 
 # -- Task 1: command line, preflight, lock, parameter readers --------------------
@@ -414,7 +426,8 @@ def test_a_crash_after_the_new_set_is_placed_deletes_nothing():
 
 def test_a_mismatched_export_id_pair_fails_the_final_check():
     out = tmpdir()
-    raises(lambda: er.write_outputs(out, *_tiny_set("A", h80_id="B"), "A"), "export_id mismatch")
+    msg = raises(lambda: er.write_outputs(out, *_tiny_set("A", h80_id="B"), "A"), "export_id mismatch")
+    assert er.RECOVERY in msg, msg
     assert any(p.name.startswith(".flyvis-reference.incomplete-") for p in out.iterdir())
 
 
@@ -640,6 +653,75 @@ def test_ctrl_c_prints_recovery_only_when_a_marker_is_left():
     assert rc == 130 and "interrupted" in err and "Recovering" not in err, err
 
 
+# -- cross_checks and block_arrays on synthetic runs ---------------------------
+
+def _synthetic_results():
+    """Run results in the shape cross_checks and block_arrays consume, with
+    the real shapes and dtypes and constant contents."""
+    seqs = er.sequence_table()
+    nf = len(er.FLASH_ARGS)
+    results = {}
+    for r, mid, dt_id, prec in er.RUNS:
+        dt = np.float32 if prec == "f32" else np.float64
+        out = []
+        for s in seqs:
+            n = s["frames"][dt_id]["n_frames"]
+            k = s["index"]
+            x = np.full((n, er.N_HEXALS), 0.25 + k, dtype=np.float64)   # exact in f32
+            x_run = x.astype(np.float32) if (prec == "f32" and k < nf) else x
+            out.append({
+                "x": x_run,
+                "buffer_row": x.astype(dt),
+                "centre": np.zeros((n, er.N_CENTRE), dtype=dt),
+                "snapshots": np.zeros((er.N_SNAPSHOTS, er.N_NODES), dtype=dt),
+            })
+        results[r] = {
+            "settled": np.zeros(er.N_NODES, dtype=dt),
+            "settling_centre": np.zeros((er.N_SETTLE[dt_id], er.N_CENTRE), dtype=dt),
+            "seqs": out,
+        }
+    return results
+
+
+def test_cross_checks_and_block_arrays_on_synthetic_runs():
+    results = _synthetic_results()
+    by = {(m, d, p): r for r, m, d, p in er.RUNS}
+    nf = len(er.FLASH_ARGS)
+    flashes = np.stack([s["x"] for s in results[by[("000", "1/200", "f64")]]["seqs"][:nf]])
+    saved = er.FLASHES_BIN
+    er.FLASHES_BIN = tmpdir() / "flashes.bin"
+    try:
+        flashes.astype("<f4").tofile(er.FLASHES_BIN)
+        checks = er.cross_checks(results)
+        assert set(checks) == {"input_rounding", "f32_f64_gap"}
+        assert set(checks["f32_f64_gap"]) == {f"{m} {d}" for m in ("000", "049") for d, _, _ in er.DTS}
+        assert all(g == 0.0 for gap in checks["f32_f64_gap"].values() for g in gap.values())
+
+        # a mismatch is caught: one f32 run's buffer differs from float32(stored)
+        bad = results[by[("049", "1/50", "f32")]]["seqs"][0]
+        bad["buffer_row"] = bad["buffer_row"] + np.float32(1.0)
+        raises(lambda: er.cross_checks(results), "A3", "f32 buffer differs")
+    finally:
+        er.FLASHES_BIN = saved
+
+    arrays = er.block_arrays(results)
+    for entry in er.file_layout():
+        stem = entry["name"].split(".")[0]
+        sub = {k[1:]: v for k, v in arrays.items() if k[0] == stem}
+        # block_arrays covers both precisions of a stem; the file takes its own
+        keys = [(b["run"], b["dt"], b["sequence"]) for b in entry["blocks"]]
+        sub = {k: sub[k] for k in keys}
+        for b in entry["blocks"]:
+            assert list(sub[(b["run"], b["dt"], b["sequence"])].shape) == b["shape"], (entry["name"], b)
+        assert len(er.pack_file(entry, sub)) == entry["bytes"], entry["name"]
+    # a shape that disagrees with file_layout is refused by pack_file
+    entry = next(e for e in er.file_layout() if e["name"] == "centre.f32.bin")
+    sub = {k[1:]: v for k, v in arrays.items() if k[0] == "centre"}
+    key = (entry["blocks"][0]["run"], entry["blocks"][0]["dt"], entry["blocks"][0]["sequence"])
+    sub[key] = sub[key][:-1]
+    raises(lambda: er.pack_file(entry, sub), "shape")
+
+
 # -- runner (keep last) ---------------------------------------------------------
 
 def main(argv) -> int:
@@ -659,6 +741,8 @@ def main(argv) -> int:
             failed += 1
             print(f"FAIL  {name}")
             traceback.print_exc()
+        finally:
+            cleanup_tmpdirs()
     print(f"{passed} passed, {skipped} skipped, {failed} failed")
     return 1 if failed else 0
 

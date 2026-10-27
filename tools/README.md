@@ -65,12 +65,15 @@ dtype. It writes nothing under `data/` except its outputs, refuses to replace
 them without `--force`, and holds a lock so two runs cannot share the scratch
 root. Its self-tests need no flyvis:
 `uv run --project tools tools/test_export_reference.py`.
+`uv run --project tools python tools/test_export_reference.py --validate <dir>`
+checks an export's manifest and its 9 binaries; it does not check the three
+`_h80` files or the `export_id` pair.
 
 **Do not re-export a pinned fixture by hand.** `ci/fetch-fixtures.sh` checks
 every file in `ci/fixtures.sha256` byte for byte, and every export is dated —
 in its provenance file, or for `ensemble.csv` in its header. Re-running
 `export_params.py`, or any exporter above, therefore makes the fetch script
-refuse the new file. To return to the published set, delete the re-exported
+refuse the new file whenever the re-export's bytes differ from the pinned ones. To return to the published set, delete the re-exported
 files and run `ci/fetch-fixtures.sh`; a deliberate re-export needs a new
 `fixtures-N`, with `ci/fixtures.sha256` and `ci/fixtures-tag` changed in one
 commit.
