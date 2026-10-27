@@ -329,3 +329,281 @@ def read_ensemble(text: str, kinds=ENSEMBLE_KINDS, n_models: int = N_MODELS) -> 
                 i += 1
             out[mid][kind] = (names, np.array(values, dtype=np.float32))
     return out
+
+
+# -- storage layout and manifest -----------------------------------------------
+
+FRAME_SEMANTICS = {
+    "settle_step": (
+        "settle_step i: the state after i+1 Euler steps from the bias initial "
+        "state, with grey 0.5 on every photoreceptor. Its time is (i+1)*dt. "
+        "settled equals settle step n_settle-1, in every node."
+    ),
+    "frame": (
+        "frame i: the state after i+1 Euler steps from the settled state, where "
+        "step i+1 used input frame i. Its time is (i+1)*dt after the sequence "
+        "starts. Frame 0 is not the settled state. flyvis's own analysis labels "
+        "frame 0 as -t_pre. Do not copy that."
+    ),
+    "time_s": "(i + 1) * dt",
+}
+
+FILE_STEMS = [
+    ("settled", ["node"]),
+    ("settling_centre", ["settle_step", "centre_node"]),
+    ("snapshots", ["snapshot", "node"]),
+    ("centre", ["frame", "centre_node"]),
+]
+INPUT_FILE = ("input", ["frame", "hexal"])
+DTYPE = {"f32": "<f4", "f64": "<f8"}
+ITEMSIZE = {"<f4": 4, "<f8": 8}
+NUMPY_DTYPE = {"<f4": np.float32, "<f8": np.float64}
+
+MANIFEST_KEYS = [
+    "schema_version", "generator", "flyvis_version", "byte_order", "array_order",
+    "n_nodes", "n_hexals", "t_pre", "pre_stim_value", "batch_size", "dts",
+    "models", "runs", "frame_semantics", "centre_nodes", "transients_visible_on",
+    "sequences", "files",
+]
+
+
+def sequence_table() -> list:
+    """The 12 sequences: 4 flashes then 8 moving edges, in flyvis's arg_df order."""
+    def frames(family):
+        out = {}
+        for dt_id, _, _ in DTS:
+            n = N_FRAMES[family][dt_id]
+            out[dt_id] = {
+                "n_frames": n,
+                "stimulus_frames": list(STIMULUS_FRAMES[family][dt_id]),
+                "snapshot_frames": list(SNAPSHOT_FRAMES[n]),
+            }
+        return out
+
+    seqs = []
+    for k, (baseline, intensity, radius) in enumerate(FLASH_ARGS):
+        seqs.append({
+            "index": k,
+            "family": "flashes",
+            "flyvis_index": k,
+            "args": {"baseline": baseline, "intensity": intensity, "radius": radius},
+            "frames": frames("flashes"),
+        })
+    for k, (angle, intensity) in enumerate(EDGE_ARGS):
+        seqs.append({
+            "index": len(FLASH_ARGS) + k,
+            "family": "moving_edge",
+            "flyvis_index": k,
+            "args": {
+                "angle": angle, "intensity": intensity, "speed": float(EDGE_SPEED),
+                "width": 80, "height": EDGE_HEIGHT, "offsets": [-10, 11],
+                "t_pre": 1.0, "t_post": 1.0, "post_pad_mode": "continue",
+                "bar_loc_horizontal": 0.0,
+            },
+            "frames": frames("moving_edge"),
+        })
+    return seqs
+
+
+def _file_entry(name: str, dtype: str, axes: list, blocks: list) -> dict:
+    itemsize = ITEMSIZE[dtype]
+    out_blocks, offset = [], 0
+    for run, dt_id, sequence, shape in blocks:
+        nbytes = int(np.prod(shape)) * itemsize
+        out_blocks.append({"run": run, "dt": dt_id, "sequence": sequence,
+                           "offset": offset, "bytes": nbytes, "shape": list(shape)})
+        offset += nbytes
+    return {"name": name, "dtype": dtype, "axes": list(axes), "bytes": offset,
+            "sha256": None, "blocks": out_blocks}
+
+
+def file_layout() -> list:
+    """Every .bin file's entry in manifest order, sha256 still None."""
+    seqs = sequence_table()
+    files = []
+    for stem, axes in FILE_STEMS:
+        for prec in ("f32", "f64"):
+            blocks = []
+            for run, _, dt_id, p in RUNS:
+                if p != prec:
+                    continue
+                if stem == "settled":
+                    blocks.append((run, dt_id, None, [N_NODES]))
+                elif stem == "settling_centre":
+                    blocks.append((run, dt_id, None, [N_SETTLE[dt_id], N_CENTRE]))
+                else:
+                    for s in seqs:
+                        n = s["frames"][dt_id]["n_frames"]
+                        shape = [N_SNAPSHOTS, N_NODES] if stem == "snapshots" else [n, N_CENTRE]
+                        blocks.append((run, dt_id, s["index"], shape))
+            files.append(_file_entry(f"{stem}.{prec}.bin", DTYPE[prec], axes, blocks))
+    stem, axes = INPUT_FILE
+    blocks = [(None, dt_id, s["index"], [s["frames"][dt_id]["n_frames"], N_HEXALS])
+              for dt_id, _, _ in DTS for s in seqs]
+    files.append(_file_entry(f"{stem}.f64.bin", "<f8", axes, blocks))
+    return files
+
+
+def pack_file(entry: dict, arrays: dict) -> bytes:
+    """Concatenates the blocks of one file. `arrays` maps (run, dt id,
+    sequence) to an array whose shape is the block's and whose dtype is
+    already the file's: nothing is widened or narrowed here, only byte order."""
+    dtype = entry["dtype"]
+    parts = []
+    for b in entry["blocks"]:
+        key = (b["run"], b["dt"], b["sequence"])
+        require(key in arrays, "write", f"{entry['name']}: no array for block {key}")
+        a = np.asarray(arrays[key])
+        require(a.dtype == NUMPY_DTYPE[dtype], "write",
+                f"{entry['name']} block {key} is {a.dtype}, the file is {dtype}")
+        require(list(a.shape) == b["shape"], "write",
+                f"{entry['name']} block {key} has shape {list(a.shape)}, expected {b['shape']}")
+        data = a.astype(dtype).tobytes(order="C")
+        require(len(data) == b["bytes"], "write", f"{entry['name']} block {key}: byte count")
+        parts.append(data)
+    out = b"".join(parts)
+    require(len(out) == entry["bytes"], "write", f"{entry['name']}: total byte count")
+    return out
+
+
+def build_manifest(centre_nodes: list, files: list) -> dict:
+    """manifest.json's content, key order as the spec's field table."""
+    return {
+        "schema_version": 1,
+        "generator": GENERATOR,
+        "flyvis_version": FLYVIS_VERSION,
+        "byte_order": "little",
+        "array_order": "C",
+        "n_nodes": N_NODES,
+        "n_hexals": N_HEXALS,
+        "t_pre": T_PRE,
+        "pre_stim_value": PRE_STIM_VALUE,
+        "batch_size": BATCH_SIZE,
+        "dts": [{"id": i, "dt": dt, "floor_dt_f32": FLOOR_DT_F32[i], "n_settle": n}
+                for i, dt, n in DTS],
+        "models": [{"id": m, "name": name, "validation_loss": loss, "rank": rank}
+                   for m, name, loss, rank in MODELS],
+        "runs": [{"index": r, "model": m, "dt": d, "precision": p} for r, m, d, p in RUNS],
+        "frame_semantics": dict(FRAME_SEMANTICS),
+        "centre_nodes": [{"node": int(n), "cell_type": str(t)} for n, t in centre_nodes],
+        "transients_visible_on": "centre",
+        "sequences": sequence_table(),
+        "files": files,
+    }
+
+
+def manifest_bytes(manifest: dict) -> bytes:
+    return (json.dumps(manifest, indent=2, allow_nan=False, sort_keys=False) + "\n").encode()
+
+
+def _only_builtin(obj, where="manifest"):
+    """No numpy scalars, no bools posing as ints: json would either refuse
+    them or write them differently from the spec's types."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            require(type(k) is str, "manifest", f"{where}: key {k!r} is not str")
+            _only_builtin(v, f"{where}.{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            _only_builtin(v, f"{where}[{i}]")
+    else:
+        require(obj is None or type(obj) in (int, float, str), "manifest",
+                f"{where} is a {type(obj).__name__}")
+
+
+def validate_manifest(m: dict) -> None:
+    """Checks manifest.json against the spec's field table. Raises ExportError."""
+    def need(ok, detail):
+        require(ok, "manifest", detail)
+
+    _only_builtin(m)
+    need(list(m) == MANIFEST_KEYS, f"top-level keys {list(m)}")
+    fixed = {"schema_version": 1, "generator": GENERATOR, "flyvis_version": FLYVIS_VERSION,
+             "byte_order": "little", "array_order": "C", "n_nodes": N_NODES,
+             "n_hexals": N_HEXALS, "t_pre": 1.0, "pre_stim_value": 0.5, "batch_size": 1,
+             "transients_visible_on": "centre", "frame_semantics": FRAME_SEMANTICS}
+    for k, v in fixed.items():
+        need(m[k] == v and type(m[k]) is type(v), f"{k} is {m[k]!r}, expected {v!r}")
+    need(m["dts"] == [{"id": "1/200", "dt": 0.005, "floor_dt_f32": 0.004999999888241291, "n_settle": 200},
+                      {"id": "1/50", "dt": 0.02, "floor_dt_f32": 0.019999999552965164, "n_settle": 50}],
+         f"dts {m['dts']}")
+    need(m["models"] == [{"id": "000", "name": "flow/0000/000", "validation_loss": 5.136557016107771, "rank": "best"},
+                         {"id": "049", "name": "flow/0000/049", "validation_loss": 5.677851685219341, "rank": "worst"}],
+         f"models {m['models']}")
+    need(all(list(r) == ["index", "model", "dt", "precision"] for r in m["runs"]), "runs key order")
+    need([(r["index"], r["model"], r["dt"], r["precision"]) for r in m["runs"]] == RUNS, "runs")
+    c = m["centre_nodes"]
+    need(len(c) == N_CENTRE, f"{len(c)} centre nodes, expected {N_CENTRE}")
+    need(all(list(e) == ["node", "cell_type"] for e in c), "centre_nodes keys")
+    need([e["node"] for e in c] == sorted({e["node"] for e in c}), "centre_nodes not strictly ascending")
+    need(len({e["cell_type"] for e in c}) == N_CENTRE, "centre_nodes cell types not one per type")
+    need((c[0]["node"], c[0]["cell_type"]) == FIRST_CENTRE, f"first centre node {c[0]}")
+    need(m["sequences"] == sequence_table(), "sequences differ from the spec's table")
+    seq_ids = {s["index"] for s in m["sequences"]}
+    run_ids = {r["index"]: r for r in m["runs"]}
+    dt_ids = [d["id"] for d in m["dts"]]
+    want_files = [f"{stem}.{p}.bin" for stem, _ in FILE_STEMS for p in ("f32", "f64")] + ["input.f64.bin"]
+    need([f["name"] for f in m["files"]] == want_files, f"files {[f['name'] for f in m['files']]}")
+    layout = {f["name"]: f for f in file_layout()}
+    for f in m["files"]:
+        name = f["name"]
+        need(list(f) == ["name", "dtype", "axes", "bytes", "sha256", "blocks"], f"{name}: keys {list(f)}")
+        need(f["dtype"] == ("<f4" if ".f32." in name else "<f8"), f"{name}: dtype {f['dtype']} vs name")
+        need(f["axes"] == layout[name]["axes"], f"{name}: axes {f['axes']}")
+        need(isinstance(f["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", f["sha256"]) is not None,
+             f"{name}: sha256 {f['sha256']!r}")
+        offset = 0
+        for b in f["blocks"]:
+            need(list(b) == ["run", "dt", "sequence", "offset", "bytes", "shape"], f"{name}: block keys {list(b)}")
+            need(b["offset"] == offset, f"{name}: block at {b['offset']}, expected {offset}")
+            need(b["bytes"] == int(np.prod(b["shape"])) * ITEMSIZE[f["dtype"]], f"{name}: block bytes vs shape")
+            need(b["dt"] in dt_ids, f"{name}: block dt {b['dt']}")
+            if name.startswith("input"):
+                need(b["run"] is None, f"{name}: input block has a run")
+            else:
+                need(b["run"] in run_ids and run_ids[b["run"]]["dt"] == b["dt"]
+                     and run_ids[b["run"]]["precision"] == name.split(".")[1],
+                     f"{name}: block run {b['run']}")
+            if name.startswith(("settled", "settling_centre")):
+                need(b["sequence"] is None, f"{name}: block has a sequence")
+            else:
+                need(b["sequence"] in seq_ids, f"{name}: block sequence {b['sequence']}")
+            offset += b["bytes"]
+        need(f["bytes"] == offset, f"{name}: bytes {f['bytes']} != sum of blocks {offset}")
+        stripped = {k: v for k, v in f.items() if k != "sha256"}
+        need(stripped == {k: v for k, v in layout[name].items() if k != "sha256"},
+             f"{name}: differs from the storage layout")
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_files(files: list, directory: pathlib.Path) -> None:
+    """Every listed file exists in `directory` with the manifest's length,
+    sha256 and block total."""
+    for f in files:
+        path = directory / f["name"]
+        require(path.is_file(), "verify", f"{path} is missing")
+        size = path.stat().st_size
+        require(size == f["bytes"], "verify", f"{path} is {size} bytes, manifest says {f['bytes']}")
+        require(sum(b["bytes"] for b in f["blocks"]) == size, "verify", f"{path}: blocks do not sum to the length")
+        require(sha256_file(path) == f["sha256"], "verify", f"{path}: sha256 differs from the manifest")
+
+
+def h80_sidecar() -> dict:
+    """moving_edge_offsets_h80.json: the height-9 sidecar's format plus height."""
+    groups = [
+        {"index": i, "angle": int(a), "intensity": float(v)}
+        for i, (a, v) in enumerate((a, v) for a in GATE_ANGLES for v in (0.0, 1.0))
+    ]
+    return {"shape": [len(GATE_ANGLES) * 2, 21, N_OMMATIDIA], "groups": groups,
+            "dtype": "<f4", "height": EDGE_HEIGHT}
+
+
+def json_bytes(obj) -> bytes:
+    return (json.dumps(obj, indent=2, allow_nan=False) + "\n").encode()

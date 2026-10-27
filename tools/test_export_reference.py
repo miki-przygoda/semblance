@@ -175,6 +175,143 @@ def test_read_ensemble_real_file():
     assert e["000"]["bias"][0] == list(p["CELL_TYPES"])
 
 
+# -- Task 2: storage layout and manifest -------------------------------------------
+
+SIZES = {   # the spec's Sizes table
+    "settled.f32.bin": 730_704, "settled.f64.bin": 1_461_408,
+    "settling_centre.f32.bin": 130_000, "settling_centre.f64.bin": 260_000,
+    "snapshots.f32.bin": 52_610_688, "snapshots.f64.bin": 105_221_376,
+    "centre.f32.bin": 4_288_960, "centre.f64.bin": 8_577_920,
+    "input.f64.bin": 47_574_464,
+}
+
+
+def _centre_nodes():
+    return [(360 + 721 * i, f"T{i}") if i else (360, "R1") for i in range(65)]
+
+
+def _manifest():
+    files = er.file_layout()
+    for f in files:
+        f["sha256"] = "0" * 64
+    return er.build_manifest(_centre_nodes(), files)
+
+
+def test_file_layout_matches_the_sizes_table():
+    files = er.file_layout()
+    assert [f["name"] for f in files] == list(SIZES)
+    assert {f["name"]: f["bytes"] for f in files} == SIZES
+    assert sum(SIZES.values()) == 220_855_520
+    assert sum(v for k, v in SIZES.items() if not k.startswith("input")) == 173_281_056
+
+
+def test_blocks_are_contiguous_and_in_storage_order():
+    for f in er.file_layout():
+        offset = 0
+        for b in f["blocks"]:
+            assert b["offset"] == offset, (f["name"], b)
+            assert b["bytes"] == int(np.prod(b["shape"])) * er.ITEMSIZE[f["dtype"]]
+            offset += b["bytes"]
+        assert offset == f["bytes"]
+    centre = {f["name"]: f for f in er.file_layout()}["centre.f32.bin"]
+    assert [(b["run"], b["sequence"]) for b in centre["blocks"][:13]] == [(0, k) for k in range(12)] + [(2, 0)]
+    assert centre["blocks"][4]["shape"] == [525, 65] and centre["blocks"][12]["shape"] == [150, 65]
+    inp = {f["name"]: f for f in er.file_layout()}["input.f64.bin"]
+    assert [(b["run"], b["dt"], b["sequence"]) for b in inp["blocks"][11:13]] == [(None, "1/200", 11), (None, "1/50", 0)]
+
+
+def test_sequence_table_matches_the_spec():
+    seqs = er.sequence_table()
+    assert len(seqs) == 12
+    assert seqs[0]["args"] == {"baseline": 0.5, "intensity": 0.0, "radius": -1}
+    assert seqs[3]["args"] == {"baseline": 0.5, "intensity": 1.0, "radius": 6}
+    assert [(s["args"]["angle"], s["args"]["intensity"]) for s in seqs[4:]] == \
+        [(0, 0.0), (0, 1.0), (30, 0.0), (30, 1.0), (90, 0.0), (90, 1.0), (150, 0.0), (150, 1.0)]
+    assert seqs[4]["flyvis_index"] == 0 and seqs[11]["flyvis_index"] == 7
+    assert seqs[5]["frames"]["1/50"] == {"n_frames": 131, "stimulus_frames": [50, 81],
+                                         "snapshot_frames": [0, 26, 52, 78, 104, 130]}
+    assert seqs[2]["frames"]["1/200"]["stimulus_frames"] == [200, 400]
+
+
+def test_manifest_is_deterministic_and_valid():
+    a, b = er.manifest_bytes(_manifest()), er.manifest_bytes(_manifest())
+    assert a == b and a.endswith(b"}\n")
+    m = json.loads(a)
+    er.validate_manifest(m)
+    assert list(m) == er.MANIFEST_KEYS
+    assert m["dts"][0]["floor_dt_f32"] == 0.004999999888241291
+    assert b'"floor_dt_f32": 0.019999999552965164' in a
+    assert m["centre_nodes"][0] == {"node": 360, "cell_type": "R1"}
+    assert "`" not in json.dumps(m["frame_semantics"]) and "**" not in json.dumps(m["frame_semantics"])
+
+
+def test_validate_manifest_rejects_what_the_field_table_forbids():
+    cases = [
+        (lambda m: m["files"][0].update(dtype="<f8"), "dtype"),
+        (lambda m: m["centre_nodes"].pop(), "64 centre nodes"),
+        (lambda m: m["files"][2]["blocks"][1].update(offset=1), "block at 1"),
+        (lambda m: m.update(extra=1), "top-level keys"),
+        (lambda m: m["files"][0].update(sha256="ABC"), "sha256"),
+        (lambda m: m["runs"].reverse(), "runs"),
+        (lambda m: m.update(t_pre=1), "t_pre"),
+    ]
+    for mutate, needle in cases:
+        m = json.loads(er.manifest_bytes(_manifest()))
+        mutate(m)
+        raises(lambda: er.validate_manifest(m), needle)
+
+
+def test_validate_manifest_refuses_numpy_scalars():
+    # Review focus 5: a numpy int or float would change the JSON or crash it.
+    m = _manifest()
+    m["files"][0]["blocks"][0]["shape"] = [np.int64(45669)]
+    raises(lambda: er.validate_manifest(m), "int64")
+    m = _manifest()
+    m["sequences"][0]["args"]["intensity"] = np.float32(0.0)
+    raises(lambda: er.validate_manifest(m), "float32")
+
+
+def test_pack_file_keeps_bits_and_refuses_a_silent_cast():
+    # Review focus 3: an f32 run's array must never be widened into the f64 file.
+    entry = er._file_entry("x.f32.bin", "<f4", ["a"], [(0, "1/200", None, [2]), (2, "1/50", None, [1])])
+    arrays = {(0, "1/200", None): np.array([1.0, -0.0], dtype=np.float32),
+              (2, "1/50", None): np.array([0.5], dtype=np.float32)}
+    data = er.pack_file(entry, arrays)
+    assert data == bytes.fromhex("0000803f" "00000080" "0000003f")
+    bad = dict(arrays)
+    bad[(2, "1/50", None)] = np.array([0.5], dtype=np.float64)
+    raises(lambda: er.pack_file(entry, bad), "float64", "<f4")
+    bad[(2, "1/50", None)] = np.array([0.5, 0.5], dtype=np.float32)
+    raises(lambda: er.pack_file(entry, bad), "shape")
+    # The widening direction: a float32 array into an <f8 file is refused too.
+    e64 = er._file_entry("x.f64.bin", "<f8", ["a"], [(1, "1/200", None, [1])])
+    assert er.pack_file(e64, {(1, "1/200", None): np.array([0.5], dtype=np.float64)}) == bytes.fromhex("000000000000e03f")
+    raises(lambda: er.pack_file(e64, {(1, "1/200", None): np.array([0.5], dtype=np.float32)}), "float32", "<f8")
+
+
+def test_verify_files_catches_length_and_sha256():
+    d = tmpdir()
+    (d / "a.f32.bin").write_bytes(b"\0" * 8)
+    entry = er._file_entry("a.f32.bin", "<f4", ["a"], [(0, "1/200", None, [2])])
+    entry["sha256"] = er.sha256_file(d / "a.f32.bin")
+    er.verify_files([entry], d)
+    (d / "a.f32.bin").write_bytes(b"\0" * 7 + b"\1")
+    raises(lambda: er.verify_files([entry], d), "sha256")
+    (d / "a.f32.bin").write_bytes(b"\0" * 4)
+    raises(lambda: er.verify_files([entry], d), "4 bytes")
+
+
+def test_h80_sidecar_is_the_h9_format_plus_height():
+    side = er.h80_sidecar()
+    text = er.json_bytes(side).decode()
+    assert '\n  "height": 80\n' in text, text[-40:]
+    assert side["shape"] == [8, 21, 721] and side["dtype"] == "<f4"
+    assert [(g["index"], g["angle"], g["intensity"]) for g in side["groups"][:3]] == [(0, 0, 0.0), (1, 0, 1.0), (2, 30, 0.0)]
+    h9 = er.DATA / "flyvis-stimuli" / "moving_edge_offsets.json"
+    needs(h9)
+    assert json.loads(h9.read_text()) == {k: v for k, v in side.items() if k != "height"}
+
+
 # -- runner (keep last) ---------------------------------------------------------
 
 def main(argv) -> int:
