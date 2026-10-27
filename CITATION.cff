@@ -1,0 +1,55 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it as below, and also cite the flyvis
+  model it reproduces (listed under references).
+title: semblance
+abstract: >-
+  Connectome compression research in Rust: take a connectome-constrained model
+  that predicts real neural recordings, compress its representation, and
+  measure how far it can shrink before it stops behaving like the fly.
+type: software
+authors:
+  - family-names: Mikuliszyn
+    given-names: Mikolaj
+license: Apache-2.0
+repository-code: "https://github.com/miki-przygoda/semblance"
+version: 0.2.0
+date-released: "2026-10-04"
+keywords:
+  - connectome
+  - compression
+  - neuroscience
+  - Drosophila
+references:
+  - type: article
+    title: >-
+      Connectome-constrained networks predict neural activity across the fly
+      visual system
+    authors:
+      - family-names: Lappalainen
+        given-names: Janne K.
+      - family-names: Tschopp
+        given-names: Fabian D.
+      - family-names: Prakhya
+        given-names: Sridhama
+      - family-names: McGill
+        given-names: Mason
+      - family-names: Nern
+        given-names: Aljoscha
+      - family-names: Shinomiya
+        given-names: Kazunori
+      - family-names: Takemura
+        given-names: Shin-ya
+      - family-names: Gruntman
+        given-names: Eyal
+      - family-names: Macke
+        given-names: Jakob H.
+      - family-names: Turaga
+        given-names: Srinivas C.
+    journal: Nature
+    year: 2024
+    volume: 634
+    issue: 8036
+    start: 1132
+    end: 1140
+    doi: 10.1038/s41586-024-07939-3
