@@ -55,6 +55,25 @@ uv run python <script>.py
 | `export_build.py` | flyvis's own built connectome — nodes, connection types, offsets, scipy's convex hulls, and matplotlib's containment verdicts — as fixtures the Rust expansion is tested against | `data/flyvis-build/` |
 | `export_stimuli.py` | flyvis's own rendered flash stimuli in full, and a deterministic three-centre subset of the dot stimuli, alongside the hexal lattice order and each family's sequence order — as fixtures the Rust stimulus generators are checked against | `data/flyvis-stimuli/` |
 | `export_moving_edges.py` | flyvis's own rendered moving-edge offsets for four angles, its pixel-to-ommatidium mask, and the resample/pad timing — the reference for the one tolerance-gated comparison in the workspace | `data/flyvis-stimuli/` |
+| `export_reference.py` | flyvis's own voltage traces for 0.3.0's gates — models 000 and 049, dt 1/200 and 0.02, float32 and float64: the settled state, the centre column at every settling step and frame, all cells at 6 frames per sequence, and the input movies flyvis fed — plus the moving-edge geometry at height 80. Every check runs before anything is written | `data/flyvis-reference/`, and the three `*_h80*` files in `data/flyvis-stimuli/` |
+
+`export_reference.py` sets `FLYVIS_ROOT_DIR` itself, to a scratch root under
+`target/` that it wipes and recreates on every run, and refuses to start if the
+variable is already set: flyvis writes `connectome/`, `renderings/` and each
+model's `__cache__/` under its root, and those caches' keys ignore the torch
+dtype. It writes nothing under `data/` except its outputs, refuses to replace
+them without `--force`, and holds a lock so two runs cannot share the scratch
+root. Its self-tests need no flyvis:
+`uv run --project tools tools/test_export_reference.py`.
+
+**Do not re-export a pinned fixture by hand.** `ci/fetch-fixtures.sh` checks
+every file in `ci/fixtures.sha256` byte for byte, and every export is dated —
+in its provenance file, or for `ensemble.csv` in its header. Re-running
+`export_params.py`, or any exporter above, therefore makes the fetch script
+refuse the new file. To return to the published set, delete the re-exported
+files and run `ci/fetch-fixtures.sh`; a deliberate re-export needs a new
+`fixtures-N`, with `ci/fixtures.sha256` and `ci/fixtures-tag` changed in one
+commit.
 
 ## Provenance rule
 
