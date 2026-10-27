@@ -3,17 +3,28 @@
 #
 # Two sources, both pinned by ci/fixtures.sha256:
 #   - the connectome JSON, from the Nature supplementary zip (Springer)
-#   - flyvis's own exports (data/flyvis-build, data/flyvis-stimuli), from the
+#   - flyvis's own exports (data/flyvis-build, data/flyvis-stimuli,
+#     data/flyvis-reference, data/flyvis-pretrained/ensemble.csv), from the
 #     private release named in ci/fixtures-tag
 #
 # Fetches only what is missing. A file that exists but fails verification is
 # never overwritten -- locally it may be a deliberate re-export -- and the
 # script fails naming it. Written for bash 3.2 (macOS's /bin/bash).
 #
-# Re-exporting fixtures (tarball, release, manifest): the commands are in
-# docs/superpowers/plans/2026-10-01-ci.md, Task 3 (manifest: Task 2 Step 1).
+# Every export is dated -- in its provenance file, and ensemble.csv in its
+# header -- so re-running an exporter (tools/export_params.py included) makes
+# this script refuse the new file. To return to the published set, delete the
+# re-exported files and run this script again. A deliberate re-export needs a
+# new fixtures-N tag, with ci/fixtures.sha256 and ci/fixtures-tag changed in
+# one commit.
 #
-# Design: docs/superpowers/specs/2026-10-01-ci-design.md
+# Re-exporting fixtures (tarball, release, manifest): fixtures-1 in
+# docs/superpowers/plans/2026-10-01-ci.md, Task 3 (manifest: Task 2 Step 1);
+# fixtures-2, which added data/flyvis-reference and ensemble.csv, in
+# docs/superpowers/plans/2026-10-26-flyvis-reference-traces.md, Task 9.
+#
+# Design: docs/superpowers/specs/2026-10-01-ci-design.md, extended for
+# fixtures-2 by docs/superpowers/specs/2026-10-26-flyvis-reference-traces-design.md
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"

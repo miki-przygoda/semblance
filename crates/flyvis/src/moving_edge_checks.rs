@@ -9,10 +9,9 @@
 //! is not precedent for loosening a comparison that could be exact elsewhere.
 //! See `CLAUDE.md` for the fuller version of that distinction.
 //!
-//! `the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, carries a
-//! different kind of slack again: a bound on *how many* pixels may disagree,
-//! not on how far any one value may be off, because flyvis builds that mask
-//! in `float16` and this crate in `f64`.
+//! `the_ownership_map_agrees_with_flyviss_fp16_mask`, further down, carries
+//! no slack at all: this crate builds that mask in `float16` exactly as flyvis
+//! does, so every pixel must agree.
 //!
 //! So the geometry gate prints its observed distribution rather than merely
 //! asserting a bound. The difference between 0.002 and 0.009 agreement is the
@@ -27,8 +26,10 @@
 //! missing fixture into a failure.
 //!
 //! The geometry gate renders `GATE_ANGLES`' worth of offsets -- four, not
-//! twelve -- and the whole crate's debug suite runs in about a second;
-//! nothing here needs `--release` to be comfortable.
+//! twelve -- at two heights. At height 80 the bar fills the monitor, so every
+//! owned pixel is swept rather than an 88-row band. Measured after that
+//! change: the crate's debug test suite finishes in 5.6 s
+//! (`cargo test -p semblance-flyvis`, libtest's own figure).
 
 use crate::hex_eye::{HexEye, NO_OWNER};
 use crate::moving_edge::{MovingEdge, MovingEdgeParams};
@@ -134,49 +135,121 @@ fn block_speed(block: &str) -> f64 {
     block[..end].trim().parse().expect("speed value")
 }
 
-/// The geometry gate. Tolerance-gated, and it prints what it observed.
-#[test]
-fn moving_edge_offsets_match_flyvis_within_tolerance() {
-    let (Some(bytes), Some(manifest)) = (
-        load_stimulus_bytes("moving_edge_offsets.bin"),
-        load_stimulus_fixture("moving_edge_offsets.json"),
-    ) else {
-        return;
+/// One height's comparison: the per-angle rows -- angle, max, mean, hexals
+/// over `TOLERANCE`, hexals over 0.01 -- plus every sidecar check that failed.
+/// Failures are collected rather than asserted, so both heights' tables print
+/// before anything fails.
+struct Report {
+    height: i32,
+    rows: Vec<(i32, f64, f64, usize, usize)>,
+    failures: Vec<String>,
+}
+
+impl Report {
+    /// The distribution, per angle. A failing gate must still say what it saw.
+    fn print(&self) {
+        eprintln!(
+            "moving edge geometry, height {}, against flyvis 1.2.0 ({} values per angle):",
+            self.height,
+            2 * 21 * 721
+        );
+        eprintln!("  angle   max abs      mean   > {TOLERANCE}   > 0.01   regime");
+        for &(angle, max, mean, over_tol, over_hundredth) in &self.rows {
+            let regime = match angle {
+                0 => "no rotation",
+                90 | 180 | 270 => "axis-aligned",
+                _ => "bilinear",
+            };
+            eprintln!("  {angle:>5}   {max:.6}  {mean:.6}   {over_tol:>7}   {over_hundredth:>6}   {regime}");
+        }
+        eprintln!(
+            "  expected floor: 0.5 - 127/255 = {:.6}, flyvis's background after its uint8 cast",
+            0.5 - 127.0 / 255.0
+        );
+    }
+
+    /// `TOLERANCE`, per angle, as failure messages.
+    fn tolerance_failures(&self) -> Vec<String> {
+        let h = self.height;
+        let mut out = Vec::new();
+        for &(angle, max, _, over_tol, _) in &self.rows {
+            if max.is_nan() || max > TOLERANCE {
+                out.push(format!(
+                    "height {h}, angle {angle}: max abs difference {max:.6} exceeds {TOLERANCE}. \
+                     Do not widen this bound -- see the TOLERANCE doc comment. If \
+                     `the_ownership_map_agrees_with_flyviss_fp16_mask` fails too, start \
+                     there; otherwise the likeliest cause is the rotation centre."
+                ));
+            }
+            if over_tol != 0 {
+                out.push(format!("height {h}, angle {angle}: {over_tol} hexals over tolerance"));
+            }
+        }
+        out
+    }
+}
+
+/// Loads one height's fixture pair and compares Rust's rendering against it.
+///
+/// `None` when the pair is absent and fixtures are not required: this half is
+/// skipped and the other still runs. With `SEMBLANCE_REQUIRE_FIXTURES=1` the
+/// loaders panic on a missing file instead; the caller catches that, so the
+/// other half still prints.
+fn geometry_report(height: i32, bin: &str, json: &str) -> Option<Report> {
+    let (Some(bytes), Some(manifest)) = (load_stimulus_bytes(bin), load_stimulus_fixture(json)) else {
+        return None;
     };
+    let mut failures = Vec::new();
     let want = f32s(&bytes);
-    assert_eq!(want.len(), 8 * 21 * 721, "fixture value count");
+    if want.len() != 8 * 21 * 721 {
+        failures.push(format!(
+            "height {height}: fixture value count {} != {}",
+            want.len(),
+            8 * 21 * 721
+        ));
+        return Some(Report { height, rows: Vec::new(), failures });
+    }
 
     // The fixture's own account of what it holds, against what this gate
     // assumes. Without this, reordering GATE_ANGLES without regenerating the
     // fixtures would surface only as a tolerance failure blaming the rotation
     // centre.
-    assert_eq!(
-        json_array(&manifest, "shape"),
-        vec![(GATE_ANGLES.len() * 2) as i64, 21, 721],
-        "fixture shape"
-    );
-    assert_eq!(
-        json_field_all(&manifest, "index"),
-        (0..(GATE_ANGLES.len() * 2) as i64).collect::<Vec<_>>(),
-        "fixture group indices"
-    );
-    assert_eq!(
-        json_field_all(&manifest, "angle"),
-        GATE_ANGLES.iter().flat_map(|&a| [a as i64, a as i64]).collect::<Vec<_>>(),
-        "fixture group order must be angle-major, intensity-minor"
-    );
-    assert_eq!(
-        json_field_all_f64(&manifest, "intensity"),
-        GATE_ANGLES.iter().flat_map(|_| [0.0, 1.0]).collect::<Vec<_>>(),
-        "fixture group order must be angle-major, intensity-minor"
-    );
+    let shape = json_array(&manifest, "shape");
+    if shape != vec![(GATE_ANGLES.len() * 2) as i64, 21, 721] {
+        failures.push(format!("height {height}: fixture shape {shape:?}"));
+    }
+    let indices = json_field_all(&manifest, "index");
+    if indices != (0..(GATE_ANGLES.len() * 2) as i64).collect::<Vec<_>>() {
+        failures.push(format!("height {height}: fixture group indices {indices:?}"));
+    }
+    let angles = json_field_all(&manifest, "angle");
+    if angles != GATE_ANGLES.iter().flat_map(|&a| [a as i64, a as i64]).collect::<Vec<_>>() {
+        failures.push(format!(
+            "height {height}: fixture group order must be angle-major, intensity-minor (angles {angles:?})"
+        ));
+    }
+    let intensities = json_field_all_f64(&manifest, "intensity");
+    if intensities != GATE_ANGLES.iter().flat_map(|_| [0.0, 1.0]).collect::<Vec<_>>() {
+        failures.push(format!(
+            "height {height}: fixture group order must be angle-major, intensity-minor (intensities {intensities:?})"
+        ));
+    }
+    // The height-9 sidecar predates the field; every other height must name
+    // itself, so the two pairs cannot be swapped silently.
+    if height != 9 {
+        let got = if manifest.contains("\"height\":") { json_field(&manifest, "height") } else { "<missing>" };
+        if got != height.to_string() {
+            failures.push(format!("height {height}: sidecar height is {got}"));
+        }
+    }
 
     let mut params = MovingEdgeParams::flyvis_defaults(DT);
     params.angles = GATE_ANGLES.to_vec();
+    params.height = height;
     let e = MovingEdge::new(params);
 
     // Per regime, so the three numerical footings stay distinguishable.
-    let mut report: Vec<(i32, f64, f64, usize, usize)> = Vec::new();
+    let mut rows: Vec<(i32, f64, f64, usize, usize)> = Vec::new();
     let mut out = vec![0.0f32; 721];
 
     for (ai, &angle) in GATE_ANGLES.iter().enumerate() {
@@ -205,42 +278,60 @@ fn moving_edge_offsets_match_flyvis_within_tolerance() {
             }
         }
         let n = (2 * 21 * 721) as f64;
-        report.push((angle, max, sum / n, over_tol, over_hundredth));
+        rows.push((angle, max, sum / n, over_tol, over_hundredth));
     }
+    Some(Report { height, rows, failures })
+}
 
-    // Print BEFORE asserting: a failing gate must still say what it saw.
-    eprintln!("moving edge geometry, against flyvis 1.2.0 ({} values per angle):", 2 * 21 * 721);
-    eprintln!("  angle   max abs      mean   > {TOLERANCE}   > 0.01   regime");
-    for &(angle, max, mean, over_tol, over_hundredth) in &report {
-        let regime = match angle {
-            0 => "no rotation",
-            90 | 180 | 270 => "axis-aligned",
-            _ => "bilinear",
-        };
-        eprintln!("  {angle:>5}   {max:.6}  {mean:.6}   {over_tol:>7}   {over_hundredth:>6}   {regime}");
-    }
-    eprintln!(
-        "  expected floor: 0.5 - 127/255 = {:.6}, flyvis's background after its uint8 cast",
-        0.5 - 127.0 / 255.0
-    );
-
-    for &(angle, max, _, over_tol, _) in &report {
-        assert!(
-            max <= TOLERANCE,
-            "angle {angle}: max abs difference {max:.6} exceeds {TOLERANCE}. \
-             Do not widen this bound -- see the TOLERANCE doc comment. \
-             The likeliest cause is the rotation centre."
-        );
-        assert_eq!(over_tol, 0, "angle {angle}: hexals over tolerance");
+/// The message a caught panic carried, for the final assertion.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else {
+        "panicked".to_owned()
     }
 }
 
-/// The ownership map, against flyvis's own. Element-wise, with a bound on the
-/// disagreement rather than on a value.
+/// The geometry gate, at flyvis's default height 9 and at height 80, the
+/// height flyvis's own analyses and the reference traces use.
+/// Tolerance-gated, and it prints what it observed.
 ///
-/// This is a localisation aid, not a correctness claim: flyvis builds its mask
-/// in `float16` and this crate builds it in `f64`, so some disagreement is
-/// expected and its size is what matters. Measured: 2,052 of 600,625 pixels.
+/// The two halves load independently: a missing pair skips (or, with
+/// `SEMBLANCE_REQUIRE_FIXTURES=1`, fails) only its own half. Each table
+/// prints as soon as its half is computed; every failure is collected and
+/// asserted once, at the end.
+#[test]
+fn moving_edge_offsets_match_flyvis_within_tolerance() {
+    let halves = [
+        (9, "moving_edge_offsets.bin", "moving_edge_offsets.json"),
+        (80, "moving_edge_offsets_h80.bin", "moving_edge_offsets_h80.json"),
+    ];
+    let mut failures = Vec::new();
+    for (height, bin, json) in halves {
+        match std::panic::catch_unwind(|| geometry_report(height, bin, json)) {
+            Ok(Some(report)) => {
+                report.print();
+                let over = report.tolerance_failures();
+                failures.extend(report.failures);
+                failures.extend(over);
+            }
+            Ok(None) => {}
+            Err(panic) => failures.push(format!("height {height}: {}", panic_message(&*panic))),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The ownership map, against flyvis's own. Element-wise and exact.
+///
+/// flyvis builds its mask in `float16`, and `hex_eye` emulates that
+/// construction operation by operation, so the two maps are equal by
+/// construction: every one of the 600,625 pixels, and every kernel sum.
+/// An `f64` mask disagreed on 2,052 pixels -- enough to push the moving-edge
+/// renderer past its tolerance at bar height 80 -- so a single differing
+/// pixel here is a real break, not noise.
 #[test]
 fn the_ownership_map_agrees_with_flyviss_fp16_mask() {
     let (Some(bytes), Some(ks_json)) = (
@@ -270,17 +361,16 @@ fn the_ownership_map_agrees_with_flyviss_fp16_mask() {
         .max()
         .unwrap();
 
-    eprintln!("pixel ownership, f64 here against flyvis's float16:");
+    eprintln!("pixel ownership, float16 here against flyvis's float16:");
     eprintln!("  differing assignments: {differing} of {}", want.len());
     eprintln!("  unowned pixels: {ours_unowned} here, {theirs_unowned} in flyvis");
     eprintln!("  largest per-ommatidium pixel-count difference: {ks_delta}");
 
-    assert!(
-        differing <= 4_000,
-        "{differing} pixels assigned differently; 2,052 was measured. \
-         A large jump means the geometry diverged, not that fp16 got noisier."
+    assert_eq!(
+        differing, 0,
+        "{differing} pixels assigned differently from flyvis; the float16 emulation in hex_eye diverged"
     );
-    assert!(ks_delta <= 24, "largest kernel-sum difference {ks_delta}; 12 was measured");
+    assert_eq!(ks_delta, 0, "largest kernel-sum difference {ks_delta}");
 }
 
 /// The sequence ordering and the published figures.

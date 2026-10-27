@@ -19,7 +19,10 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # The repo variable CI_RUNNER picks the runner; unset, it is GitHub's
+    # ubuntu-latest. Set it to `self-hosted` only while the repo is private:
+    # on a public repo any fork PR could run code on that machine.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -37,18 +40,54 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-1.97-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: cargo-1.97-${{ hashFiles('Cargo.lock') }}-
+          key: cargo-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
-      - uses: actions/cache@v4
+      # The whole fixture set, keyed exactly on the manifest and the tag, with
+      # no restore-keys: a key change always starts clean, because stale
+      # restored files would be refused by fetch-fixtures.sh's never-overwrite
+      # rule. The fetch step re-verifies every restored file, so the cache only
+      # ever saves a download. Restore and save are separate steps so a run
+      # whose tests fail still saves a verified set.
+      #
+      # The Save step's paths must equal these, in this order: the cache
+      # version is computed from them.
+      #
+      # A bad entry fails every run that restores it, at the fetch step, naming
+      # the file. Recover by deleting the entry (`gh cache list --key fixtures-`
+      # to find it, `gh cache delete <key>` to remove it) and re-running.
+      - name: Restore fixtures
+        id: fixtures-cache
+        uses: actions/cache/restore@v4
         with:
-          path: data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
-          key: connectome-json-e609438ef261f4d12bf12556f4edb7a898ca4720029f9b882868967e6a0bbc73
+          path: |
+            data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
+            data/flyvis-build
+            data/flyvis-stimuli
+            data/flyvis-reference
+            data/flyvis-pretrained/ensemble.csv
+          key: fixtures-${{ hashFiles('ci/fixtures.sha256', 'ci/fixtures-tag') }}
 
       - name: Fetch and verify fixtures
         env:
           GH_TOKEN: ${{ github.token }}
         run: ci/fetch-fixtures.sh
+
+      # continue-on-error is deliberate: a failed save (say, a concurrent run
+      # already reserved the key) only costs a download on the next run.
+      # Correctness rests on the fetch step's verification, never on the cache.
+      - name: Save fixtures
+        if: steps.fixtures-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
+            data/flyvis-build
+            data/flyvis-stimuli
+            data/flyvis-reference
+            data/flyvis-pretrained/ensemble.csv
+          key: ${{ steps.fixtures-cache.outputs.cache-primary-key }}
 
       - name: Build
         run: cargo build --workspace
@@ -84,7 +123,7 @@ jobs:
           grep -qF 'behavioural distance: 0.000000' <<<"$out"
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -100,8 +139,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-1.85-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: cargo-1.85-${{ hashFiles('Cargo.lock') }}-
+          key: cargo-1.85-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-1.85-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
       - name: Build on the declared rust-version
         run: cargo build --workspace --all-targets
