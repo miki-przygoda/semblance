@@ -186,13 +186,29 @@ def require(ok, check: str, detail: str, run=None, sequence=None) -> None:
     Used instead of `assert`, which `python -O` strips.
     """
     if not ok:
-        where = []
-        if run is not None:
-            where.append(f"run {run}")
-        if sequence is not None:
-            where.append(f"sequence {sequence}")
-        suffix = f" ({', '.join(where)})" if where else ""
-        raise ExportError(f"{check} failed{suffix}: {detail}")
+        raise ExportError(f"{check} failed{_where(run, sequence)}: {detail}")
+
+
+def _where(run, sequence) -> str:
+    parts = []
+    if run is not None:
+        parts.append(f"run {run}")
+    if sequence is not None:
+        parts.append(f"sequence {sequence}")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+@contextlib.contextmanager
+def located(run, sequence=None):
+    """Re-raises any exception that is not an ExportError (an IndexError from
+    torch, a KeyError from flyvis) as one naming the run and sequence, with the
+    original chained. ExportError and KeyboardInterrupt pass through as they are."""
+    try:
+        yield
+    except ExportError:
+        raise
+    except Exception as e:
+        raise ExportError(f"run failed{_where(run, sequence)}: {type(e).__name__}: {e}") from e
 
 
 # -- command line, preflight and lock ----------------------------------------
@@ -932,3 +948,578 @@ def max_abs_gap(a, b) -> float:
     b = np.asarray(b, dtype=np.float64)
     require(a.shape == b.shape, "A7", f"shapes {a.shape} vs {b.shape}")
     return float(np.max(np.abs(a - b)))
+
+
+# -- the runs (flyvis) -----------------------------------------------------------
+
+def to_np(t) -> np.ndarray:
+    """A detached CPU copy, so later in-place work on the tensor cannot reach it."""
+    return t.detach().cpu().numpy().copy()
+
+
+def as_str(k) -> str:
+    return k.decode() if isinstance(k, (bytes, np.bytes_)) else str(k)
+
+
+def jsonable(obj):
+    """numpy scalars and arrays, tuples and nested dicts, as plain JSON types."""
+    if isinstance(obj, dict):
+        return {str(k): jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return jsonable(obj.tolist())
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    return repr(obj)
+
+
+def read_nodes(path: pathlib.Path):
+    """data/flyvis-build/nodes.csv as (cell types, u, v), row = node index."""
+    lines = path.read_text().splitlines()
+    require(lines[0] == "index,cell_type,u,v", "A5", f"nodes.csv header {lines[0]!r}")
+    types, us, vs = [], [], []
+    for i, line in enumerate(lines[1:]):
+        index, cell_type, u, v = line.split(",")
+        require(int(index) == i, "A5", f"nodes.csv row {i} has index {index}")
+        types.append(cell_type)
+        us.append(int(u))
+        vs.append(int(v))
+    return types, np.array(us, dtype=np.int64), np.array(vs, dtype=np.int64)
+
+
+def check_network_params(network, refs: dict, cells: list, conns: list, phase: str, run: int) -> None:
+    """A1, per run: the raw values flyvis holds equal the reference bit for
+    bit -- as float32 when loaded, and as the exact widening float64(f32)
+    after .double()."""
+    for name in ("bias", "time_const"):
+        _check_param(getattr(network.node_params, name).raw_values, refs[name], phase, run, name)
+    for name in ("sign", "syn_count", "syn_strength"):
+        _check_param(getattr(network.edge_params, name).raw_values, refs[name], phase, run, name)
+    keys = [as_str(k) for k in network.node_params.bias.keys]
+    require(keys == cells, "A1", f"node_params.bias.keys differ from CELL_TYPES ({phase})", run)
+    keys = [tuple(as_str(p) for p in k) for k in network.edge_params.syn_strength.keys]
+    require(keys == conns, "A1", f"edge_params.syn_strength.keys differ from CONN_TYPES ({phase})", run)
+
+
+def _check_param(raw, ref: np.ndarray, phase: str, run: int, name: str) -> None:
+    got = to_np(raw)
+    want = ref if got.dtype == np.float32 else ref.astype(np.float64)
+    require(bits_equal(got, want), "A1", f"{name} differs from its reference ({phase}, {got.dtype})", run)
+
+
+def check_param_dtypes(network, want, run: int) -> None:
+    """A2: every parameter and every floating-point tensor the dynamics read
+    through _param_api() has dtype `want`, on the CPU; RefTensor indices stay
+    int64. Walks the raw dicts: AutoDeref's own accessors would dereference."""
+    import torch
+    from flyvis.utils.tensor_utils import RefTensor
+
+    for name, p in network.named_parameters():
+        require(p.dtype == want and p.device.type == "cpu", "A2", f"parameter {name} is {p.dtype} on {p.device}", run)
+    with torch.no_grad():
+        api = network._param_api()
+    seen = set()
+    for route in ("nodes", "edges", "sources", "targets"):
+        for name, v in dict.items(dict.__getitem__(api, route)):
+            seen.add((route, name))
+            if isinstance(v, RefTensor):
+                require(v.values.dtype == want and v.values.device.type == "cpu", "A2",
+                        f"_param_api {route}.{name} values are {v.values.dtype}", run)
+                require(v.indices.dtype == torch.int64, "A2", f"_param_api {route}.{name} indices are {v.indices.dtype}", run)
+            else:
+                require(isinstance(v, torch.Tensor) and v.dtype == want and v.device.type == "cpu", "A2",
+                        f"_param_api {route}.{name} is {getattr(v, 'dtype', type(v))}", run)
+    require(("edges", "weight") in seen, "A2", "_param_api has no edges.weight", run)
+
+
+def check_tensor(t, shape, want, check: str, run, sequence=None, what="tensor") -> None:
+    import torch
+
+    require(tuple(t.shape) == tuple(shape), check, f"{what} has shape {tuple(t.shape)}, expected {tuple(shape)}", run, sequence)
+    require(t.dtype == want, check, f"{what} is {t.dtype}, expected {want}", run, sequence)
+    require(t.device.type == "cpu", check, f"{what} is on {t.device}", run, sequence)
+    require(bool(torch.isfinite(t).all()), "A4", f"{what} has NaN or Inf", run, sequence)
+
+
+def play(network, x, dt: float, settled, want, run: int, sequence: int):
+    """One sequence as stimulus_response runs it at batch 1, from `settled`.
+    Returns the trace and a copy of photoreceptor row 0 of the buffer, after
+    checking that all 8 photoreceptor rows hold the same values."""
+    import torch
+
+    stim = network.stimulus
+    n = x.shape[0]
+    stim.zero(1, n)
+    require(stim.buffer.dtype == want, "A2", f"buffer is {stim.buffer.dtype} after zero()", run, sequence)
+    stim.add_input(x[None, :, None, :])
+    require(stim.buffer.dtype == want, "A2", f"buffer is {stim.buffer.dtype} after add_input()", run, sequence)
+    require(stim.buffer.device.type == "cpu", "A2", f"buffer is on {stim.buffer.device}", run, sequence)
+    require(stim.input_index.shape == (N_PHOTORECEPTOR_TYPES, N_HEXALS), "A3",
+            f"input_index has shape {stim.input_index.shape}", run, sequence)
+    # Copies, not views: zero() reuses this buffer for the next sequence (F30).
+    rows = [stim.buffer[0, :, torch.as_tensor(stim.input_index[j])].detach().clone()
+            for j in range(N_PHOTORECEPTOR_TYPES)]
+    for j in range(1, N_PHOTORECEPTOR_TYPES):
+        require(bits_equal(rows[j], rows[0]), "A3", f"photoreceptor row {j} differs from row 0", run, sequence)
+    with torch.no_grad():
+        trace = network(stim(), dt, state=settled)
+    check_tensor(trace, (1, n, N_NODES), want, "A4", run, sequence, "trace")
+    return trace, to_np(rows[0])
+
+
+def run_one(run: int, refs: dict, pre: dict, nodes, offsets80_raw: np.ndarray, record: dict) -> dict:
+    """One run: build fresh, check, settle, play the 12 sequences, check again."""
+    import torch
+    from flyvis.datasets.flashes import Flashes
+    from flyvis.datasets.moving_bar import MovingEdge
+    from flyvis.network import NetworkView
+
+    _, mid, dt_id, prec = RUNS[run]
+    dt = DT_VALUE[dt_id]
+    want = torch.float32 if prec == "f32" else torch.float64
+    cells = list(pre["CELL_TYPES"])
+    conns = [tuple(c) for c in pre["CONN_TYPES"]]
+    require(torch.get_default_dtype() == want, "A2", f"default dtype is {torch.get_default_dtype()}", run)
+
+    # 1. Fresh view and network (C4); "best" must be the copied chkpt_00000.
+    nv = NetworkView(f"flow/0000/{mid}")
+    best = pathlib.Path(nv.get_checkpoint("best")).resolve()
+    require(best == (SCRATCH / "results" / "flow" / "0000" / mid / CHECKPOINT).resolve(), "setup",
+            f"best checkpoint is {best}", run)
+    network = nv.init_network("best")
+    check_network_params(network, refs[mid], cells, conns, "loaded", run)
+    # 2. f64 runs only: widen, after the first check.
+    if prec == "f64":
+        network.double()
+        check_network_params(network, refs[mid], cells, conns, "widened", run)
+    check_param_dtypes(network, want, run)
+
+    # A5: node table and centre column.
+    c = network.connectome
+    types = [as_str(t) for t in c.nodes.type[:]]
+    require(types == nodes[0], "A5", "node cell types differ from nodes.csv", run)
+    require(bits_equal(np.asarray(c.nodes.u[:], dtype=np.int64), nodes[1]), "A5", "node u differs from nodes.csv", run)
+    require(bits_equal(np.asarray(c.nodes.v[:], dtype=np.int64), nodes[2]), "A5", "node v differs from nodes.csv", run)
+    centre = np.asarray(c.central_cells_index[:], dtype=np.int64)
+    expected_centre = np.nonzero((nodes[1] == 0) & (nodes[2] == 0))[0].astype(np.int64)
+    require(bits_equal(centre, expected_centre), "A5", "central_cells_index differs from the (0,0) rows of nodes.csv", run)
+    require(len(centre) == N_CENTRE and bool(np.all(np.diff(centre) > 0)), "A5", f"{len(centre)} centre nodes", run)
+    centre_types = [nodes[0][i] for i in centre]
+    require(centre_types == cells, "A5", "centre nodes are not one per cell type in CELL_TYPES order", run)
+    require((int(centre[0]), centre_types[0]) == FIRST_CENTRE, "A5", f"first centre node {centre[0]}", run)
+    centre_t = torch.as_tensor(centre)
+
+    # 3. Settle. 4. The settled state equals return_last=True.
+    states = network.steady_state(t_pre=T_PRE, dt=dt, batch_size=BATCH_SIZE, value=PRE_STIM_VALUE, return_last=False)
+    require(len(states) == N_SETTLE[dt_id], "A4", f"{len(states)} settling states", run)
+    for i, s in enumerate(states):
+        check_tensor(s.nodes.activity, (1, N_NODES), want, "A2", run, None, f"settling state {i}")
+    settling_centre = to_np(torch.stack([s.nodes.activity[0, centre_t] for s in states]))
+    settled = states[-1]
+    settled_before = to_np(settled.nodes.activity)
+    again = network.steady_state(T_PRE, dt, BATCH_SIZE, PRE_STIM_VALUE, return_last=True)
+    require(bits_equal(again.nodes.activity, settled.nodes.activity), "P17",
+            "steady_state(return_last=True) differs from the last settling state", run)
+    del states, again
+
+    # 5. Datasets.
+    flashes = Flashes(dt=dt)
+    edges = MovingEdge(dt=dt, angles=GATE_ANGLES, speeds=[EDGE_SPEED], height=EDGE_HEIGHT)
+    require(len(flashes) == len(FLASH_ARGS) and len(edges) == len(EDGE_ARGS), "A4",
+            f"{len(flashes)} flashes, {len(edges)} edges", run)
+    rows = [(float(r.baseline), float(r.intensity), int(r.radius)) for r in flashes.arg_df.itertuples(index=False)]
+    require(rows == FLASH_ARGS, "A4", f"flash arg rows {rows}", run)
+    rows = [(int(r.angle), float(r.intensity)) for r in edges.arg_df.itertuples(index=False)]
+    require(rows == EDGE_ARGS, "A4", f"edge arg rows {rows}", run)
+    require(all(float(r.speed) == EDGE_SPEED and int(r.width) == 80 for r in edges.arg_df.itertuples(index=False)),
+            "A4", "edge speed or width", run)
+    require(bits_equal(np.asarray(edges.wrap.offsets[:]), offsets80_raw), "A9",
+            "the trace run's height-80 offsets differ from the geometry export", run)
+    # A5: spans and snapshot frames, from flyvis's own formulas.
+    f0 = int(flashes.t_pre / dt)
+    spans = {"flashes": [f0, f0 + int(flashes.t_stim / dt)]}
+    n_stim = int(edges.indices[EDGE_SPEED].shape[0])
+    e1 = int((float(edges.t_stim[0]) + edges.t_pre) / dt)
+    spans["moving_edge"] = [e1 - n_stim, e1]
+    for family, span in spans.items():
+        require(span == STIMULUS_FRAMES[family][dt_id], "A5", f"{family} stimulus frames {span}", run)
+    if dt_id == "1/200":
+        timing = json.loads(TIMING_JSON.read_text())
+        block = [b for b in timing["speeds"] if b["speed"] == float(EDGE_SPEED)]
+        require(len(block) == 1 and block[0]["n_stim"] == EDGE_N_STIM_1_200 == n_stim, "A5", "speed-13 n_stim", run)
+        got = [int(i) for i in np.asarray(edges.indices[EDGE_SPEED]).tolist()]
+        require(got == block[0]["indices"], "A5", "speed-13 resample indices differ from moving_edge_timing.json", run)
+    for n in {N_FRAMES["flashes"][dt_id], N_FRAMES["moving_edge"][dt_id]}:
+        got = torch.linspace(0, n - 1, N_SNAPSHOTS).long().tolist()
+        require(got == SNAPSHOT_FRAMES[n], "A5", f"snapshot frames for n={n}: {got}", run)
+    if prec == "f32" and mid == "000":
+        record["stimuli"][dt_id] = {
+            "flashes": {"config": jsonable(flashes.config.to_dict()),
+                        "arg_rows": jsonable(flashes.arg_df.to_dict(orient="records"))},
+            "moving_edge": {"config": jsonable(edges.config.to_dict()),
+                            "arg_rows": jsonable(edges.arg_df.to_dict(orient="records"))},
+        }
+
+    # 6. The 12 sequences.
+    seqs = sequence_table()
+    out_seqs, kept = [], {}
+    for s in seqs:
+        k = s["index"]
+        with located(run, k):
+            dataset = flashes if s["family"] == "flashes" else edges
+            n = s["frames"][dt_id]["n_frames"]
+            x = dataset[s["flyvis_index"]]
+            x_want = want if s["family"] == "flashes" else torch.float64
+            check_tensor(x, (n, N_HEXALS), x_want, "A2", run, k, "x")
+            trace, row = play(network, x, dt, settled, want, run, k)
+            snap = torch.as_tensor(s["frames"][dt_id]["snapshot_frames"])
+            out_seqs.append({
+                "x": to_np(x),
+                "buffer_row": row,
+                "centre": to_np(trace[0, :, centre_t]),
+                "snapshots": to_np(trace[0, snap, :]),
+            })
+            if k in (0, len(FLASH_ARGS)):
+                kept[k] = trace          # step 7 compares against it
+            del trace
+        print(f"    sequence {k:>2} ({s['family']}, flyvis index {s['flyvis_index']}): {n} frames")
+
+    # A6: threads, on run 0 (f32) as the spec asks, and on run 1 (f64).
+    threads = None
+    if run in (0, 1):
+        threads = thread_check(network, [out_seqs[0]["x"], out_seqs[len(FLASH_ARGS)]["x"]], dt, settled, want, run)
+
+    # 7. flyvis's own path, bit for bit. After step 6: it sets dataset.dt.
+    for k, dataset in ((0, flashes), (len(FLASH_ARGS), edges)):
+        with located(run, k):
+            pairs = list(network.stimulus_response(dataset, dt, indices=[0], t_pre=T_PRE,
+                                                   t_fade_in=T_FADE_IN, batch_size=BATCH_SIZE))
+            require(len(pairs) == 1, "equivalence", f"stimulus_response yielded {len(pairs)} batches", run, k)
+            _, response = pairs[0]
+            require(bits_equal(response, to_np(kept[k])), "equivalence",
+                    "stimulus_response differs from forward from the settled state", run, k)
+    del kept
+
+    # 8. The settled state is untouched; the parameters too (clamp runs in place).
+    require(bits_equal(to_np(settled.nodes.activity), settled_before), "P17", "settled state changed", run)
+    check_network_params(network, refs[mid], cells, conns, "after_runs", run)
+    check_param_dtypes(network, want, run)
+    return {
+        "settled": settled_before[0],
+        "settling_centre": settling_centre,
+        "seqs": out_seqs,
+        "threads": threads,
+        "centre_nodes": [(int(i), nodes[0][i]) for i in centre],
+    }
+
+
+def thread_check(network, xs, dt: float, settled, want, run: int) -> dict:
+    """A6: sequences 0 and 4 at 1 thread and at max(2, default), bit-equal."""
+    import torch
+
+    default = torch.get_num_threads()
+    many = max(2, default)
+    traces = {}
+    try:
+        for n in (1, many):
+            torch.set_num_threads(n)
+            traces[n] = [to_np(play(network, torch.from_numpy(x), dt, settled, want, run, k)[0])
+                         for k, x in zip((0, len(FLASH_ARGS)), xs)]
+    finally:
+        torch.set_num_threads(default)
+    for k, a, b in zip((0, len(FLASH_ARGS)), traces[1], traces[many]):
+        require(bits_equal(a, b), "A6", f"1 thread and {many} threads differ", run, k)
+    return {"default": default, "determinism_check": [1, many], "bit_equal": True}
+
+
+def cross_checks(results: dict) -> dict:
+    """A3 (inputs at both levels), A5 (flashes.bin) and A7 (the gap), after
+    every run has finished. Returns input_rounding and the gaps."""
+    by = {(m, d, p): r for r, m, d, p in RUNS}
+    rounding, gaps = {}, {}
+    for dt_id, _, _ in DTS:
+        stored = [s["x"] for s in results[by[("000", dt_id, "f64")]]["seqs"]]
+        for k, x in enumerate(stored):
+            require(x.dtype == np.float64, "A3", f"stored input is {x.dtype}", by[("000", dt_id, "f64")], k)
+            for mid in ("000", "049"):
+                r32, r64 = by[(mid, dt_id, "f32")], by[(mid, dt_id, "f64")]
+                x32 = results[r32]["seqs"][k]["x"]
+                if k < len(FLASH_ARGS):
+                    require(x32.dtype == np.float32 and bits_equal(x32.astype(np.float64), x), "A3",
+                            "f32 flash input differs from the stored input", r32, k)
+                else:
+                    require(bits_equal(x32, x), "A3", "f32 edge input differs from the stored input", r32, k)
+                require(bits_equal(results[r64]["seqs"][k]["x"], x), "A3", "f64 input differs from the stored input", r64, k)
+                require(bits_equal(results[r32]["seqs"][k]["buffer_row"], x.astype(np.float32)), "A3",
+                        "f32 buffer differs from float32(stored)", r32, k)
+                require(bits_equal(results[r64]["seqs"][k]["buffer_row"], x), "A3",
+                        "f64 buffer differs from stored", r64, k)
+        edge_inputs = stored[len(FLASH_ARGS):]
+        rounding[dt_id] = max(max_abs_gap(x, x.astype(np.float32)) for x in edge_inputs)
+        for mid in ("000", "049"):
+            a, b = results[by[(mid, dt_id, "f32")]], results[by[(mid, dt_id, "f64")]]
+            gap = {
+                "settled": max_abs_gap(a["settled"], b["settled"]),
+                "settling_centre": max_abs_gap(a["settling_centre"], b["settling_centre"]),
+                "centre": max(max_abs_gap(p["centre"], q["centre"]) for p, q in zip(a["seqs"], b["seqs"])),
+                "snapshots": max(max_abs_gap(p["snapshots"], q["snapshots"]) for p, q in zip(a["seqs"], b["seqs"])),
+            }
+            for where, g in gap.items():
+                require(np.isfinite(g) and g <= GAP_BOUND, "A7",
+                        f"{mid} {dt_id} {where} gap {g!r} exceeds {GAP_BOUND}. Stop and report it to the owner; "
+                        "do not raise the bound.")
+            gaps[f"{mid} {dt_id}"] = gap
+    flash_stored = np.stack([s["x"] for s in results[by[("000", "1/200", "f64")]]["seqs"][:len(FLASH_ARGS)]])
+    want = np.fromfile(FLASHES_BIN, dtype="<f4").reshape(len(FLASH_ARGS), N_FRAMES["flashes"]["1/200"], N_HEXALS)
+    require(bits_equal(flash_stored.astype(np.float32), want.astype(np.float32)), "A5",
+            "flash inputs at 1/200 differ from flashes.bin")
+    return {"input_rounding": rounding, "f32_f64_gap": gaps}
+
+
+def block_arrays(results: dict) -> dict:
+    """Every block's array, keyed by (run, dt id, sequence), for pack_file."""
+    arrays = {}
+    for r, mid, dt_id, prec in RUNS:
+        res = results[r]
+        arrays[("settled", r, dt_id, None)] = res["settled"]
+        arrays[("settling_centre", r, dt_id, None)] = res["settling_centre"]
+        for k, s in enumerate(res["seqs"]):
+            arrays[("snapshots", r, dt_id, k)] = s["snapshots"]
+            arrays[("centre", r, dt_id, k)] = s["centre"]
+            if mid == "000" and prec == "f64":
+                arrays[("input", None, dt_id, k)] = s["x"]
+    return arrays
+
+
+def git_state() -> dict:
+    import subprocess
+
+    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    status = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"],
+                            capture_output=True, text=True, check=True).stdout
+    return {"head": head, "dirty": bool(status.strip())}
+
+
+def export(args, started: float) -> int:
+    # Process setup 2: a fresh scratch root, flyvis pointed at it, CPU only.
+    for d in (SCRATCH, MPLCONFIG):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+    os.environ["FLYVIS_ROOT_DIR"] = str(SCRATCH)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["MPLCONFIGDIR"] = str(MPLCONFIG)
+    print(f"  setup: scratch root {SCRATCH_REL}/, CUDA hidden, MPLCONFIGDIR in target/")
+    # 3. Copy the two models, check every byte, and load each checkpoint safely
+    #    before flyvis ever unpickles it with weights_only=False.
+    copies = copy_models(RESULTS, SCRATCH / "results" / "flow" / "0000", [m for m, *_ in MODELS])
+    print(f"  setup: models {', '.join(copies)} copied, sha256 verified")
+    import torch
+
+    for mid in copies:
+        torch.load(SCRATCH / "results" / "flow" / "0000" / mid / CHECKPOINT, map_location="cpu", weights_only=True)
+    print("  setup: scratch chkpt_00000 loads with weights_only=True")
+    # 4. Import flyvis. 5. No use_deterministic_algorithms: determinism is measured.
+    import flyvis
+    from flyvis.datasets.moving_bar import MovingEdge
+
+    require(flyvis.device.type == "cpu", "setup", f"flyvis device is {flyvis.device}")
+    require(pathlib.Path(flyvis.root_dir).resolve() == SCRATCH.resolve(), "setup", f"flyvis root is {flyvis.root_dir}")
+    print(f"  setup: flyvis {flyvis.__version__} on cpu, root {SCRATCH_REL}/")
+
+    # Model selection (C16).
+    losses = read_validation_losses(RESULTS)
+    rank_models(losses)
+    print(f"  models: best 000 ({losses['000']!r}), worst 049 ({losses['049']!r}) of {len(losses)}")
+
+    # A1 over all 50 checkpoints, and A8.
+    pre = parse_pretrained(PRETRAINED_RS.read_text())
+    ensemble = read_ensemble(ENSEMBLE_CSV.read_text())
+    ckpts = {mid: load_checkpoint(RESULTS / mid / CHECKPOINT) for mid in sorted(losses)}
+    check_checkpoints(ckpts, ensemble, pre)
+    print(f"  A1 checkpoints: all {len(ckpts)} equal ensemble.csv; sign and syn_count equal pretrained.rs")
+    freeze = freeze_figures(ckpts, read_clamps(RESULTS, sorted(losses)))
+    check_freeze(freeze)                 # printed after A7, in the spec's order
+    refs = {mid: reference_params(mid, pre, ensemble) for mid, *_ in MODELS}
+    nodes = read_nodes(NODES_CSV)
+
+    # A9: the height-80 geometry, built as the height-9 exporter builds it.
+    require(torch.get_default_dtype() == torch.float32, "A2", "default dtype before the f32 runs")
+    edge80 = MovingEdge(dt=1.0 / 200.0, angles=GATE_ANGLES, height=EDGE_HEIGHT)
+    offsets80_raw = np.asarray(edge80.wrap.offsets[:])
+    offsets80 = np.asarray(offsets80_raw, dtype=np.float64)
+    require(offsets80.shape == (len(GATE_ANGLES) * 2, 21, N_OMMATIDIA), "A9", f"offsets shape {offsets80.shape}")
+    require(bool(np.isfinite(offsets80).all()), "A4", "height-80 offsets have NaN or Inf")
+    bg0, bg30 = float(offsets80[1].min()), float(offsets80[3].min())
+    require(abs(bg0 - 0.5) <= BACKGROUND_TOL, "A9", f"background at angle 0 is {bg0}")
+    require(abs(bg30 - 127 / 255) <= BACKGROUND_TOL, "A9", f"background at angle 30 is {bg30}")
+    print(f"  A9 height-80 geometry: {offsets80.shape}, background {bg0:.6f} at angle 0, {bg30:.6f} at angle 30")
+    del edge80
+
+    # The runs: all f32 first, then the switch, then all f64 (P13).
+    record = {"stimuli": {}}
+    results = {}
+    for r in EXECUTION_ORDER:
+        if r == 1:
+            torch.set_default_dtype(torch.float64)
+        _, mid, dt_id, prec = RUNS[r]
+        print(f"  run {r} ({mid}, dt {dt_id}, {prec}): settling {N_SETTLE[dt_id]} steps")
+        with located(r):
+            results[r] = run_one(r, refs, pre, nodes, offsets80_raw, record)
+    torch.set_default_dtype(torch.float32)
+    t0, t1 = results[0]["threads"], results[1]["threads"]
+    require(t0 == t1, "A6", f"thread counts differ between runs 0 and 1: {t0} vs {t1}")
+    print(f"  A6 threads: 1 vs {t0['determinism_check'][1]} bit-equal on sequences 0 and 4, runs 0 (f32) and 1 (f64)")
+    centre_nodes = results[0]["centre_nodes"]
+    require(all(results[r]["centre_nodes"] == centre_nodes for r in results), "A5", "centre nodes differ between runs")
+    print("  A1 per run: loaded, widened (f64) and after the runs, bit-equal to the references")
+    print("  A2 precision: default dtype, parameters, _param_api, buffers, states and traces as claimed")
+    checks = cross_checks(results)
+    print("  A3 inputs: dataset and buffer level bit-equal; input rounding "
+          + ", ".join(f"{d} {v:.3g}" for d, v in checks["input_rounding"].items()))
+    print("  A4 shapes, frame counts, arg rows and finiteness: ok")
+    print(f"  A5 fixtures: nodes.csv, centre ({N_CENTRE}, R1 at 360), flashes.bin, moving_edge_timing.json, spans, snapshots")
+    for key, gap in checks["f32_f64_gap"].items():
+        print(f"  A7 gap {key}: " + ", ".join(f"{k} {v:.3e}" for k, v in gap.items()))
+    tcf, ssf = freeze["time_const"], freeze["syn_strength"]
+    print(f"  A8 freeze: time_const below f32(0.02): {tcf['below_f32_0.02_total']} "
+          f"(per model {tcf['below_f32_0.02_per_model']}, 000 {tcf['below_f32_0.02_000']}, "
+          f"049 {tcf['below_f32_0.02_049']}); syn_strength zeros {ssf['exact_zeros']} "
+          f"(per model {ssf['zeros_per_model']}, types {ssf['conn_types_zero_in_some_model']} in some, "
+          f"{ssf['conn_types_zero_in_all_models']} in all)")
+
+    # Every array is computed and every check has passed: build the files.
+    files = file_layout()
+    arrays = block_arrays(results)
+    ref_bins = []
+    for f in files:
+        stem = f["name"].split(".")[0]
+        data = pack_file(f, {k[1:]: v for k, v in arrays.items() if k[0] == stem})
+        f["sha256"] = hashlib.sha256(data).hexdigest()
+        ref_bins.append((f["name"], data))
+    del arrays, results
+    manifest = build_manifest(centre_nodes, files)
+    validate_manifest(manifest)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    export_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
+    import importlib.metadata
+    import platform
+
+    import h5py
+
+    script = pathlib.Path(__file__).resolve()
+    provenance = {
+        "exported": now.date().isoformat(),
+        "export_id": export_id,
+        "generator": {"path": GENERATOR, "sha256": sha256_file(script)},
+        "git": git_state(),
+        "versions": {"python": platform.python_version(), "flyvis": flyvis.__version__,
+                     "torch": torch.__version__, "numpy": np.__version__, "h5py": h5py.__version__,
+                     "datamate": importlib.metadata.version("datamate")},
+        "machine": {"platform": platform.platform(), "machine": platform.machine(),
+                    "torch_config": torch.__config__.show()},
+        "uv_lock_sha256": sha256_file(UV_LOCK),
+        "device": "cpu",
+        "threads": {**t0, "runs_checked": [0, 1]},
+        "flyvis_root": {"path": SCRATCH_REL, "models_copied": True,
+                        "entries_copied": MODEL_ENTRIES},
+        "models": [{"id": m, "name": name, "validation_loss": loss, "rank": rank,
+                    "chkpt_00000_sha256": copies[m]["original_sha256"],
+                    "scratch_chkpt_00000_sha256": copies[m]["scratch_sha256"]}
+                   for m, name, loss, rank in MODELS],
+        "validation_losses": losses,
+        "inputs_read": {str(p.relative_to(ROOT)): sha256_file(p)
+                        for p in (ENSEMBLE_CSV, PRETRAINED_RS, NODES_CSV, FLASHES_BIN, TIMING_JSON)},
+        "dts": [{"id": i, "dt": dt, "n_settle": n, "floor_dt_f32": FLOOR_DT_F32[i]} for i, dt, n in DTS],
+        "settling": {"t_pre": T_PRE, "value": PRE_STIM_VALUE, "t_fade_in": T_FADE_IN, "batch_size": BATCH_SIZE},
+        "stimuli": record["stimuli"],
+        "f32_floor_trap": {
+            i: {"dt": dt, "f32_dt": FLOOR_DT_F32[i], "source": "flyvis/network/dynamics.py:207-218",
+                "euler_step_dt": {"f32": FLOOR_DT_F32[i], "f64": dt, "source": "network.py:406"},
+                "note": "task 3 must reproduce max(tau, f32(dt))"}
+            for i, dt, _ in DTS
+        },
+        "parameter_equality": {
+            "all_50_checkpoints_equal_ensemble_csv": True,
+            "checkpoint_file": str(CHECKPOINT),
+            "models": {
+                mid: {name: {"count": int(refs[mid][name].shape[0]),
+                             "reference": ("pretrained.rs" if mid == "000" or name in ("sign", "syn_count")
+                                           else "ensemble.csv"),
+                             "loaded": True, "widened": True, "after_runs": True}
+                      for name in PARAM_KEYS}
+                for mid, *_ in MODELS
+            },
+        },
+        "equivalence": {"stimulus_response_bit_equal": True, "sequences": [0, len(FLASH_ARGS)]},
+        "input_rounding": checks["input_rounding"],
+        "f32_f64_gap": checks["f32_f64_gap"],
+        "freeze_check": freeze,
+        "sizes": {name: len(data) for name, data in ref_bins},
+        "wall_time_s": round(time.monotonic() - started, 1),
+    }
+    h80_provenance = {
+        "exported": now.date().isoformat(),
+        "export_id": export_id,
+        "generator": GENERATOR,
+        "flyvis": flyvis.__version__,
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+        "dt": 1.0 / 200.0,
+        "gate_angles": GATE_ANGLES,
+        "height": EDGE_HEIGHT,
+        "n_ommatidia": N_OMMATIDIA,
+        "ppo": PPO,
+        "monitor_px": MONITOR,
+        "offsets_shape": list(offsets80.shape),
+    }
+    h80 = [
+        ("moving_edge_offsets_h80.bin", offsets80.astype("<f4").tobytes(order="C")),
+        ("moving_edge_offsets_h80.json", json_bytes(h80_sidecar())),
+        ("moving_edges_h80_provenance.json", json_bytes(h80_provenance)),
+    ]
+    write_outputs(args.out, ref_bins, json_bytes(jsonable(provenance)), manifest, h80, export_id)
+    for name, data in ref_bins:
+        print(f"  flyvis-reference/{name}: {len(data)} bytes")
+    print(f"  flyvis-reference/PROVENANCE.json, manifest.json ({len(manifest_bytes(manifest))} bytes)")
+    for name, data in h80:
+        print(f"  flyvis-stimuli/{name}: {len(data)} bytes")
+    print("  all assertions passed")
+    return 0
+
+
+def main(argv=None) -> int:
+    started = time.monotonic()
+    # The run log stays in order when stderr goes to a separate file.
+    sys.stdout.reconfigure(line_buffering=True)
+    args = None
+    try:
+        args = parse_args(sys.argv[1:] if argv is None else argv)
+        preflight(args.out, args.force, os.environ)
+        lock = acquire_lock(LOCK)
+        try:
+            return export(args, started)
+        finally:
+            lock.close()
+    except ExportError as e:
+        print(f"export_reference: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("export_reference: interrupted", file=sys.stderr)
+        # From write step 4 on, the marker stays behind and a human recovers.
+        if args is not None and args.out.is_dir() and any(
+                p.name.startswith(".flyvis-reference.incomplete-") for p in args.out.iterdir()):
+            print(RECOVERY, file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

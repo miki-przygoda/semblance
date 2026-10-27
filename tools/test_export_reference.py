@@ -534,6 +534,112 @@ def test_all_50_checkpoints_and_the_freeze_figures():
     raises(lambda: er.check_checkpoints(ckpts, ens, pre), "checkpoint 007 syn_strength")
 
 
+# -- Task 5: helpers of the run code that need torch but not flyvis ------------------
+
+def test_snapshot_frames_are_torchs_truncation_in_both_precisions():
+    import torch
+
+    for dtype in (torch.float32, torch.float64):
+        for n, want in er.SNAPSHOT_FRAMES.items():
+            got = torch.linspace(0, n - 1, er.N_SNAPSHOTS, dtype=dtype).long().tolist()
+            assert got == want, (dtype, n, got)
+
+
+def test_floor_dt_constants_are_f32_of_dt():
+    import torch
+
+    for dt_id, dt, _ in er.DTS:
+        assert float(torch.tensor(dt).float()) == er.FLOOR_DT_F32[dt_id]
+        assert float(np.float32(dt)) == er.FLOOR_DT_F32[dt_id]
+
+
+def test_jsonable_and_as_str():
+    obj = {"a": np.int64(3), "b": (np.float32(0.5), np.array([1, 2])), "c": np.bool_(True), 4: None}
+    assert er.jsonable(obj) == {"a": 3, "b": [0.5, [1, 2]], "c": True, "4": None}
+    assert type(er.jsonable(np.int64(3))) is int
+    assert er.as_str(b"R1") == "R1" and er.as_str(np.bytes_(b"L1")) == "L1" and er.as_str("Am") == "Am"
+
+
+def test_read_nodes_real_file():
+    needs(er.NODES_CSV)
+    types, u, v = er.read_nodes(er.NODES_CSV)
+    assert len(types) == er.N_NODES
+    centre = np.nonzero((u == 0) & (v == 0))[0]
+    assert len(centre) == er.N_CENTRE and (int(centre[0]), types[centre[0]]) == er.FIRST_CENTRE
+    assert [types[i] for i in centre] == list(er.parse_pretrained(er.PRETRAINED_RS.read_text())["CELL_TYPES"])
+
+
+def test_flashes_fixture_has_the_shape_a5_reads():
+    needs(er.FLASHES_BIN)
+    assert er.FLASHES_BIN.stat().st_size == 4 * 600 * 721 * 4
+
+
+def test_the_edge_timing_fixture_has_the_speed_13_block():
+    needs(er.TIMING_JSON)
+    blocks = [b for b in json.loads(er.TIMING_JSON.read_text())["speeds"] if b["speed"] == 13.0]
+    assert len(blocks) == 1 and blocks[0]["n_stim"] == er.EDGE_N_STIM_1_200 == len(blocks[0]["indices"])
+
+
+def test_an_unexpected_error_names_its_run_and_sequence():
+    def fail(exc, run, sequence=None):
+        with er.located(run, sequence):
+            raise exc
+
+    raises(lambda: fail(RuntimeError("index out of range"), 3, 5),
+           "run failed (run 3, sequence 5): RuntimeError: index out of range")
+    try:
+        fail(ValueError("x"), 2)
+    except er.ExportError as e:
+        assert str(e) == "run failed (run 2): ValueError: x", str(e)
+        assert isinstance(e.__cause__, ValueError)
+
+    def nested():
+        with er.located(6):
+            with er.located(6, 9):
+                raise KeyError("k")
+
+    raises(nested, "run failed (run 6, sequence 9): KeyError")
+    original = er.ExportError("A3 failed (run 1, sequence 0): x")
+    try:
+        fail(original, 1, 0)
+    except er.ExportError as e:
+        assert e is original
+    try:
+        fail(KeyboardInterrupt(), 0)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("KeyboardInterrupt was converted")
+
+
+def test_ctrl_c_prints_recovery_only_when_a_marker_is_left():
+    import contextlib
+    import io
+
+    def run(fake):
+        out = tmpdir()
+        saved, er.export = er.export, fake
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = er.main(["--out", str(out)])
+        finally:
+            er.export = saved
+        return rc, err.getvalue()
+
+    def after_the_marker(args, started):
+        (args.out / f".flyvis-reference.incomplete-{os.getpid()}").write_text("id\n")
+        raise KeyboardInterrupt
+
+    def before_writing(args, started):
+        raise KeyboardInterrupt
+
+    rc, err = run(after_the_marker)
+    assert rc == 130 and "interrupted" in err and "Recovering from an interrupted export:" in err, err
+    rc, err = run(before_writing)
+    assert rc == 130 and "interrupted" in err and "Recovering" not in err, err
+
+
 # -- runner (keep last) ---------------------------------------------------------
 
 def main(argv) -> int:
