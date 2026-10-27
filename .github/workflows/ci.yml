@@ -68,6 +68,10 @@ jobs:
             data/flyvis-pretrained/ensemble.csv
           key: fixtures-${{ hashFiles('ci/fixtures.sha256', 'ci/fixtures-tag') }}
 
+      - name: Throwaway - corrupt one restored fixture
+        if: steps.fixtures-cache.outputs.cache-hit == 'true'
+        run: printf 'X' | dd of=data/flyvis-reference/manifest.json bs=1 seek=0 count=1 conv=notrunc
+
       - name: Fetch and verify fixtures
         env:
           GH_TOKEN: ${{ github.token }}
