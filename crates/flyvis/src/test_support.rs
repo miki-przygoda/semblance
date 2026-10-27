@@ -90,7 +90,8 @@ pub(crate) fn load_build_bytes(name: &str) -> Option<Vec<u8>> {
 }
 
 /// Loads a stimulus fixture exported from flyvis, or `None` if the export has
-/// not been run. See `tools/export_stimuli.py`.
+/// not been run. See `tools/export_stimuli.py`, `tools/export_moving_edges.py`
+/// and, for the `_h80` files, `tools/export_reference.py`.
 pub(crate) fn load_stimulus_fixture(name: &str) -> Option<String> {
     let path = format!(
         "{}/../../data/flyvis-stimuli/{name}",
@@ -105,8 +106,9 @@ pub(crate) fn load_stimulus_fixture(name: &str) -> Option<String> {
             );
             eprintln!(
                 "skipping: {path} not found. Run \
-                 `uv run --project tools tools/export_stimuli.py` and \
-                 `uv run --project tools tools/export_moving_edges.py` \
+                 `uv run --project tools tools/export_stimuli.py`, \
+                 `uv run --project tools tools/export_moving_edges.py` and, \
+                 for the `_h80` files, `uv run --project tools tools/export_reference.py` \
                  to generate the stimulus fixtures, or run ci/fetch-fixtures.sh."
             );
             None
@@ -129,8 +131,9 @@ pub(crate) fn load_stimulus_bytes(name: &str) -> Option<Vec<u8>> {
             );
             eprintln!(
                 "skipping: {path} not found. Run \
-                 `uv run --project tools tools/export_stimuli.py` and \
-                 `uv run --project tools tools/export_moving_edges.py` \
+                 `uv run --project tools tools/export_stimuli.py`, \
+                 `uv run --project tools tools/export_moving_edges.py` and, \
+                 for the `_h80` files, `uv run --project tools tools/export_reference.py` \
                  to generate the stimulus fixtures, or run ci/fetch-fixtures.sh."
             );
             None

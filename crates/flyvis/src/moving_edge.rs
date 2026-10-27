@@ -236,8 +236,10 @@ impl Coverage {
     /// Renders every angle's 21 offsets.
     ///
     /// One pass over the monitor per angle finds the pixels whose rotated
-    /// source lands in the bar's row band -- 88 of the monitor's 775 rows --
-    /// and the 21 offsets are then cheap sweeps over that band alone.
+    /// source lands in the bar's row band -- 88 of the monitor's 775 rows at
+    /// flyvis's default height 9, all 775 at height 80, where the source-row
+    /// clamp in `inverse_rotate` decides membership -- and the 21 offsets are
+    /// then cheap sweeps over that band alone.
     pub(crate) fn new(params: &MovingEdgeParams, eye: &HexEye) -> Self {
         let geometry = BarGeometry::new(params, eye.monitor_px());
         let n_offsets = geometry.num_offsets();
