@@ -15,6 +15,11 @@ import sys
 
 from flyvis_cli.download_pretrained_models import download_and_unpack_files, checksums
 
+# Both values are flyvis's own, copied from main() in
+# flyvis_cli/download_pretrained_models.py (flyvis 1.2.0), where they are
+# local variables and so cannot be imported. API_KEY is the public Google
+# Drive API key flyvis ships for anyone downloading its pretrained models; it
+# is not this project's credential.
 FOLDER_ID = "15_8gPaVVJV6wGAspwkrdN8r-2NxMY4Kj"
 API_KEY = "AIzaSyDOy2_N7B5UjxKy5Xxeyd9WZfnDWzQ4-54"
 

@@ -10,7 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
-description = "The compress/uncompress round-trip: encode a connectome to a compact latent code and decode it back. The heart of the project."
+description = "The compress/uncompress round-trip: a Codec trait, a lossless WeightCodec baseline, and a ReducedCodec whose encode and decode are not implemented yet."
 
 [lib]
 name = "semblance_codec"

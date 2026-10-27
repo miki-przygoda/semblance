@@ -10,7 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
-description = "Faithfulness measurement: structural distance, behavioural distance, and the size-vs-fidelity sweep. The load-bearing piece."
+description = "Faithfulness measurement: structural distance, behavioural distance, and the size-vs-fidelity sweep. The probe battery is still a placeholder."
 
 [lib]
 name = "semblance_fidelity"

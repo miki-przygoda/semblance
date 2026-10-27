@@ -9,11 +9,15 @@ like the original without being identical underneath. That is exactly what this
 project measures: two different weightings can behave the same, so the test is
 behavioural, not structural.
 
-This repo is a clean starting point, not a finished system. The plumbing —
-graph representation, a working spiking simulator, an evolution loop, a fidelity
-harness, and a lossless codec baseline — is built and tested so you can go
-straight to the parts that are actually research: **the reduced encoding** and
-**the behavioural-fidelity metric**.
+This is a research project in progress, not a finished system. The current
+focus is reproducing flyvis (Lappalainen et al., Nature 2024) faithfully in
+Rust: `semblance-flyvis` reads its published connectome, expands it as flyvis
+does, and is gated against flyvis's own output. Around that sits the plumbing
+for the compression experiment — graph representation, a placeholder spiking
+simulator, an evolution loop, a fidelity harness, and a lossless codec
+baseline. The two parts that are actually research, **the reduced encoding**
+and **the behavioural-fidelity metric**, are not built yet. There is no
+compression result yet.
 
 ## The thesis in one line
 
@@ -32,7 +36,7 @@ plus the crates in this repo.
 
 ```bash
 cargo build            # builds the whole workspace
-cargo test             # all crates green
+cargo test             # green; see below for what that does and does not cover
 cargo run -- demo      # run the LIF simulator once on a synthetic connectome
 cargo run -- roundtrip # lossless encode->decode, report structural + behavioural fidelity
 cargo run -- evolve    # seed from the connectome latent, run a toy evolution loop
@@ -42,26 +46,43 @@ Everything runs on a **synthetic** connectome out of the box, so you don't need 
 download anything to see the pipeline work. Wire in real data when you're ready
 (`RESOURCES.md` → "Getting the data").
 
-The flyvis acceptance tests read gitignored fixture data; `ci/fetch-fixtures.sh`
-fetches and checksum-verifies it (needs `gh` access to this repo), and CI runs
-the full suite against it with `SEMBLANCE_REQUIRE_FIXTURES=1`.
+**Without fixture data, 26 flyvis parity tests skip and still report
+green.** They are the tests that prove this workspace reproduces flyvis. They
+read gitignored files under `data/`, and when those are absent each one prints
+a skip notice and passes; libtest hides that notice for passing tests, so plain
+`cargo test` looks the same either way. To see the skips, run
+`cargo test --workspace -- --nocapture`. To make a missing fixture a failure
+instead, set `SEMBLANCE_REQUIRE_FIXTURES=1`, as CI does.
 
-## What runs today vs. what's yours
+To get the fixtures, run `ci/fetch-fixtures.sh`. It needs the GitHub CLI
+(`gh`), logged in (`gh auth login`), plus `curl`, `unzip`, `tar` and
+`shasum`. It downloads the connectome spec from the paper's supplementary
+material and the rest from this repository's
+`fixtures-N` release, verifies every file against `ci/fixtures.sha256`, and
+never overwrites a file that fails verification. To regenerate the fixtures
+from flyvis itself instead (Python, PyTorch), see `tools/README.md`.
 
-| Crate | Built and working | Left for you (the research) |
+## What runs today vs. what is open
+
+| Crate | Built and working | Open (the research) |
 |-------|-------------------|------------------------------|
 | `rng` | `semblance-rng` — SplitMix64-seeded xoshiro256++, frozen stream pinned by test vectors | — |
 | `connectome` | graph type, CSR view, edge-list loader, synthetic generator; `TypedNetwork` — a realised network that keeps flyvis's parameter sharing (cell type per neuron, connection type per edge) instead of flattening it | load a real FlyWire/MaleCNS export |
-| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec and expands it exactly as flyvis builds it (45,669 neurons, 1,513,231 synapses, 604 connection types); carries the trained parameters, the curated ground truth, and the three stimulus families (flashes, dots, moving edges), all gated against flyvis's own output | graded dynamics that reproduce flyvis's traces (0.3.0) |
-| `sim` | LIF neurons, decaying-current synapses, tick loop | sensory encoding + motor decoding ("make it act like an ant") |
+| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec and expands it exactly as flyvis builds it (45,669 neurons, 1,513,231 synapses, 604 connection types); carries the trained parameters, the curated ground truth, and the three stimulus families (flashes, dots, moving edges), all gated against flyvis's own output | graded dynamics that reproduce flyvis's traces (planned for 0.3.0) |
+| `sim` | LIF neurons, decaying-current synapses, tick loop. A placeholder: the fly visual system is largely non-spiking, so this crate is to be replaced | sensory encoding + motor decoding |
 | `codec` | `WeightCodec` — lossless baseline, directly evolvable | `ReducedCodec` — the actual compression (`todo!()`) |
-| `evo` | gaussian mutation + truncation selection + elitism, seedable | your `Fitness` (environment + reward) |
+| `evo` | gaussian mutation + truncation selection + elitism, seedable | a real `Fitness` (environment + reward) |
 | `fidelity` | structural + behavioural distance, size-vs-fidelity curve harness | the **probe battery** design |
 | `app` | CLI wiring the three flows together | — |
 
-The two places to start are marked with `todo!()` and `TODO(you)` in
-`crates/codec/src/lib.rs` and the probe-battery note in
+The open work is `ReducedCodec` in `crates/codec/src/lib.rs`, whose `encode`
+and `decode` are deliberately `todo!()`, and the probe-battery note in
 `crates/fidelity/src/lib.rs`.
+
+`semblance-codec 0.1.0` on crates.io is an early placeholder:
+`ReducedCodec::encode` and `decode` panic with `todo!()` there too. The other
+`0.1.0` crates there predate the flyvis work. Build from this repository
+instead.
 
 ## Design notes
 
@@ -70,7 +91,7 @@ The two places to start are marked with `todo!()` and `TODO(you)` in
   the latent, then `decode` to get a network to score.
 - **`WeightCodec` is the anchor, not the goal.** It stores topology and treats the
   weight vector as the latent, so it round-trips exactly (fidelity = 0 distance)
-  and is trivially evolvable. It's your control point at
+  and is trivially evolvable. It's the control point at
   `(latent_dim = num_synapses, fidelity = perfect)`. `ReducedCodec` is where you
   push `latent_dim` down and watch fidelity fall — that curve is the result.
 - **Behaviour, not structure, is the metric.** Two different weightings can behave
@@ -78,8 +99,23 @@ The two places to start are marked with `todo!()` and `TODO(you)` in
   `behavioural_distance` replays a probe battery through both networks and compares
   what they *do*.
 
+## Data and attribution
+
+The fixture data — and the trained parameters in
+`crates/flyvis/src/pretrained.rs` and the ground truth in
+`crates/flyvis/src/groundtruth.rs` — come from flyvis
+(https://github.com/TuragaLab/flyvis). They are flyvis's MIT-licensed data, not
+Apache-2.0. `NOTICE` lists exactly which files, carries flyvis's licence text,
+and cites the upstream connectome sources.
+
+If you use this work, please also cite the model it reproduces:
+Lappalainen, J. K. et al. *Connectome-constrained networks predict neural
+activity across the fly visual system.* Nature 634, 1132–1140 (2024).
+https://doi.org/10.1038/s41586-024-07939-3. `CITATION.cff` has both entries.
+
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE). Third-party data is excepted; see
+[NOTICE](NOTICE).
 
 Copyright 2026 Mikolaj Mikuliszyn.

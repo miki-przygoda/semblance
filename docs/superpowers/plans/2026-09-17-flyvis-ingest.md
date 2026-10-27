@@ -19,7 +19,7 @@
 - Recursion depth limit: **64**.
 - Tests that need `data/flyvis-supplementary/` must **skip with a clear message when it is absent**, never fail — that directory is gitignored and a fresh clone lacks it.
 - Commit style: plain imperative subject, NO `feat:`/`fix:`/`chore:` prefixes.
-- Run all verification from the workspace root, `/Users/miki_przygoda/Projects/GitHub-Projects/semblance`.
+- Run all verification from the workspace root.
 
 ## File Structure
 
