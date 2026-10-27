@@ -5,7 +5,7 @@
 #   - the connectome JSON, from the Nature supplementary zip (Springer)
 #   - flyvis's own exports (data/flyvis-build, data/flyvis-stimuli,
 #     data/flyvis-reference, data/flyvis-pretrained/ensemble.csv), from the
-#     private release named in ci/fixtures-tag
+#     GitHub release named in ci/fixtures-tag
 #
 # Fetches only what is missing. A file that exists but fails verification is
 # never overwritten -- locally it may be a deliberate re-export -- and the

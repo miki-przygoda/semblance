@@ -46,7 +46,7 @@ Everything runs on a **synthetic** connectome out of the box, so you don't need 
 download anything to see the pipeline work. Wire in real data when you're ready
 (`RESOURCES.md` → "Getting the data").
 
-**Without fixture data, about 26 flyvis parity tests skip and still report
+**Without fixture data, 26 flyvis parity tests skip and still report
 green.** They are the tests that prove this workspace reproduces flyvis. They
 read gitignored files under `data/`, and when those are absent each one prints
 a skip notice and passes; libtest hides that notice for passing tests, so plain
