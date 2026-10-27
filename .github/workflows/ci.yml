@@ -25,7 +25,11 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Nothing after checkout uses git with credentials; the fixture
+          # fetch passes GH_TOKEN to gh directly.
+          persist-credentials: false
 
       # Pinned, not stable: with -D warnings a new stable lint would turn CI
       # red with no change in the repo. Bumping this is a deliberate edit.
@@ -34,7 +38,7 @@ jobs:
           rustup toolchain install 1.97 --profile minimal --component clippy
           rustup override set 1.97
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -58,7 +62,7 @@ jobs:
       # to find it, `gh cache delete <key>` to remove it) and re-running.
       - name: Restore fixtures
         id: fixtures-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
@@ -79,7 +83,7 @@ jobs:
       - name: Save fixtures
         if: steps.fixtures-cache.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             data/flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json
@@ -126,14 +130,18 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Nothing after checkout uses git with credentials; the fixture
+          # fetch passes GH_TOKEN to gh directly.
+          persist-credentials: false
 
       - name: Install Rust 1.85
         run: |
           rustup toolchain install 1.85 --profile minimal
           rustup override set 1.85
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
