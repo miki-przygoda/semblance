@@ -145,7 +145,25 @@ pass.
    git. Spec section 7 asks for tasks 2, 3 and 4 to be marked done there, with
    the results above and F25's question answered (G16). The owner needs to do
    this locally.
-5. **CI on this PR.** The self-hosted runner has not run on this PR yet. Merge
+5. **From the review (temper stabilise, all Minor, left as open items by
+   temper's rule).**
+   - `Graded::<f32>::new` still accepts a `dt` whose f32 value is subnormal.
+     Its floor's reciprocal overflows to `inf`, and the first step gives NaN.
+     The fix in this branch refuses only an f32 `dt` of 0 or infinity.
+   - The libm gate's `diff` ignores a NaN in flyvis's reference (`e > max` is
+     false for NaN), and so does the acceptance file's `max_err`. Only the
+     exact gate would catch a NaN reference value.
+   - `relu` maps a NaN presynaptic state to 0, while `torch.relu` passes NaN
+     through. Settling never produces a NaN, and the gate fails on any
+     non-finite state.
+   - The integer-count control checks only the f64 libm bound. The f32 bounds
+     would miss that error in 3 of the 4 f32 runs. The exact gate catches it.
+     The spec's sentence ("the libm bound resolves the class of error") claims
+     more than the control tests: owner decision.
+   - The acceptance tests' shadow workspace under `CARGO_TARGET_TMPDIR` is
+     never pruned, so files that no longer exist in the workspace can linger
+     there and break its build.
+6. **CI on this PR.** The self-hosted runner has not run on this PR yet. Merge
    waits for it and for the owner.
 
 The crate-row gap from the checkpoint log (README's `flyvis` row not
