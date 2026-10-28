@@ -23,6 +23,7 @@ mod moving_edge_checks;
 pub mod pretrained;
 #[cfg(test)]
 mod pretrained_checks;
+pub mod reference;
 pub mod spec;
 #[cfg(test)]
 mod test_support;
