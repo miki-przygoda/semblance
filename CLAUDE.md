@@ -123,12 +123,12 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 279 tests, 0 failures
+cargo test --workspace          # 332 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-52 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
+66 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
 `data/flyvis-stimuli/`, `data/flyvis-reference/` and
 `data/flyvis-pretrained/ensemble.csv` are absent (all five are gitignored
 real-data; the first is fetched per `RESOURCES.md`, the next two produced by
@@ -138,8 +138,12 @@ writes `data/flyvis-reference/` and also the three height-80 `_h80`
 moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "279 passed, 0 failed" whether the data is present
-or absent. They are only visible under `cargo test --workspace -- --nocapture`.
+the suite reports the same "332 passed, 0 failed" whether the data is present
+or absent. They are only visible under `cargo test --workspace -- --nocapture`,
+and even then not one per test: the settling gates in
+`crates/flyvis/src/settling_checks.rs` share one lazily loaded fixture, so only
+the test that loads it prints the notice and the other skipped ones print
+nothing. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of them still fails.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
 hard failure instead — CI sets this (`.github/workflows/ci.yml`); anywhere else
@@ -185,9 +189,11 @@ requires every settled value, and every centre-neuron value at every settling
 step, to equal flyvis's. The libm gate uses Rust's `exp`, and holds each run to
 a bound fixed in the spec before it ran: 1e-10 in f64, and twice flyvis's own
 f32/f64 gap in f32. torch's `exp` and the C library's differ in the last bit
-on about 105 of the 2,355 counts. That is the only reason the second gate has
-a bound. If the exact gate fails, find the discrepancy in flyvis's source; do
-not relax it. Both gates print their results; read the libm ratios.
+on 104–106 of the 2,355 counts in f32 and 108 in f64. That is the only reason
+the second gate has a bound. If the exact gate fails, find the discrepancy in
+flyvis's source; do not relax it. Both gates print their results; read the
+libm ratios. The f64 runs print theirs as `0.000 of bound`, because their
+maxima are near 1e-15 against a 1e-10 bound: read the maximum itself there.
 
 Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
 float comparisons, for reasons specific to each one. Most are round-trip
@@ -202,9 +208,9 @@ Neither kind, and nothing about the geometry gate above, is reason to widen
 a comparison that could be exact instead.
 
 Clippy is clean, and CI enforces it with `-D warnings` on a pinned toolchain
-(see `.github/workflows/ci.yml`). The four `needless_range_loop` sites in `sim`
-carry scoped `#[allow]`s rather than rewrites, because `sim` is on the way out;
-they go when it does.
+(see `.github/workflows/ci.yml`). The three `needless_range_loop` sites in `sim`
+carry scoped `#[allow]`s rather than rewrites, because `sim`'s spiking path is
+on the way out; they go when it does.
 
 `demo` and `evolve` print numbers that depend on the RNG stream. They change
 when the stream legitimately changes; they are not regression baselines.
