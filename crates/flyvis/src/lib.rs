@@ -24,6 +24,8 @@ pub mod pretrained;
 #[cfg(test)]
 mod pretrained_checks;
 pub mod reference;
+#[cfg(test)]
+mod settling_checks;
 pub mod spec;
 #[cfg(test)]
 mod test_support;

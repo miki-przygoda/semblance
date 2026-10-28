@@ -49,6 +49,7 @@ name = "semblance-flyvis"
 version = "0.2.0"
 dependencies = [
  "semblance-connectome",
+ "semblance-sim",
 ]
 
 [[package]]
