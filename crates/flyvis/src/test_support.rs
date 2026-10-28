@@ -174,3 +174,28 @@ pub(crate) fn real_spec_and_network(
         .expect("real spec must expand");
     Some((spec, net))
 }
+
+/// `data/flyvis-reference/`, from `tools/export_reference.py`.
+pub(crate) fn reference_dir() -> String {
+    format!("{}/../../data/flyvis-reference", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn reference_missing(path: &str) {
+    assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing");
+    eprintln!(
+        "skipping: {path} not found. Run ci/fetch-fixtures.sh, or \
+         `uv run --project tools tools/export_reference.py`."
+    );
+}
+
+/// A text file from `data/flyvis-reference/`, or `None` if it is absent.
+pub(crate) fn load_reference_fixture(name: &str) -> Option<String> {
+    let path = format!("{}/{name}", reference_dir());
+    std::fs::read_to_string(&path).map_err(|_| reference_missing(&path)).ok()
+}
+
+/// A binary file from `data/flyvis-reference/`, or `None` if it is absent.
+pub(crate) fn load_reference_bytes(name: &str) -> Option<Vec<u8>> {
+    let path = format!("{}/{name}", reference_dir());
+    std::fs::read(&path).map_err(|_| reference_missing(&path)).ok()
+}
