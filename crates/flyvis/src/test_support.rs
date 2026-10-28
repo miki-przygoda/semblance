@@ -140,3 +140,26 @@ pub(crate) fn load_stimulus_bytes(name: &str) -> Option<Vec<u8>> {
         }
     }
 }
+
+/// Loads a file from `data/flyvis-pretrained/`, or `None` if it is absent.
+/// See `tools/export_params.py`.
+pub(crate) fn load_pretrained_fixture(name: &str) -> Option<String> {
+    let path = format!(
+        "{}/../../data/flyvis-pretrained/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
+            eprintln!(
+                "skipping: {path} not found. Run ci/fetch-fixtures.sh, or \
+                 `uv run --project tools tools/export_params.py`."
+            );
+            None
+        }
+    }
+}
