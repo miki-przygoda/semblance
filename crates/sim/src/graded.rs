@@ -88,7 +88,7 @@ pub enum GradedError {
     Length { what: &'static str, expected: usize, found: usize },
     /// A parameter or count is NaN or infinite.
     NonFinite { what: &'static str, index: usize },
-    /// `dt` is not finite and positive.
+    /// `dt` is not finite and positive, in f64 or as f32.
     BadDt(f64),
 }
 
@@ -131,7 +131,11 @@ fn relu<R: Real>(x: R) -> R {
 
 impl<R: Real> Graded<R> {
     pub fn new(net: &TypedNetwork, params: &GradedParams<R>, dt: f64) -> Result<Self, GradedError> {
-        if !(dt.is_finite() && dt > 0.0) {
+        // The floor and the f32 step use f32(dt), so that must be finite and
+        // positive too: a dt that rounds to 0 or overflows in f32 would make
+        // inv_tau 1/0 or 1/inf.
+        let dt32 = dt as f32;
+        if !(dt.is_finite() && dt > 0.0 && dt32.is_finite() && dt32 > 0.0) {
             return Err(GradedError::BadDt(dt));
         }
         let n_types = net.cell_types().len();
@@ -160,7 +164,7 @@ impl<R: Real> Graded<R> {
 
         // flyvis floors at torch.tensor(dt).float() in both precisions
         // (dynamics.py:209), and takes the reciprocal before multiplying.
-        let floor = R::from_f32(dt as f32);
+        let floor = R::from_f32(dt32);
         let type_inv_tau: Vec<R> =
             params.time_const.iter().map(|&t| R::ONE / max(R::from_f32(t), floor)).collect();
         let bias: Vec<R> = net.node_cell_type().iter().map(|&t| R::from_f32(params.bias[t as usize])).collect();
@@ -444,6 +448,26 @@ mod tests {
         for dt in [0.0, -0.01, f64::NAN, f64::INFINITY] {
             assert!(matches!(new(b, t, s, c, dt), Err(BadDt(_))), "dt {dt}");
         }
+    }
+
+    /// The floor and the f32 step use f32(dt), so a dt that is positive and
+    /// finite in f64 but 0 or infinite in f32 must be refused in both
+    /// precisions: otherwise inv_tau is 1/0 or 1/inf.
+    #[test]
+    fn refuses_a_dt_that_is_zero_or_infinite_in_f32() {
+        let net = network(&[0], 1, &[], &[]);
+        for dt in [1e-46, f64::from(f32::MAX) * 2.0, 1e39] {
+            for t in [&[0.0f32][..], &[-1.0], &[0.05]] {
+                let p64 = GradedParams { bias: &[0.5], time_const: t, syn_strength: &[], edge_syn_count: &[] };
+                assert_eq!(Graded::<f64>::new(&net, &p64, dt).map(|_| ()), Err(GradedError::BadDt(dt)), "f64 dt {dt}");
+                let p32 = GradedParams { bias: &[0.5], time_const: t, syn_strength: &[], edge_syn_count: &[] };
+                assert_eq!(Graded::<f32>::new(&net, &p32, dt).map(|_| ()), Err(GradedError::BadDt(dt)), "f32 dt {dt}");
+            }
+        }
+        // The smallest positive f32 is still a usable dt.
+        let tiny = f64::from(f32::from_bits(1));
+        let p = GradedParams { bias: &[0.5], time_const: &[0.0], syn_strength: &[], edge_syn_count: &[] };
+        assert!(Graded::<f64>::new(&net, &p, tiny).is_ok());
     }
 
     #[test]
