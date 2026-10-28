@@ -133,10 +133,7 @@ impl Rng {
     }
 }
 
-// Ensemble::parse("") returns EnsembleError { line: 0, kind: MissingHeader }:
-// line 0 is not a 1-based line number of the input.
 #[test]
-#[ignore = "acceptance-failing: ENSEMBLE-02"]
 fn ensemble_02_no_file_io_no_panics_every_error_names_line_and_expectation() {
     // No file I/O: a path to the real file is just text, refused at line 1.
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/flyvis-pretrained/ensemble.csv");

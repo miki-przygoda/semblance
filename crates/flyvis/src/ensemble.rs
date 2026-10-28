@@ -119,7 +119,8 @@ impl Ensemble {
         let header = lines
             .iter()
             .position(|l| !l.starts_with('#'))
-            .ok_or_else(|| err(lines.len(), MissingHeader))?;
+            // Empty input has no lines at all; the header was expected at line 1.
+            .ok_or_else(|| err(lines.len().max(1), MissingHeader))?;
         if lines[header] != HEADER {
             return Err(err(header + 1, BadHeader(lines[header].to_string())));
         }
