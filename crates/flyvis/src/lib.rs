@@ -12,6 +12,7 @@
 
 pub mod groundtruth;
 mod json;
+pub mod ensemble;
 pub mod expand;
 #[cfg(test)]
 mod expand_checks;
@@ -22,16 +23,25 @@ mod moving_edge_checks;
 pub mod pretrained;
 #[cfg(test)]
 mod pretrained_checks;
+pub mod reference;
+#[cfg(test)]
+mod settling_checks;
 pub mod spec;
 #[cfg(test)]
 mod test_support;
 pub mod stimuli;
 #[cfg(test)]
 mod stimuli_checks;
+pub mod syn_count_torch;
+#[cfg(test)]
+mod syn_count_torch_checks;
+pub mod wiring;
 
 pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
+pub use ensemble::{Ensemble, EnsembleError, EnsembleErrorKind, ModelParams};
 pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, SpecErrorKind};
 pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
 };
 pub use moving_edge::{MovingEdge, MovingEdgeParams};
+pub use wiring::{edge_syn_groups, input_nodes, WiringError};

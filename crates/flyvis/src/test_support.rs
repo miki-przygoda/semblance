@@ -140,3 +140,62 @@ pub(crate) fn load_stimulus_bytes(name: &str) -> Option<Vec<u8>> {
         }
     }
 }
+
+/// Loads a file from `data/flyvis-pretrained/`, or `None` if it is absent.
+/// See `tools/export_params.py`.
+pub(crate) fn load_pretrained_fixture(name: &str) -> Option<String> {
+    let path = format!(
+        "{}/../../data/flyvis-pretrained/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            assert!(
+                !fixtures_required(),
+                "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing"
+            );
+            eprintln!(
+                "skipping: {path} not found. Run ci/fetch-fixtures.sh, or \
+                 `uv run --project tools tools/export_params.py`."
+            );
+            None
+        }
+    }
+}
+
+/// The real spec and its expansion, or `None` if the spec has not been
+/// fetched. Every gate that needs the real network builds it here.
+pub(crate) fn real_spec_and_network(
+) -> Option<(crate::spec::ConnectomeSpec, semblance_connectome::TypedNetwork)> {
+    let raw = load_real_spec()?;
+    let spec = crate::spec::ConnectomeSpec::from_json_str(&raw).expect("real spec must load");
+    let net = crate::expand::expand(&spec, crate::expand::DEFAULT_EXTENT, crate::expand::DEFAULT_N_SYN_FILL)
+        .expect("real spec must expand");
+    Some((spec, net))
+}
+
+/// `data/flyvis-reference/`, from `tools/export_reference.py`.
+pub(crate) fn reference_dir() -> String {
+    format!("{}/../../data/flyvis-reference", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn reference_missing(path: &str) {
+    assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing");
+    eprintln!(
+        "skipping: {path} not found. Run ci/fetch-fixtures.sh, or \
+         `uv run --project tools tools/export_reference.py`."
+    );
+}
+
+/// A text file from `data/flyvis-reference/`, or `None` if it is absent.
+pub(crate) fn load_reference_fixture(name: &str) -> Option<String> {
+    let path = format!("{}/{name}", reference_dir());
+    std::fs::read_to_string(&path).map_err(|_| reference_missing(&path)).ok()
+}
+
+/// A binary file from `data/flyvis-reference/`, or `None` if it is absent.
+pub(crate) fn load_reference_bytes(name: &str) -> Option<Vec<u8>> {
+    let path = format!("{}/{name}", reference_dir());
+    std::fs::read(&path).map_err(|_| reference_missing(&path)).ok()
+}

@@ -9,12 +9,16 @@
 //! - an [`Engine`] tick loop using the connectome's CSR view
 //! - trivial [`Stimulus`] / [`Readout`] impls so the pipeline runs end to end
 //! - a [`Behaviour`] recording that fidelity metrics compare
+//! - [`graded`]: flyvis's graded (non-spiking) dynamics, in f32 and f64,
+//!   beside the spiking path and touching none of its traits
 //!
 //! What is YOURS to fill in later — this is where "make it act like an ant" lives:
 //! - the sensory encoding ([`Stimulus`]): how a world state becomes input current,
 //!   and which neurons receive it.
 //! - the motor decoding ([`Readout`]): how spikes become actions/behaviour.
 //! - richer dynamics if you outgrow LIF (adaptation, conductance-based, etc.).
+
+pub mod graded;
 
 use semblance_connectome::{Connectome, Csr, NeuronId};
 
