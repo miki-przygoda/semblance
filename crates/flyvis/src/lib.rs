@@ -29,6 +29,7 @@ mod test_support;
 pub mod stimuli;
 #[cfg(test)]
 mod stimuli_checks;
+pub mod wiring;
 
 pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
 pub use ensemble::{Ensemble, EnsembleError, EnsembleErrorKind, ModelParams};
@@ -37,3 +38,4 @@ pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
 };
 pub use moving_edge::{MovingEdge, MovingEdgeParams};
+pub use wiring::{edge_syn_groups, input_nodes, WiringError};
