@@ -73,7 +73,9 @@ dependency without asking, not even a small one, not even for tests.
 `tools/` is not an exception to this. It is offline Python, run by hand, that
 exports flyvis artifacts into plain files; no crate imports it, invokes it, or
 records it in `Cargo.lock`. It exists because flyvis's trained parameters ship as
-PyTorch checkpoints. The connectome itself needs none of it — that is read
+PyTorch checkpoints. `crates/flyvis/src/pretrained.rs` and `syn_count_torch.rs`
+are its output, compiled in: regenerate them only by rerunning their scripts.
+The connectome itself needs none of it — that is read
 directly in Rust. If a script there ever becomes something the Rust side needs at
 *runtime*, the boundary has been broken. See `tools/README.md`.
 
@@ -100,11 +102,13 @@ Match the existing log.
 
 ## Two things about the current code
 
-**`crates/sim` is on the way out.** It models spiking neurons, and its trait
-signatures encode that assumption (`step` returns `&[bool]`, `observe` takes
-`&[bool]`, `Behaviour` counts spikes). The fly visual system is largely
-non-spiking — graded membrane potential, not spikes. Replacing that trait
-surface is planned work, so do not invest in extending `Lif`.
+**The spiking path in `crates/sim` is on the way out.** `Lif`, `Engine` and
+the traits around them model spiking neurons, and their signatures encode that
+assumption (`step` returns `&[bool]`, `observe` takes `&[bool]`, `Behaviour`
+counts spikes). The fly visual system is largely non-spiking — graded
+membrane potential, not spikes — which `semblance_sim::graded` implements,
+beside the spiking path and touching none of its traits. Replacing the
+spiking trait surface is planned work, so do not invest in extending `Lif`.
 
 **Two `todo!()`s are the research, not bugs.** `ReducedCodec::encode`/`decode`
 in `crates/codec` are deliberately unimplemented. Do not fill them in
@@ -119,20 +123,22 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 204 tests, 0 failures
+cargo test --workspace          # 279 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-26 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`
-and `data/flyvis-stimuli/` are absent (all three are gitignored real-data; the
-first is fetched per `RESOURCES.md`, the other two produced by
+52 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
+`data/flyvis-stimuli/`, `data/flyvis-reference/` and
+`data/flyvis-pretrained/ensemble.csv` are absent (all five are gitignored
+real-data; the first is fetched per `RESOURCES.md`, the next two produced by
 `tools/export_build.py`, and `tools/export_stimuli.py` with
 `tools/export_moving_edges.py` respectively; `tools/export_reference.py`
-also writes the three height-80 `_h80` moving-edge files). A skip prints
-`eprintln!("skipping: ...")`, but libtest captures `eprintln!` for *passing*
-tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "204 passed, 0 failed" whether the data is present
+writes `data/flyvis-reference/` and also the three height-80 `_h80`
+moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
+A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
+for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
+the suite reports the same "279 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
@@ -145,8 +151,8 @@ To get the fixtures without installing Python, flyvis or PyTorch, run
 is missing, and verifies every file against `ci/fixtures.sha256`. It never
 overwrites a file that fails verification. Since `fixtures-2` it also fetches
 `data/flyvis-reference/` (flyvis's reference traces, from
-`tools/export_reference.py`) and `data/flyvis-pretrained/ensemble.csv`; no
-test reads either yet. CI runs the same script, then the
+`tools/export_reference.py`) and `data/flyvis-pretrained/ensemble.csv`,
+which the settling gates read. CI runs the same script, then the
 suite with `SEMBLANCE_REQUIRE_FIXTURES=1`.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
@@ -169,6 +175,19 @@ emulates that construction operation by operation, so every pixel must agree.
 It once bounded how many pixels could disagree, while the crate built the
 mask in `f64` -- and that tolerated difference turned out to be what failed
 the geometry gate at bar height 80.
+
+**The settling gates are exact where exactness exists.**
+`crates/flyvis/src/settling_checks.rs` settles the graded integrator for all
+eight reference runs and runs two gates over them. The exact gate uses
+`crates/flyvis/src/syn_count_torch.rs` (generated by
+`tools/export_syn_count.py`: torch's own `exp` of every synapse count). It
+requires every settled value, and every centre-neuron value at every settling
+step, to equal flyvis's. The libm gate uses Rust's `exp`, and holds each run to
+a bound fixed in the spec before it ran: 1e-10 in f64, and twice flyvis's own
+f32/f64 gap in f32. torch's `exp` and the C library's differ in the last bit
+on about 105 of the 2,355 counts. That is the only reason the second gate has
+a bound. If the exact gate fails, find the discrepancy in flyvis's source; do
+not relax it. Both gates print their results; read the libm ratios.
 
 Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
 float comparisons, for reasons specific to each one. Most are round-trip
