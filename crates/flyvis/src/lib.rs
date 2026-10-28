@@ -12,6 +12,7 @@
 
 pub mod groundtruth;
 mod json;
+pub mod ensemble;
 pub mod expand;
 #[cfg(test)]
 mod expand_checks;
@@ -30,6 +31,7 @@ pub mod stimuli;
 mod stimuli_checks;
 
 pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
+pub use ensemble::{Ensemble, EnsembleError, EnsembleErrorKind, ModelParams};
 pub use spec::{ConnectomeSpec, EdgeSpec, NodeSpec, Offset, Pattern, SpecError, SpecErrorKind};
 pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
