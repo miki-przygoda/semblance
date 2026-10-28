@@ -56,6 +56,7 @@ uv run python <script>.py
 | `export_stimuli.py` | flyvis's own rendered flash stimuli in full, and a deterministic three-centre subset of the dot stimuli, alongside the hexal lattice order and each family's sequence order — as fixtures the Rust stimulus generators are checked against | `data/flyvis-stimuli/` |
 | `export_moving_edges.py` | flyvis's own rendered moving-edge offsets for four angles, its pixel-to-ommatidium mask, and the resample/pad timing — the reference for the one tolerance-gated comparison in the workspace | `data/flyvis-stimuli/` |
 | `export_reference.py` | flyvis's own voltage traces for 0.3.0's gates — models 000 and 049, dt 1/200 and 0.02, float32 and float64: the settled state, the centre column at every settling step and frame, all cells at 6 frames per sequence, and the input movies flyvis fed — plus the moving-edge geometry at height 80. Every check runs before anything is written | `data/flyvis-reference/`, and the three `*_h80*` files in `data/flyvis-stimuli/` |
+| `export_syn_count.py` | flyvis's 2,355 synapse counts exactly as torch exponentiates them, in float32 and float64 — the last bit of `exp` that separates the exact settling gate from the bounded one | `crates/flyvis/src/syn_count_torch.rs` |
 
 `export_reference.py` sets `FLYVIS_ROOT_DIR` itself, to a scratch root under
 `target/` that it wipes and recreates on every run, and refuses to start if the
