@@ -12,13 +12,11 @@
 
 use crate::expand::{expand, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
 use crate::spec::ConnectomeSpec;
-use crate::test_support::{load_build_bytes, load_build_fixture, load_real_spec};
+use crate::test_support::{load_build_bytes, load_build_fixture, load_real_spec, real_spec_and_network};
 use semblance_connectome::TypedNetwork;
 
 fn real_network() -> Option<TypedNetwork> {
-    let raw = load_real_spec()?;
-    let spec = ConnectomeSpec::from_json_str(&raw).expect("real spec must load");
-    Some(expand(&spec, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL).expect("real spec must expand"))
+    real_spec_and_network().map(|(_, n)| n)
 }
 
 /// Stage 3: the published figures.
@@ -180,6 +178,19 @@ fn trained_parameter_ordering_matches_the_expanded_network() {
     }
 }
 
+/// The sign the integrator multiplies is the spec's (`conn_sign`); the one
+/// flyvis multiplies is the checkpoint's (`pretrained::SIGN`). They must be
+/// the same 604 values, bit for bit, or the gate would compare two different
+/// networks.
+#[test]
+fn conn_sign_equals_the_trained_sign() {
+    let Some(n) = real_network() else { return };
+    assert_eq!(n.conn_sign().len(), crate::pretrained::SIGN.len());
+    for (j, (a, b)) in n.conn_sign().iter().zip(crate::pretrained::SIGN.iter()).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "sign of connection type {j}");
+    }
+}
+
 /// Weight derivation over the real network, using the real trained parameters.
 ///
 /// Deliberately weak on its own: "finite, some positive, some negative" would
@@ -205,36 +216,23 @@ fn derives_weights_over_the_real_network() {
 /// `SYN_COUNT` is positional over the 2,355 realised `(connection type, du, dv)`
 /// groups and is stored in **natural-log space** -- a port that used the stored
 /// value directly would be wrong by an exponential in every weight while still
-/// running. `matches_the_published_figures` counts these groups; only this test
-/// pins their order and their values. `pretrained.rs`'s module doc states that
+/// running. `matches_the_published_figures` counts these groups. The grouping
+/// itself is `wiring::edge_syn_groups`, which the graded integrator uses; this
+/// test pins its order and values. `pretrained.rs`'s module doc states that
 /// `SYN_COUNT` exists so an independent expansion can be checked against it
 /// rather than trusted, and until this test that check did not exist.
 #[test]
 fn trained_synapse_counts_match_the_expanded_network() {
     let Some(n) = real_network() else { return };
 
-    // First-appearance order over the built edges, matching export_params.py.
-    let mut seen: std::collections::HashSet<(u16, i16, i16)> = Default::default();
-    let mut groups: Vec<f32> = Vec::new();
-    for i in 0..n.num_edges() {
-        let s = n.edge_source()[i] as usize;
-        let t = n.edge_target()[i] as usize;
-        let key = (
-            n.edge_conn_type()[i],
-            n.node_u()[t] - n.node_u()[s],
-            n.node_v()[t] - n.node_v()[s],
-        );
-        if seen.insert(key) {
-            groups.push(n.edge_n_syn()[i]);
-        }
+    let groups = crate::wiring::edge_syn_groups(&n).expect("2,355 realised offset groups");
+    // The first edge of each group, in group order.
+    let mut first: Vec<Option<usize>> = vec![None; crate::pretrained::SYN_COUNT.len()];
+    for (e, &g) in groups.iter().enumerate() {
+        first[g as usize].get_or_insert(e);
     }
-
-    assert_eq!(
-        groups.len(),
-        crate::pretrained::SYN_COUNT.len(),
-        "realised offset groups"
-    );
-    for (g, &n_syn) in groups.iter().enumerate() {
+    for (g, e) in first.iter().enumerate() {
+        let n_syn = n.edge_n_syn()[e.expect("every group has an edge")];
         let want = crate::pretrained::SYN_COUNT[g].exp();
         assert!(
             (want - n_syn).abs() <= 1e-6 * n_syn.max(1.0),

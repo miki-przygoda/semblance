@@ -163,3 +163,14 @@ pub(crate) fn load_pretrained_fixture(name: &str) -> Option<String> {
         }
     }
 }
+
+/// The real spec and its expansion, or `None` if the spec has not been
+/// fetched. Every gate that needs the real network builds it here.
+pub(crate) fn real_spec_and_network(
+) -> Option<(crate::spec::ConnectomeSpec, semblance_connectome::TypedNetwork)> {
+    let raw = load_real_spec()?;
+    let spec = crate::spec::ConnectomeSpec::from_json_str(&raw).expect("real spec must load");
+    let net = crate::expand::expand(&spec, crate::expand::DEFAULT_EXTENT, crate::expand::DEFAULT_N_SYN_FILL)
+        .expect("real spec must expand");
+    Some((spec, net))
+}
