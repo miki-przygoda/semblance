@@ -221,6 +221,9 @@ impl FileInfo {
         if bytes.len() != self.bytes {
             return Err(ReferenceError::ByteLength { file: self.name.clone(), expected: self.bytes, found: bytes.len() });
         }
+        // The fields are public, so a FileInfo need not have come from
+        // `Manifest::parse`; recheck the layout before slicing by it.
+        check_layout(self)?;
         self.blocks
             .iter()
             .find(|b| b.run == key.run && b.dt == key.dt && b.sequence == key.sequence)
@@ -459,6 +462,19 @@ mod tests {
 
     /// Every block of the two `settled` files reads at its stated shape, in
     /// the precision the file declares, from the real bytes.
+    #[test]
+    fn a_hand_built_file_info_is_checked_before_reading() {
+        let block = |offset, bytes, shape: Vec<usize>| Block { run: Some(0), dt: "a".into(), sequence: None, offset, bytes, shape };
+        let file = |bytes, dtype, b| FileInfo { name: "x.bin".into(), dtype, axes: vec!["n".into()], bytes, blocks: vec![b] };
+        let key = BlockKey { run: Some(0), dt: "a", sequence: None };
+        let overrun = file(4, Dtype::F32, block(0, 8, vec![2]));
+        assert_eq!(overrun.read_f32(&[0u8; 4], &key), Err(ReferenceError::BlockTotal { file: "x.bin".into(), expected: 4, found: 8 }));
+        let ragged = file(6, Dtype::F32, block(0, 6, vec![1]));
+        assert_eq!(ragged.read_f32(&[0u8; 6], &key), Err(ReferenceError::BlockShape { file: "x.bin".into(), block: 0 }));
+        let overrun64 = file(8, Dtype::F64, block(0, 16, vec![2]));
+        assert_eq!(overrun64.read_f64(&[0u8; 8], &key), Err(ReferenceError::BlockTotal { file: "x.bin".into(), expected: 8, found: 16 }));
+    }
+
     #[test]
     fn every_real_settled_block_reads_at_its_shape() {
         let Some(text) = load_reference_fixture("manifest.json") else { return };
