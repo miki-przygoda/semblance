@@ -29,6 +29,9 @@ mod test_support;
 pub mod stimuli;
 #[cfg(test)]
 mod stimuli_checks;
+pub mod syn_count_torch;
+#[cfg(test)]
+mod syn_count_torch_checks;
 pub mod wiring;
 
 pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
