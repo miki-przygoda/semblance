@@ -49,3 +49,13 @@ section 6, Failure handling and Done-when describe a user doing by hand.
 4. The generated header of `syn_count_torch.rs` records `exported <date>`, so
    regenerating on a later day changes the file even when every value is the
    same.
+
+## Head: acceptance and green branches brought in (2026-10-28)
+
+The acceptance and to-green agents committed on side branches
+(`temper/graded-settling/acceptance-*`, `green-1`) because `graded-settling`
+was checked out in the merge worktree. `green-1` carried all four acceptance
+commits plus the green fix, so the head fast-forwarded `graded-settling` to it
+(`8ac6f4c`, no merge commit, nothing forced). Full gate after: passed, 330
+tests, 0 failed, 69 s wall. CLAUDE.md's counts (279 tests, 52 skips) predate
+the acceptance tests and are re-measured before the PR.
