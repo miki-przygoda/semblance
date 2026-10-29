@@ -58,16 +58,15 @@ fn fixtures_required() -> bool {
     std::env::var("SEMBLANCE_REQUIRE_FIXTURES").is_ok_and(|v| v == "1")
 }
 
-fn read_fixture(rel: &str) -> Option<Vec<u8>> {
+/// The bytes of `data/<rel>`, or its missing-fixture notice (without the
+/// `skipping: ` that `fx` prints). Prints nothing, so a cached miss can be
+/// reported by every test that asks.
+fn read_fixture(rel: &str) -> Result<Vec<u8>, String> {
     let path = data_path(rel);
-    match std::fs::read(&path) {
-        Ok(b) => Some(b),
-        Err(_) => {
-            assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {} is missing", path.display());
-            eprintln!("skipping: {} not found; run ci/fetch-fixtures.sh", path.display());
-            None
-        }
-    }
+    std::fs::read(&path).map_err(|_| {
+        assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {} is missing", path.display());
+        format!("{} not found; run ci/fetch-fixtures.sh", path.display())
+    })
 }
 
 fn text(bytes: Vec<u8>) -> String {
@@ -87,10 +86,12 @@ struct Fx {
     bins: HashMap<&'static str, Vec<u8>>,
 }
 
-static FX: OnceLock<Option<Fx>> = OnceLock::new();
+static FX: OnceLock<Result<Fx, String>> = OnceLock::new();
 
+/// The shared fixture, built once, or `None` after printing
+/// `skipping: <notice>`: every test that finds it missing prints its own.
 fn fx() -> Option<&'static Fx> {
-    FX.get_or_init(|| {
+    let loaded = FX.get_or_init(|| {
         let spec_json = text(read_fixture(SPEC)?);
         let ensemble_csv = text(read_fixture(ENSEMBLE)?);
         let manifest_json = text(read_fixture(MANIFEST)?);
@@ -104,7 +105,7 @@ fn fx() -> Option<&'static Fx> {
         let groups = edge_syn_groups(&net).expect("2,355 groups");
         let mut inputs: Vec<u32> = input_nodes(&spec, &net).expect("input units are cell types").into_iter().flatten().collect();
         inputs.sort_unstable();
-        Some(Fx {
+        Ok(Fx {
             ensemble: Ensemble::parse(&ensemble_csv).expect("ensemble.csv parses"),
             manifest: Manifest::parse(&manifest_json).expect("manifest.json parses"),
             spec,
@@ -116,8 +117,14 @@ fn fx() -> Option<&'static Fx> {
             provenance,
             bins,
         })
-    })
-    .as_ref()
+    });
+    match loaded {
+        Ok(f) => Some(f),
+        Err(notice) => {
+            eprintln!("skipping: {notice}");
+            None
+        }
+    }
 }
 
 fn cell_type(net: &TypedNetwork, node: usize) -> &str {
@@ -246,6 +253,8 @@ fn max_err(a: &[f64], b: &[f64]) -> (f64, usize, usize) {
     let mut m = (0.0, 0, 0);
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
         let e = (x - y).abs();
+        // a NaN is an infinite error, not one `>` skips
+        let e = if e.is_nan() { f64::INFINITY } else { e };
         m.2 += usize::from(x != y);
         if e > m.0 {
             m.0 = e;
@@ -316,6 +325,14 @@ fn shadow() -> MutexGuard<'static, Option<Shadow>> {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join("acceptance-settling");
         let root = base.join("workspace");
         let ws = Path::new(WORKSPACE);
+        // Copy into an empty tree, so a source file deleted from the
+        // workspace is not still compiled here. The sibling target dir is
+        // kept. remove_dir_all removes data/'s symlinks, never their targets.
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("removing the old shadow {}: {e}", root.display()),
+        }
         std::fs::create_dir_all(&root).unwrap();
         for f in ["Cargo.toml", "Cargo.lock", "README.md"] {
             copy_if_changed(&ws.join(f), &root.join(f));
@@ -526,7 +543,7 @@ fn settling_04_a_libm_gate_prints_maxima_ratios_worst_types_and_bit_equal_count(
     assert_eq!((s.rust[node] - s.flyvis[node]).abs(), ms, "printed node holds the settled maximum: {line}");
     assert_eq!(field(line, &format!(" at node {node} ("), ')'), cell_type(&f.net, node), "{line}");
     let after_settled = &line[line.find(" at node ").unwrap()..];
-    assert_eq!(field(after_settled, "), ", ' '), format!("{:.3}", ms / bs), "settled ratio: {line}");
+    assert_eq!(field(after_settled, "), ", ' '), format!("{:.3e}", ms / bs), "settled ratio: {line}");
 
     // settling-centre maximum, its step and cell type, its ratio
     assert_eq!(field(line, "settling centre max ", ' '), format!("{mc:.3e}"), "{line}");
@@ -538,7 +555,7 @@ fn settling_04_a_libm_gate_prints_maxima_ratios_worst_types_and_bit_equal_count(
     });
     assert!(holds, "printed step and cell type hold the centre maximum: {line}");
     let after_centre = &line[line.find(" at step ").unwrap()..];
-    assert_eq!(field(after_centre, "), ", ' '), format!("{:.3}", mc / bc), "centre ratio: {line}");
+    assert_eq!(field(after_centre, "), ", ' '), format!("{:.3e}", mc / bc), "centre ratio: {line}");
 
     // the three cell types with the largest settled error
     let mut per_type: HashMap<&str, f64> = HashMap::new();

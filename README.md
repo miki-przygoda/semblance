@@ -46,11 +46,11 @@ Everything runs on a **synthetic** connectome out of the box, so you don't need 
 download anything to see the pipeline work. Wire in real data when you're ready
 (`RESOURCES.md` → "Getting the data").
 
-**Without fixture data, 66 flyvis parity tests skip and still report
+**Without fixture data, 123 flyvis parity tests skip and still report
 green.** They are the tests that prove this workspace reproduces flyvis. They
 read gitignored files under `data/`, and when those are absent each one passes,
-printing a skip notice (the settling gates share one fixture, so they print a
-single notice between them); libtest hides that notice for passing tests, so plain
+all but one printing a skip notice (SEQUENCES-08 runs a nested
+`cargo test` and prints none of its own); libtest hides that notice for passing tests, so plain
 `cargo test` looks the same either way. To see the skips, run
 `cargo test --workspace -- --nocapture`. To make a missing fixture a failure
 instead, set `SEMBLANCE_REQUIRE_FIXTURES=1`, as CI does.
@@ -69,8 +69,8 @@ from flyvis itself instead (Python, PyTorch), see `tools/README.md`.
 |-------|-------------------|------------------------------|
 | `rng` | `semblance-rng` — SplitMix64-seeded xoshiro256++, frozen stream pinned by test vectors | — |
 | `connectome` | graph type, CSR view, edge-list loader, synthetic generator; `TypedNetwork` — a realised network that keeps flyvis's parameter sharing (cell type per neuron, connection type per edge) instead of flattening it | load a real FlyWire/MaleCNS export |
-| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec and expands it exactly as flyvis builds it (45,669 neurons, 1,513,231 synapses, 604 connection types); carries the trained parameters, the curated ground truth, the three stimulus families (flashes, dots, moving edges), the 50-model trained ensemble, and flyvis's reference traces, all gated against flyvis's own output. Its settling gates run `sim`'s graded dynamics through flyvis's 1 s of grey and require every neuron's settled state to equal flyvis's bit for bit, for the best and worst trained models (000 and 049), at both time steps, in f32 and f64 | the input mapping and full-trace gate under stimulus (0.3.0, in progress) |
-| `sim` | graded dynamics (`semblance_sim::graded`): flyvis's passive point neurons, explicit Euler, f32 and f64, reproducing flyvis's settling bit for bit. Also an LIF spiking path, a placeholder to be replaced | sensory encoding + motor decoding |
+| `flyvis` | `semblance-flyvis` — reads the published flyvis connectome spec and expands it exactly as flyvis builds it (45,669 neurons, 1,513,231 synapses, 604 connection types); carries the trained parameters, the curated ground truth, the three stimulus families (flashes, dots, moving edges), the 50-model trained ensemble, and flyvis's reference traces, all gated against flyvis's own output. Its settling gates run `sim`'s graded dynamics through flyvis's 1 s of grey and require every neuron's settled state to equal flyvis's bit for bit, for the best and worst trained models (000 and 049), at both time steps, in f32 and f64. Its trace gates continue from that settled state through flyvis's flashes and moving edges, fed through the input mapping (`scatter_hexals`, gated on flyvis's lattice), and require every centre neuron at every frame, and every neuron at six snapshot frames, to equal flyvis's bit for bit | the result record (0.3.0, in progress) |
+| `sim` | graded dynamics (`semblance_sim::graded`): flyvis's passive point neurons, explicit Euler, f32 and f64, reproducing flyvis's settling and its traces under stimulus bit for bit. Also an LIF spiking path, a placeholder to be replaced | sensory encoding + motor decoding |
 | `codec` | `WeightCodec` — lossless baseline, directly evolvable | `ReducedCodec` — the actual compression (`todo!()`) |
 | `evo` | gaussian mutation + truncation selection + elitism, seedable | a real `Fitness` (environment + reward) |
 | `fidelity` | structural + behavioural distance, size-vs-fidelity curve harness | the **probe battery** design |
