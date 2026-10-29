@@ -123,7 +123,7 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 428 tests, 0 failures
+cargo test --workspace          # 429 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
@@ -138,17 +138,21 @@ writes `data/flyvis-reference/` and also the three height-80 `_h80`
 moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "428 passed, 0 failed" whether the data is present
+the suite reports the same "429 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`,
-and even then not one per skipped test. The settling and trace gates in the
-crate load their fixtures once (`crates/flyvis/src/gate_support.rs`,
-`trace_checks.rs`), but every one of those tests that finds one missing prints
-its own notice. The acceptance tests in `crates/flyvis/tests/acceptance_settling.rs`
-and `acceptance_traces.rs` share one lazily loaded fixture per file, so only
-the test that loads it prints the notice and the others skip silently; and a
-test that runs other tests in a child `cargo test`
-(`sequences_08_manifest_parse_its_tests_and_acceptance_reference_are_unchanged_and_pass`)
-prints none of its own. 32 of the 123 skip without a notice. Under
+and even then not quite one per skipped test. Fixtures loaded once and shared
+-- the settling and trace gates' (`crates/flyvis/src/gate_support.rs`,
+`trace_checks.rs`) and the acceptance tests' in
+`crates/flyvis/tests/acceptance_settling.rs` and `acceptance_traces.rs` --
+cache the miss, not the notice, so every test that finds one missing prints
+its own (`acceptance_traces.rs`'s
+`every_fixture_gated_acceptance_test_prints_its_own_skip_notice` holds the
+acceptance files to that). A test that reads more than one missing fixture
+prints more than one. The exception is a test that runs other tests in a child
+`cargo test`
+(`sequences_08_manifest_parse_its_tests_and_acceptance_reference_are_unchanged_and_pass`),
+which prints none of its own: 122 of the 123 print a notice, 134 notices in
+all under `--nocapture --test-threads=1`. Under
 `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 123 fails instead.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a

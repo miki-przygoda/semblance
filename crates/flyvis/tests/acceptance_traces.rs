@@ -70,16 +70,15 @@ fn fixtures_required() -> bool {
     std::env::var("SEMBLANCE_REQUIRE_FIXTURES").is_ok_and(|v| v == "1")
 }
 
-fn read_fixture(rel: &str) -> Option<Vec<u8>> {
+/// The bytes of `data/<rel>`, or its missing-fixture notice (without the
+/// `skipping: ` that `fx` prints). Prints nothing, so a cached miss can be
+/// reported by every test that asks.
+fn read_fixture(rel: &str) -> Result<Vec<u8>, String> {
     let path = data_path(rel);
-    match std::fs::read(&path) {
-        Ok(b) => Some(b),
-        Err(_) => {
-            assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {} is missing", path.display());
-            eprintln!("skipping: {} not found; run ci/fetch-fixtures.sh", path.display());
-            None
-        }
-    }
+    std::fs::read(&path).map_err(|_| {
+        assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {} is missing", path.display());
+        format!("{} not found; run ci/fetch-fixtures.sh", path.display())
+    })
 }
 
 fn text(bytes: Vec<u8>) -> String {
@@ -103,10 +102,12 @@ struct Fx {
     snapshots_f64: Vec<u8>,
 }
 
-static FX: OnceLock<Option<Fx>> = OnceLock::new();
+static FX: OnceLock<Result<Fx, String>> = OnceLock::new();
 
+/// The shared fixture, built once, or `None` after printing
+/// `skipping: <notice>`: every test that finds it missing prints its own.
 fn fx() -> Option<&'static Fx> {
-    FX.get_or_init(|| {
+    let loaded = FX.get_or_init(|| {
         let spec_json = text(read_fixture(SPEC)?);
         let ensemble_csv = text(read_fixture(ENSEMBLE)?);
         let manifest_json = text(read_fixture(MANIFEST)?);
@@ -123,7 +124,7 @@ fn fx() -> Option<&'static Fx> {
         let net = expand(&spec, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL).expect("real spec expands");
         let groups = edge_syn_groups(&net).expect("2,355 groups");
         let inputs = input_nodes(&spec, &net).expect("input units are cell types");
-        Some(Fx {
+        Ok(Fx {
             ensemble: Ensemble::parse(&ensemble_csv).expect("ensemble.csv parses"),
             manifest: Manifest::parse(&manifest_json).expect("manifest.json parses"),
             sequences: parse_sequences(&manifest_json).expect("manifest.json's sequences parse"),
@@ -138,8 +139,14 @@ fn fx() -> Option<&'static Fx> {
             snapshots_f32,
             snapshots_f64,
         })
-    })
-    .as_ref()
+    });
+    match loaded {
+        Ok(f) => Some(f),
+        Err(notice) => {
+            eprintln!("skipping: {notice}");
+            None
+        }
+    }
 }
 
 fn cell_type(net: &TypedNetwork, node: usize) -> &str {
@@ -1572,5 +1579,64 @@ fn traces_23_sim_and_flyvis_build_at_opt_level_3_without_fast_math_and_stay_exac
     for name in ["trace_exact_run_2_000_1_50_f32", "trace_exact_run_3_000_1_50_f64"] {
         let out = sh.gate(&tc(name), true);
         assert!(out.passed && out.output.contains("12 of 12 sequences bit-equal"), "{name}:\n{}", out.output);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fix test-strength-and-docs-02: one skip notice per fixture-gated test
+// ---------------------------------------------------------------------------
+
+/// Set in the child run below, so this test does not run itself again there.
+const NOTICE_CHILD: &str = "SEMBLANCE_SKIP_NOTICE_CHILD";
+
+/// What a fixture-gated acceptance test calls to get its shared fixture.
+const GATE_CALL: &str = "fx()";
+
+/// The `#[test]`s in `src` whose body asks for the shared fixture.
+fn fixture_gated_tests(src: &str) -> Vec<String> {
+    src.split("#[test]\nfn ")
+        .skip(1)
+        .filter_map(|chunk| {
+            let name = &chunk[..chunk.find('(').unwrap()];
+            let body = &chunk[..chunk.find("\n}\n").unwrap_or(chunk.len())];
+            body.contains(GATE_CALL).then(|| name.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn every_fixture_gated_acceptance_test_prints_its_own_skip_notice() {
+    if std::env::var_os(NOTICE_CHILD).is_some() {
+        return;
+    }
+    let guard = shadow();
+    let sh = guard.as_ref().unwrap();
+    // No fixtures at all.
+    let data = sh.root.join("data");
+    if data.symlink_metadata().is_ok() {
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+    std::fs::create_dir_all(&data).unwrap();
+    for file in ["acceptance_traces", "acceptance_settling"] {
+        let src = std::fs::read_to_string(sh.root.join(format!("crates/flyvis/tests/{file}.rs"))).unwrap();
+        let gated = fixture_gated_tests(&src);
+        assert!(gated.len() >= 10, "{file}: fixture-gated tests found: {gated:?}");
+        let out = sh
+            .cargo()
+            .args(["test", "-p", "semblance-flyvis", "--test", file, "--locked", "--offline", "--"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(NOTICE_CHILD, "1")
+            .env_remove("SEMBLANCE_REQUIRE_FIXTURES")
+            .output()
+            .expect("cargo runs");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{file} without data must skip and pass:\n{stdout}{stderr}");
+        let notices = stderr.lines().filter(|l| l.starts_with("skipping: ")).count();
+        assert_eq!(
+            notices,
+            gated.len(),
+            "{file}: one `skipping:` notice per fixture-gated test ({gated:?}):\n{stdout}{stderr}"
+        );
     }
 }

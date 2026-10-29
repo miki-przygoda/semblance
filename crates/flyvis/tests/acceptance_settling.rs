@@ -58,16 +58,15 @@ fn fixtures_required() -> bool {
     std::env::var("SEMBLANCE_REQUIRE_FIXTURES").is_ok_and(|v| v == "1")
 }
 
-fn read_fixture(rel: &str) -> Option<Vec<u8>> {
+/// The bytes of `data/<rel>`, or its missing-fixture notice (without the
+/// `skipping: ` that `fx` prints). Prints nothing, so a cached miss can be
+/// reported by every test that asks.
+fn read_fixture(rel: &str) -> Result<Vec<u8>, String> {
     let path = data_path(rel);
-    match std::fs::read(&path) {
-        Ok(b) => Some(b),
-        Err(_) => {
-            assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {} is missing", path.display());
-            eprintln!("skipping: {} not found; run ci/fetch-fixtures.sh", path.display());
-            None
-        }
-    }
+    std::fs::read(&path).map_err(|_| {
+        assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {} is missing", path.display());
+        format!("{} not found; run ci/fetch-fixtures.sh", path.display())
+    })
 }
 
 fn text(bytes: Vec<u8>) -> String {
@@ -87,10 +86,12 @@ struct Fx {
     bins: HashMap<&'static str, Vec<u8>>,
 }
 
-static FX: OnceLock<Option<Fx>> = OnceLock::new();
+static FX: OnceLock<Result<Fx, String>> = OnceLock::new();
 
+/// The shared fixture, built once, or `None` after printing
+/// `skipping: <notice>`: every test that finds it missing prints its own.
 fn fx() -> Option<&'static Fx> {
-    FX.get_or_init(|| {
+    let loaded = FX.get_or_init(|| {
         let spec_json = text(read_fixture(SPEC)?);
         let ensemble_csv = text(read_fixture(ENSEMBLE)?);
         let manifest_json = text(read_fixture(MANIFEST)?);
@@ -104,7 +105,7 @@ fn fx() -> Option<&'static Fx> {
         let groups = edge_syn_groups(&net).expect("2,355 groups");
         let mut inputs: Vec<u32> = input_nodes(&spec, &net).expect("input units are cell types").into_iter().flatten().collect();
         inputs.sort_unstable();
-        Some(Fx {
+        Ok(Fx {
             ensemble: Ensemble::parse(&ensemble_csv).expect("ensemble.csv parses"),
             manifest: Manifest::parse(&manifest_json).expect("manifest.json parses"),
             spec,
@@ -116,8 +117,14 @@ fn fx() -> Option<&'static Fx> {
             provenance,
             bins,
         })
-    })
-    .as_ref()
+    });
+    match loaded {
+        Ok(f) => Some(f),
+        Err(notice) => {
+            eprintln!("skipping: {notice}");
+            None
+        }
+    }
 }
 
 fn cell_type(net: &TypedNetwork, node: usize) -> &str {
