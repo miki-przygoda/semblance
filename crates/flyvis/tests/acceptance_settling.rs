@@ -246,6 +246,8 @@ fn max_err(a: &[f64], b: &[f64]) -> (f64, usize, usize) {
     let mut m = (0.0, 0, 0);
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
         let e = (x - y).abs();
+        // a NaN is an infinite error, not one `>` skips
+        let e = if e.is_nan() { f64::INFINITY } else { e };
         m.2 += usize::from(x != y);
         if e > m.0 {
             m.0 = e;
@@ -316,6 +318,14 @@ fn shadow() -> MutexGuard<'static, Option<Shadow>> {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join("acceptance-settling");
         let root = base.join("workspace");
         let ws = Path::new(WORKSPACE);
+        // Copy into an empty tree, so a source file deleted from the
+        // workspace is not still compiled here. The sibling target dir is
+        // kept. remove_dir_all removes data/'s symlinks, never their targets.
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("removing the old shadow {}: {e}", root.display()),
+        }
         std::fs::create_dir_all(&root).unwrap();
         for f in ["Cargo.toml", "Cargo.lock", "README.md"] {
             copy_if_changed(&ws.join(f), &root.join(f));
@@ -526,7 +536,7 @@ fn settling_04_a_libm_gate_prints_maxima_ratios_worst_types_and_bit_equal_count(
     assert_eq!((s.rust[node] - s.flyvis[node]).abs(), ms, "printed node holds the settled maximum: {line}");
     assert_eq!(field(line, &format!(" at node {node} ("), ')'), cell_type(&f.net, node), "{line}");
     let after_settled = &line[line.find(" at node ").unwrap()..];
-    assert_eq!(field(after_settled, "), ", ' '), format!("{:.3}", ms / bs), "settled ratio: {line}");
+    assert_eq!(field(after_settled, "), ", ' '), format!("{:.3e}", ms / bs), "settled ratio: {line}");
 
     // settling-centre maximum, its step and cell type, its ratio
     assert_eq!(field(line, "settling centre max ", ' '), format!("{mc:.3e}"), "{line}");
@@ -538,7 +548,7 @@ fn settling_04_a_libm_gate_prints_maxima_ratios_worst_types_and_bit_equal_count(
     });
     assert!(holds, "printed step and cell type hold the centre maximum: {line}");
     let after_centre = &line[line.find(" at step ").unwrap()..];
-    assert_eq!(field(after_centre, "), ", ' '), format!("{:.3}", mc / bc), "centre ratio: {line}");
+    assert_eq!(field(after_centre, "), ", ' '), format!("{:.3e}", mc / bc), "centre ratio: {line}");
 
     // the three cell types with the largest settled error
     let mut per_type: HashMap<&str, f64> = HashMap::new();

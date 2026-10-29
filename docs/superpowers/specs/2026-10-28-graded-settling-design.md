@@ -678,3 +678,16 @@ integrator is not otherwise optimised (epic: scale is a non-issue here).
   epic's local task file.
 - `CLAUDE.md`, `README.md` and `tools/README.md` are updated per section 7.
 - CI passes on the PR (self-hosted runner). Merge waits for the owner.
+
+## Amendment (2026-10-29): what the integer-count control resolves
+
+A wording correction, recorded under the stimulus-traces spec
+([`2026-10-28-stimulus-traces-design.md`](2026-10-28-stimulus-traces-design.md),
+ruling R4, item (h)). No assertion changes.
+
+Section 6 says `the_gate_resolves_integer_counts` shows that "the libm bound
+resolves the class of error it exists to catch". That holds for the f64
+bound, which is the one the control runs against (run 3, model 000, dt 0.02,
+f64). It does not hold for the f32 bound: in 3 of the 4 f32 runs, integer
+counts stay within twice flyvis's f32/f64 gap. In f32, the exact gate is what
+guards against integer counts. The test's doc comment says the same.

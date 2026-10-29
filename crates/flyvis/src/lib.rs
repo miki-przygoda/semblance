@@ -16,6 +16,8 @@ pub mod ensemble;
 pub mod expand;
 #[cfg(test)]
 mod expand_checks;
+#[cfg(test)]
+mod gate_support;
 pub mod hex_eye;
 pub mod moving_edge;
 #[cfg(test)]
