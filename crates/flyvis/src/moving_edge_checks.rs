@@ -56,7 +56,7 @@ const GATE_ANGLES: [i32; 4] = [0, 30, 90, 150];
 /// offsets -10/3/10) sees only 39 such hexals; both figures are correct for
 /// what they measured, but this gate's assertion message will cite the first
 /// angle in `GATE_ANGLES` order to exceed `TOLERANCE`, not the worst one.
-const TOLERANCE: f64 = 0.005;
+pub(crate) const TOLERANCE: f64 = 0.005;
 
 fn f32s(bytes: &[u8]) -> Vec<f32> {
     bytes

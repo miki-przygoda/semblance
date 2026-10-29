@@ -441,6 +441,17 @@ impl MovingEdge {
         self.decode(sequence).map(|(_, _, s)| self.timing[s].n_valid)
     }
 
+    /// The sweep's frames, `[first, end)` counting from frame zero: the
+    /// background before it is `0..first`, and the held final frame follows
+    /// from `end` to [`valid_frames`](Self::valid_frames). `None` for a
+    /// sequence that does not exist.
+    pub fn stimulus_frames(&self, sequence: usize) -> Option<(usize, usize)> {
+        self.decode(sequence).map(|(_, _, s)| {
+            let t = self.timing[s];
+            (t.n_pre, t.n_pre + t.n_stim)
+        })
+    }
+
     /// Which offset position a swept frame selects, counting from the first
     /// swept frame. `None` past the end of the sweep.
     pub fn resample_index(&self, sequence: usize, swept_frame: usize) -> Option<usize> {
@@ -1008,6 +1019,29 @@ mod tests {
         assert_eq!(e.first_frame_selecting(0, 20), Some(200 + 677));
         assert_eq!(e.first_frame_selecting(0, 21), None, "there is no offset index 21");
         assert_eq!(e.first_frame_selecting(144, 0), None, "no such sequence");
+    }
+
+    /// The window is `[n_pre, n_pre + n_stim)`, where the frames themselves
+    /// change: background before it, the held last swept frame after it.
+    #[test]
+    fn stimulus_frames_is_the_sweeps_window() {
+        let e = edge_for(vec![0]);
+        // Speed 2.4 sweeps 678 frames, speed 13 125, speed 25 65; all after 200.
+        assert_eq!(e.stimulus_frames(0), Some((200, 878)));
+        assert_eq!(e.stimulus_frames(3), Some((200, 325)));
+        assert_eq!(e.stimulus_frames(5), Some((200, 265)));
+        assert_eq!(e.stimulus_frames(12), None, "no such sequence");
+        for s in 0..12 {
+            let (start, end) = e.stimulus_frames(s).unwrap();
+            assert_eq!(e.first_frame_selecting(s, 0), Some(start), "sequence {s}");
+            assert_eq!(e.resample_index(s, end - start - 1), Some(20), "sequence {s}: the last swept frame");
+            assert_eq!(e.resample_index(s, end - start), None, "sequence {s}: past the sweep");
+        }
+        let (mut before, mut first) = (vec![0.0f32; 721], vec![0.0f32; 721]);
+        e.frame_into(3, 199, &mut before).unwrap();
+        e.frame_into(3, 200, &mut first).unwrap();
+        assert!(before.iter().all(|&x| x == 0.5), "frame 199 is background");
+        assert!(first.iter().any(|&x| x != 0.5), "frame 200 is swept");
     }
 
     /// A background hexal reads exactly 0.5 here. flyvis reads 127/255 =
