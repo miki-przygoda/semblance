@@ -137,8 +137,10 @@ impl<R: Real> Graded<R> {
     pub fn new(net: &TypedNetwork, params: &GradedParams<R>, dt: f64) -> Result<Self, GradedError> {
         // The floor and the f32 step use f32(dt), so that must be a positive
         // normal f32: a dt that rounds to 0 or overflows in f32 would make
-        // inv_tau 1/0 or 1/inf, and a subnormal one's reciprocal overflows
-        // f32. `is_normal` accepts negatives, so `> 0.0` stays.
+        // inv_tau 1/0 or 1/inf. A subnormal one has already lost precision
+        // in the cast, and below about 2.94e-39 (1 / f32::MAX) its
+        // reciprocal overflows f32 as well. `is_normal` accepts negatives,
+        // so `> 0.0` stays.
         let dt32 = dt as f32;
         if !(dt.is_finite() && dt > 0.0 && dt32.is_normal() && dt32 > 0.0) {
             return Err(GradedError::BadDt(dt));
@@ -484,8 +486,8 @@ mod tests {
                 assert_eq!(Graded::<f32>::new(&net, &p32, dt).map(|_| ()), Err(GradedError::BadDt(dt)), "f32 dt {dt}");
             }
         }
-        // The smallest positive f32 is subnormal, and its reciprocal
-        // overflows f32: refused in both precisions.
+        // The smallest positive f32 is subnormal: refused in both
+        // precisions. (Its reciprocal, about 7.1e44, also overflows f32.)
         let tiny = f64::from(f32::from_bits(1));
         let p = GradedParams { bias: &[0.5], time_const: &[0.0], syn_strength: &[], edge_syn_count: &[] };
         assert_eq!(Graded::<f64>::new(&net, &p, tiny).map(|_| ()), Err(GradedError::BadDt(tiny)));
@@ -493,9 +495,11 @@ mod tests {
         assert_eq!(Graded::<f32>::new(&net, &p32, tiny).map(|_| ()), Err(GradedError::BadDt(tiny)));
     }
 
-    /// Below the smallest normal f32 the floor's reciprocal overflows f32, so
-    /// such a dt is refused in both precisions. The smallest normal f32 is
-    /// accepted: its reciprocal, about 8.5e37, is finite.
+    /// A dt that is subnormal in f32 is refused in both precisions, because
+    /// the cast has lost precision -- not because of overflow: half the
+    /// smallest normal f32 has a reciprocal of about 1.7e38, finite in f32.
+    /// Only below about 2.94e-39 does the reciprocal overflow. The smallest
+    /// normal f32 is accepted: its reciprocal, about 8.5e37, is finite.
     #[test]
     fn refuses_a_dt_that_is_subnormal_in_f32() {
         let net = network(&[0], 1, &[], &[]);
