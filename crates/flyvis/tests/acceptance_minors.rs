@@ -18,10 +18,11 @@
 //! (MINORS-02, -05, -12, -15), these tests check what the current tree does
 //! or contains; whether it matches the earlier commit is a review-time check.
 //!
-//! MINORS-05 reruns `tools/export_syn_count.py` on a scratch copy of the
-//! paths it reads and writes; it skips when the tools' Python environment or
-//! flyvis's checkpoints are absent, whatever `SEMBLANCE_REQUIRE_FIXTURES`
-//! says, because neither is a fixture CI fetches.
+//! No test runs Python or anything under `tools/` (CLAUDE.md: no crate
+//! invokes `tools/`). MINORS-05 checks only the tree: the committed
+//! `syn_count_torch.rs` and its exporter carry no date. Rerunning
+//! `tools/export_syn_count.py` and diffing its output is an owner step, in
+//! `docs/superpowers/temper/stimulus-traces/owner-steps.sh`.
 //!
 //! Everything else that needs the real fixtures skips without them, unless
 //! `SEMBLANCE_REQUIRE_FIXTURES=1`, which turns a skip into a failure.
@@ -495,21 +496,22 @@ fn minors_04_libm_ratios_are_printed_in_scientific_notation() {
 // MINORS-05
 // ---------------------------------------------------------------------------
 
-/// The tools' Python: `SEMBLANCE_TOOLS_PYTHON`, else `tools/.venv` beside
-/// this workspace or beside the checkout `data/` really lives in.
-fn tools_python() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("SEMBLANCE_TOOLS_PYTHON") {
-        return Some(PathBuf::from(p));
+/// Every `.rs` file under `crates/`, skipping build output.
+fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n != "target") {
+                rust_sources(&path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
     }
-    let mut roots = vec![PathBuf::from(WORKSPACE)];
-    if let Ok(real) = std::fs::canonicalize(Path::new(WORKSPACE).join("data")) {
-        roots.push(real.parent().unwrap().to_path_buf());
-    }
-    roots.into_iter().map(|r| r.join("tools/.venv/bin/python")).find(|p| p.exists())
 }
 
 #[test]
-fn minors_05_regenerating_syn_count_torch_leaves_it_byte_for_byte_and_undated() {
+fn minors_05_syn_count_torch_is_undated_and_no_rust_source_runs_its_exporter() {
     const OUT: &str = "crates/flyvis/src/syn_count_torch.rs";
     let committed = read_source(OUT);
     let header: Vec<&str> = committed.lines().take_while(|l| l.starts_with("//!")).collect();
@@ -525,33 +527,33 @@ fn minors_05_regenerating_syn_count_torch_leaves_it_byte_for_byte_and_undated() 
     let script = read_source("tools/export_syn_count.py");
     assert!(!script.contains("datetime") && !script.contains("exported"), "the script writes no date");
 
-    // Rerun the script on a scratch copy of what it reads and writes.
-    let checkpoints = ["000", "049"].map(|m| data_path(&format!("flyvis-pretrained/results/flow/0000/{m}/chkpts/chkpt_00000")));
-    let Some(python) = tools_python() else {
-        eprintln!("skipping the rerun: no tools/.venv (or SEMBLANCE_TOOLS_PYTHON) with flyvis and torch");
-        return;
-    };
-    if let Some(c) = checkpoints.iter().find(|c| !c.exists()) {
-        eprintln!("skipping the rerun: {} not found; run tools/download_pretrained.py", c.display());
-        return;
+    // CLAUDE.md: no crate invokes `tools/`, so the byte-for-byte rerun is an
+    // owner step (docs/superpowers/temper/stimulus-traces/owner-steps.sh),
+    // and no Rust source, tests included, starts a process other than cargo
+    // or looks for the tools' Python.
+    let mut files = Vec::new();
+    rust_sources(&Path::new(WORKSPACE).join("crates"), &mut files);
+    assert!(!files.is_empty());
+    // Built from pieces so this test does not match itself.
+    let venv = [".venv", "/bin/"].concat();
+    let env_var = ["SEMBLANCE_", "TOOLS_PYTHON"].concat();
+    let spawn = ["Command", "::new("].concat();
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains(&venv), "{} looks for a Python virtualenv", path.display());
+        assert!(!text.contains(&env_var), "{} reads {env_var}", path.display());
+        for (i, line) in text.lines().enumerate() {
+            if let Some(at) = line.find(&spawn) {
+                let arg = &line[at + spawn.len()..];
+                assert!(
+                    arg.starts_with("cargo") || arg.starts_with("option_env!(\"CARGO\")"),
+                    "{}:{} starts a process other than cargo: {line}",
+                    path.display(),
+                    i + 1
+                );
+            }
+        }
     }
-    let root = tmp("export-syn-count");
-    remove_tree(&root);
-    std::fs::create_dir_all(root.join("tools")).unwrap();
-    std::fs::create_dir_all(root.join("crates/flyvis/src")).unwrap();
-    for f in ["tools/export_syn_count.py", "tools/export_reference.py", "crates/flyvis/src/pretrained.rs"] {
-        std::fs::copy(Path::new(WORKSPACE).join(f), root.join(f)).unwrap();
-    }
-    link(&std::fs::canonicalize(Path::new(WORKSPACE).join("data")).unwrap(), &root.join("data"));
-    let out = Command::new(&python).arg("-B").arg(root.join("tools/export_syn_count.py")).output().expect("python runs");
-    let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if !out.status.success() && log.contains("ModuleNotFoundError") {
-        eprintln!("skipping the rerun: {} lacks flyvis or torch:\n{log}", python.display());
-        return;
-    }
-    assert!(out.status.success(), "export_syn_count.py must succeed:\n{log}");
-    let regenerated = std::fs::read_to_string(root.join(OUT)).expect("the script wrote its output");
-    assert!(regenerated == committed, "a rerun must rewrite {OUT} byte for byte:\n{log}");
 }
 
 // ---------------------------------------------------------------------------
