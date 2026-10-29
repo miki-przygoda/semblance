@@ -27,16 +27,12 @@
 //! thin wrappers over it, and keep their names and their printed strings.
 
 use crate::gate_support::fixture;
-use crate::json;
-use crate::parity::{self, cell_type, settle, settling_bounds, Counts, Precision, CONTROL_MISS, F64_BOUND};
+use crate::parity::{
+    self, cell_type, check_settling_gaps, settle, settling_bounds, Counts, Precision, CONTROL_MISS, F64_BOUND,
+};
 use crate::pretrained::CELL_TYPES;
-use crate::reference::Dtype;
+use crate::reference::{Dtype, Provenance};
 use crate::test_support::load_reference_fixture;
-
-// The registered gaps, `parity::SETTLING_F32_GAPS`: (model, dt, settled,
-// settling_centre). `pre_registered_bounds_match_provenance` pins them to
-// the file.
-use crate::parity::SETTLING_F32_GAPS as F32_GAPS;
 
 /// The test's name says which precision it runs; the registry must agree.
 fn assert_registered<R: Precision>(run: u32) {
@@ -146,16 +142,8 @@ fn reference_runs_are_the_eight_expected() {
 #[test]
 fn pre_registered_bounds_match_provenance() {
     let Some(text) = load_reference_fixture("PROVENANCE.json") else { return };
-    let root = json::parse(&text).expect("PROVENANCE.json must parse");
-    let gaps = root.get("f32_f64_gap").expect("PROVENANCE.json has f32_f64_gap");
-    for &(model, dt, settled, centre) in &F32_GAPS {
-        let key = format!("{model} {dt}");
-        let g = gaps.get(&key).unwrap_or_else(|| panic!("no gap for {key}"));
-        for (name, want) in [("settled", settled), ("settling_centre", centre)] {
-            let got = g.get(name).and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("{key} {name}"));
-            assert_eq!(got.to_bits(), want.to_bits(), "{key} {name}: PROVENANCE {got:e}, gate {want:e}");
-        }
-    }
+    let p = Provenance::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+    check_settling_gaps(&p).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// A control: the wrong model's parameters, against run 3's reference

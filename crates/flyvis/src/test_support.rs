@@ -42,6 +42,24 @@ fn missing(path: &str, rel: &str) -> String {
     format!("{path} not found. {}", crate::parity::how_to_get(rel))
 }
 
+/// The workspace's `data/` directory, the same one `data_path` names.
+pub(crate) fn data_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}/../../data", env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Whether every file in `rels` is present under `data/`, by metadata only:
+/// `Err` of the first absent one's notice, unprinted. Under
+/// `SEMBLANCE_REQUIRE_FIXTURES=1` an absent file panics instead.
+pub(crate) fn require_present(rels: &[&str]) -> Result<(), String> {
+    for rel in rels {
+        let path = data_path(rel);
+        if std::fs::metadata(&path).is_err() {
+            return Err(missing(&path, rel));
+        }
+    }
+    Ok(())
+}
+
 /// The bytes of `data/<rel>`, or its missing-fixture notice. Prints nothing.
 pub(crate) fn read_fixture_bytes(rel: &str) -> Result<Vec<u8>, String> {
     let path = data_path(rel);
