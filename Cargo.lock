@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "semblance"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-codec",
  "semblance-connectome",
@@ -16,21 +16,21 @@ dependencies = [
 
 [[package]]
 name = "semblance-codec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-connectome",
 ]
 
 [[package]]
 name = "semblance-connectome"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-rng",
 ]
 
 [[package]]
 name = "semblance-evo"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-codec",
  "semblance-rng",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "semblance-fidelity"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-codec",
  "semblance-connectome",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "semblance-flyvis"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-connectome",
  "semblance-sim",
@@ -55,11 +55,11 @@ dependencies = [
 
 [[package]]
 name = "semblance-rng"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "semblance-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "semblance-connectome",
 ]
