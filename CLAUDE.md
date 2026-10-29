@@ -123,12 +123,12 @@ a real implementation ships, `cargo yank` that version.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 373 tests, 0 failures
+cargo test --workspace          # 428 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 ```
 
-90 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
+123 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
 `data/flyvis-stimuli/`, `data/flyvis-reference/` and
 `data/flyvis-pretrained/ensemble.csv` are absent (all five are gitignored
 real-data; the first is fetched per `RESOURCES.md`, the next two produced by
@@ -138,12 +138,18 @@ writes `data/flyvis-reference/` and also the three height-80 `_h80`
 moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "373 passed, 0 failed" whether the data is present
+the suite reports the same "428 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`,
-one per skipped test: the settling and trace gates load their fixtures once
-(`crates/flyvis/src/gate_support.rs`, `trace_checks.rs`), but every test that
-finds one missing prints its own notice. Under `SEMBLANCE_REQUIRE_FIXTURES=1`
-every one of them fails instead.
+and even then not one per skipped test. The settling and trace gates in the
+crate load their fixtures once (`crates/flyvis/src/gate_support.rs`,
+`trace_checks.rs`), but every one of those tests that finds one missing prints
+its own notice. The acceptance tests in `crates/flyvis/tests/acceptance_settling.rs`
+and `acceptance_traces.rs` share one lazily loaded fixture per file, so only
+the test that loads it prints the notice and the others skip silently; and a
+test that runs other tests in a child `cargo test`
+(`sequences_08_manifest_parse_its_tests_and_acceptance_reference_are_unchanged_and_pass`)
+prints none of its own. 32 of the 123 skip without a notice. Under
+`SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 123 fails instead.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
 hard failure instead — CI sets this (`.github/workflows/ci.yml`); anywhere else

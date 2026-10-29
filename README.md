@@ -46,10 +46,11 @@ Everything runs on a **synthetic** connectome out of the box, so you don't need 
 download anything to see the pipeline work. Wire in real data when you're ready
 (`RESOURCES.md` → "Getting the data").
 
-**Without fixture data, 90 flyvis parity tests skip and still report
+**Without fixture data, 123 flyvis parity tests skip and still report
 green.** They are the tests that prove this workspace reproduces flyvis. They
 read gitignored files under `data/`, and when those are absent each one passes,
-printing a skip notice; libtest hides that notice for passing tests, so plain
+most printing a skip notice (tests that share a fixture print one between
+them); libtest hides that notice for passing tests, so plain
 `cargo test` looks the same either way. To see the skips, run
 `cargo test --workspace -- --nocapture`. To make a missing fixture a failure
 instead, set `SEMBLANCE_REQUIRE_FIXTURES=1`, as CI does.
