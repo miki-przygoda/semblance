@@ -725,16 +725,9 @@ fn minors_15_settling_and_stimulus_gate_results_are_unchanged() {
         assert!(!x.output.contains("running 0 tests"), "{module} ran no tests:\n{}", x.output);
     }
 
-    // The trace gates (with the stimulus checks beside them) are new in this
-    // epic, so they have no earlier result: with the fixes they must pass,
-    // and every exact trace gate must find nothing differing.
-    let t = now.all("trace_checks::", true);
-    assert!(t.passed && t.output.contains("test result: ok."), "the trace gates pass:\n{}", t.output);
-    let exact: Vec<&str> = t.output.lines().filter(|l| l.starts_with("trace exact run ")).collect();
-    assert_eq!(exact.len(), 8, "the eight exact trace gates print their results:\n{}", t.output);
-    for l in exact {
-        let (equal, total) = field(l, "): ", ' ').parse::<usize>().ok().zip(field(l, " of ", ' ').parse::<usize>().ok()).expect("counts");
-        assert!(equal == total && total > 0, "every sequence bit-equal: {l}");
-    }
-    assert_eq!(t.output.lines().filter(|l| l.starts_with("trace libm run ")).count(), 8, "{}", t.output);
+    // The trace gates are not re-run here (spec P1, docs/superpowers/specs/
+    // 2026-10-29-flyvis-parity-validate-design.md, section 8): all 22 run
+    // directly in the same suite under SEMBLANCE_REQUIRE_FIXTURES=1, TRACES-06
+    // requires every exact line in its `12 of 12` form, and the parity record
+    // test compares every trace number `semblance validate` prints.
 }

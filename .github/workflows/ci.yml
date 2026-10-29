@@ -35,12 +35,14 @@ jobs:
           rustup toolchain install 1.97 --profile minimal --component clippy
           rustup override set 1.97
 
+      # `target` is not cached (spec P4): a fresh checkout makes every path
+      # dependency dirty, and every shadow test re-copies its sources, so a
+      # restored target never saved a build and its upload cost 25 s.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: cargo-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: cargo-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
