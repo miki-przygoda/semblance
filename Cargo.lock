@@ -10,6 +10,7 @@ dependencies = [
  "semblance-connectome",
  "semblance-evo",
  "semblance-fidelity",
+ "semblance-flyvis",
  "semblance-sim",
 ]
 

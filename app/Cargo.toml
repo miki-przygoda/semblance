@@ -10,7 +10,9 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../README.md"
-description = "CLI that wires the pipeline together: simulate, round-trip, and evolve. Dependency-light (std arg parsing) on purpose."
+description = "CLI that wires the pipeline together: simulate, round-trip, evolve, and validate parity with flyvis. Std-only argument parsing."
+# The tests read the workspace's docs/ and data/, which no package carries.
+exclude = ["tests/"]
 
 [[bin]]
 name = "semblance"
@@ -22,3 +24,4 @@ semblance-sim.workspace = true
 semblance-codec.workspace = true
 semblance-evo.workspace = true
 semblance-fidelity.workspace = true
+semblance-flyvis.workspace = true
