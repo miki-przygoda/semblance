@@ -191,19 +191,21 @@ fn sequences_03_arg_and_frames_look_up_by_name_or_return_none() {
         r#""1/200":{"n_frames":600,"stimulus_frames":[200,400],"snapshot_frames":[0,119,239,359,479,599]},"#,
         "",
     );
-    // Whether parse_sequences accepts this is SEQUENCES-04's question; when
-    // it does, the absent dt must read as None.
-    if let Ok(q) = parse_sequences(&only_50) {
-        assert_eq!(q[0].frames("1/200"), None);
-        assert!(q[0].frames("1/50").is_some());
-    }
+    // parse_sequences accepts this (SEQUENCES-04, spec section 2); the absent
+    // dt reads as None.
+    let q = parse_sequences(&only_50).expect("a missing dt entry is left to the content check");
+    assert_eq!(q[0].frames("1/200"), None);
+    assert!(q[0].frames("1/50").is_some());
 }
 
-/// SEQUENCES-04: a missing listed field, a wrongly typed field, or a missing
-/// dt entry is a `ReferenceError`.
+/// SEQUENCES-04: a missing listed field or a wrongly typed field is a
+/// `ReferenceError`. A missing dt entry is not a parser rule: the design spec
+/// (section 2, "The content checks (12 sequences, indices 0-11, every dt id
+/// present, 6 snapshots each) are a fixture test on the real manifest, not
+/// parser rules") puts it in the content check on the real manifest, so
+/// `parse_sequences` accepts it and the absent dt reads as `None`.
 #[test]
-#[ignore = "acceptance-failing: SEQUENCES-04"]
-fn sequences_04_a_missing_or_mistyped_field_or_a_missing_dt_entry_is_an_error() {
+fn sequences_04_a_missing_or_mistyped_field_is_an_error() {
     use ReferenceError::{Missing, WrongType};
 
     // Missing fields.
@@ -240,20 +242,26 @@ fn sequences_04_a_missing_or_mistyped_field_or_a_missing_dt_entry_is_an_error() 
     assert_eq!(refused(r#"{"sequences":{}}"#, "sequences not a list"), WrongType("manifest.sequences".into()));
     assert!(matches!(refused("{", "not JSON"), ReferenceError::Json { .. }));
 
-    // A missing dt entry: the first sequence has no 1/200 layout, while the
-    // second has both.
+    // A missing dt entry is structurally valid (spec section 2: "every dt id
+    // present" is a content check, not a parser rule): the first sequence has
+    // no 1/200 layout while the second has both, and it parses, with the
+    // absent dt reading as None.
     let only_50 = edit(
         r#""1/200":{"n_frames":600,"stimulus_frames":[200,400],"snapshot_frames":[0,119,239,359,479,599]},"#,
         "",
     );
-    refused(&only_50, "a sequence missing a dt entry");
-    // And with no dt entries at all.
+    let q = parse_sequences(&only_50).expect("a missing dt entry is left to the content check");
+    assert_eq!(q[0].frames("1/200"), None);
+    assert!(q[0].frames("1/50").is_some());
+    assert!(q[1].frames("1/200").is_some() && q[1].frames("1/50").is_some());
+    // Likewise with no dt entries at all: `frames` is present and an object.
     let none = edit(
         r#"{"1/200":{"n_frames":600,"stimulus_frames":[200,400],"snapshot_frames":[0,119,239,359,479,599]},
             "1/50":{"n_frames":150,"stimulus_frames":[50,100],"snapshot_frames":[0,29,59,89,119,149]}}"#,
         "{}",
     );
-    refused(&none, "a sequence with no dt entries");
+    let q = parse_sequences(&none).expect("no dt entries is left to the content check");
+    assert!(q[0].frames.is_empty());
 }
 
 /// SEQUENCES-05: `snapshot_frames` not ascending, or with a frame outside
