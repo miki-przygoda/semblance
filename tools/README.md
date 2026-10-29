@@ -85,3 +85,8 @@ Anything exported from here is an input to a later result, so it has to be
 traceable. Every script must record, in its output or beside it: the flyvis
 version, the upstream commit or release it read, and the date. An exported file
 whose origin cannot be reconstructed is not usable as evidence.
+
+`crates/flyvis/src/syn_count_torch.rs` is the one export whose header carries
+no date: it is committed source, so its commit dates it, and a dated header
+would make every rerun a diff. Its header records the flyvis, torch and numpy
+versions, the machine and torch's CPU capability.
