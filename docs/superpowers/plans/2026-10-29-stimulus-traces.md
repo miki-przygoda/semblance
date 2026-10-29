@@ -81,11 +81,10 @@ changes nothing else.
   only makes it `pub(crate)`.
 - **No fixture changes.** Nothing under `data/` is written, and nothing in
   `ci/fixtures.sha256` or `ci/fixtures-tag` changes. `data/` is gitignored
-  and exists only in the main checkout,
-  `/Users/miki_przygoda/Projects/GitHub-Projects/semblance/data`. A worktree
+  and exists only in the main checkout, `<main checkout>/data`. A worktree
   sees it through a `data` symlink at its root, which the gate scripts
   create. If it is missing, create it:
-  `ln -s /Users/miki_przygoda/Projects/GitHub-Projects/semblance/data data`.
+  `ln -s <main checkout>/data data`.
   The symlink is not ignored by `/data/` (that pattern only matches a
   directory), so **always `git add` explicit paths, never `git add -A` or
   `git add .`**, and never commit `data`.
@@ -525,8 +524,8 @@ machine and versions rewrites the file byte for byte.
   checkout's environment (it takes under a second):
 
 ```bash
-test -e data/flyvis-pretrained/results || ln -s /Users/miki_przygoda/Projects/GitHub-Projects/semblance/data data
-/Users/miki_przygoda/Projects/GitHub-Projects/semblance/tools/.venv/bin/python tools/export_syn_count.py
+test -e data/flyvis-pretrained/results || ln -s <main checkout>/data data
+<main checkout>/tools/.venv/bin/python tools/export_syn_count.py
 ```
 
   Expected output:
@@ -2941,7 +2940,7 @@ git commit -m "Document the input mapping and the stimulus-trace gates"
 
 - [ ] **Step 6: Update the epic's local outline (not committed).** In the
   main checkout, edit
-  `/Users/miki_przygoda/Projects/GitHub-Projects/semblance/docs/project-outline/0.3.0-graded-dynamics/README.md`
+  `<main checkout>/docs/project-outline/0.3.0-graded-dynamics/README.md`
   (gitignored; it does not exist in a worktree):
   - **Task 5** and **Task 6** headings: append ` — **DONE** (2026-10-29)`,
     and under each add one line of results: task 5, "`scatter_hexals`; the
