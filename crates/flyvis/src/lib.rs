@@ -9,6 +9,25 @@
 //! The expanded network type itself lives in `semblance-connectome`, not
 //! here: the crates that compress and score a network should not have to
 //! depend on the importer to name the thing they operate on.
+//!
+//! # Parity with flyvis
+//!
+//! [`parity`] runs `semblance-sim`'s graded integrator through flyvis's
+//! settling and its twelve reference stimuli, and compares every value with
+//! flyvis's own reference export: exactly, with torch's `exp` of the synapse
+//! counts ([`syn_count_torch`]), and within bounds fixed in advance, with
+//! Rust's. The crate's `#[cfg(test)]` gates and the `semblance validate`
+//! command both run it. The result is recorded in
+//! `docs/results/0.3.0-flyvis-parity.md`.
+//!
+//! # Licensing
+//!
+//! [`pretrained`], [`syn_count_torch`] and [`groundtruth`] are flyvis's data,
+//! under flyvis's MIT licence, and parts of this crate port flyvis's
+//! MIT-licensed code (the connectome expansion, the hex-eye fp16 mask
+//! construction, the ground-truth readers). The package is licensed
+//! `Apache-2.0 AND MIT`; NOTICE lists the files and carries flyvis's licence
+//! text.
 
 pub mod groundtruth;
 mod json;
