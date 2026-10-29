@@ -20,3 +20,9 @@ tests are authoritative.
 Several documents cite `docs/project-outline/`. That is the author's private
 roadmap — epics, version plan, research notes — and it is not in this
 repository, so those links do not resolve here.
+
+`temper/` holds the logs, behaviour specs and PR bodies from the later pieces,
+which were built through a staged agent workflow (build, review sweep, fixes,
+publish). Their records cite `.temper/` paths: the gate scripts, run logs and
+agent worktrees on the author's machine. Those are local working files and are
+not in this repository; the gate scripts run CI's steps locally.
