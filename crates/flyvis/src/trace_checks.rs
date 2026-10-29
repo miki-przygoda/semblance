@@ -31,15 +31,11 @@ use std::sync::OnceLock;
 use crate::gate_support::fixture;
 use crate::json;
 use crate::parity::{
-    self, cell_type, file, play, trace_bounds, Counts, Fixtures, Precision, SequenceResult, Start, TraceInputs,
-    CONTROL_MISS, HEXALS, SNAPSHOTS,
+    self, cell_type, check_trace_gaps, file, play, trace_bounds, Counts, Fixtures, Precision, SequenceResult, Start,
+    TraceInputs, CONTROL_MISS, HEXALS, SNAPSHOTS,
 };
-use crate::reference::{parse_sequences, BlockKey, SequenceInfo};
+use crate::reference::{parse_sequences, BlockKey, Provenance, SequenceInfo};
 use crate::test_support::{load_reference_fixture, or_skip, read_fixture_bytes, read_fixture_text};
-
-// The registered gaps, `parity::TRACE_F32_GAPS`: (model, dt, centre,
-// snapshots). `trace_bounds_match_provenance` pins them to the file.
-use crate::parity::TRACE_F32_GAPS;
 
 const TRACE_FILES: [&str; 5] =
     ["input.f64.bin", "centre.f32.bin", "centre.f64.bin", "snapshots.f32.bin", "snapshots.f64.bin"];
@@ -204,16 +200,8 @@ trace_runs! {
 #[test]
 fn trace_bounds_match_provenance() {
     let Some(text) = load_reference_fixture("PROVENANCE.json") else { return };
-    let root = json::parse(&text).expect("PROVENANCE.json must parse");
-    let gaps = root.get("f32_f64_gap").expect("PROVENANCE.json has f32_f64_gap");
-    for &(model, dt, centre, snapshots) in &TRACE_F32_GAPS {
-        let key = format!("{model} {dt}");
-        let g = gaps.get(&key).unwrap_or_else(|| panic!("no gap for {key}"));
-        for (name, want) in [("centre", centre), ("snapshots", snapshots)] {
-            let got = g.get(name).and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("{key} {name}"));
-            assert_eq!(got.to_bits(), want.to_bits(), "{key} {name}: PROVENANCE {got:e}, gate {want:e}");
-        }
-    }
+    let p = Provenance::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+    check_trace_gaps(&p).unwrap_or_else(|e| panic!("{e}"));
 }
 
 fn snapshots_hold_the_centre_column<R: Precision>() {

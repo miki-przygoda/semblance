@@ -15,12 +15,18 @@
 //! section 1.
 
 mod bounds;
+mod checks;
+mod fingerprint;
 mod inputs;
 mod run;
+mod validate;
 
 pub use bounds::{settling_bounds, trace_bounds, Bound};
+pub use checks::{check_settling_gaps, check_trace_gaps};
+pub use fingerprint::{libm_fingerprint, LibmFingerprint};
 pub use inputs::{how_to_get, required_files, Fixtures, TraceData, TraceInputs};
 pub use run::{diff, play, run, settle, Counts, Diff, RunResult, SequenceResult, SettlingResult, Start};
+pub use validate::{validate, Controls, Coverage, Job, Options, Report};
 
 #[cfg(test)]
 pub(crate) use run::{cell_type, file, Precision, HEXALS, SNAPSHOTS};
