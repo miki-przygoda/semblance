@@ -95,9 +95,27 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # The record's generated block, produced on this host (spec R9). The head
+      # commits it from this artifact; nothing else generates the record.
+      # A gate failure here fails the job; the upload still runs so the
+      # output can be read.
+      - name: Validate, writing the record's generated block
+        run: target/debug/semblance validate --markdown > parity-record.md
+
+      - name: Upload the record's generated block
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: parity-record
+          path: parity-record.md
+          if-no-files-found: error
+
+      # SEMBLANCE_REQUIRE_LIBM_RECORD: this host recorded the record, so its
+      # libm section must match byte for byte, not be skipped.
       - name: Test, with every fixture required
         env:
           SEMBLANCE_REQUIRE_FIXTURES: "1"
+          SEMBLANCE_REQUIRE_LIBM_RECORD: "1"
         run: cargo test --workspace
 
       # The geometry gate exists to be read, not just passed. Its table in the
