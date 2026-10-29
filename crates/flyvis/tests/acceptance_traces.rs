@@ -1439,9 +1439,18 @@ fn traces_19_every_moving_edge_frame_lies_within_the_shared_tolerance() {
     let src = std::fs::read_to_string(&file).unwrap();
     let decl = "pub(crate) const TOLERANCE: f64 = 0.005;";
     assert_eq!(src.matches(decl).count(), 1, "the constant is declared once, pub(crate), in moving_edge_checks.rs");
+    // Restore the shadow's source even if the gate panics, so a failure here
+    // cannot leave the tightened constant behind for later shadow tests.
+    struct Restore<'a>(&'a std::path::Path, &'a str);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0, self.1);
+        }
+    }
+    let restore = Restore(&file, &src);
     std::fs::write(&file, src.replace(decl, "pub(crate) const TOLERANCE: f64 = 1e-9;")).unwrap();
     let tightened = sh.gate(&sc("rust_moving_edges_match_flyviss_input"), true);
-    std::fs::write(&file, &src).unwrap();
+    drop(restore);
     assert!(!tightened.passed, "the check must follow moving_edge_checks::TOLERANCE:\n{}", tightened.output);
     assert!(tightened.output.contains("apart"), "{}", tightened.output);
 }

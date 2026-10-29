@@ -233,8 +233,8 @@ on the way out; they go when it does.
 
 **`semblance-sim` and `semblance-flyvis` build at `opt-level = 3` in the dev
 profile** (workspace `Cargo.toml`). The trace gates step the full network about
-6,800 times per run; unoptimised that is about two minutes a test, optimised
-a few seconds. It does not change results: rustc never contracts into a fused
+6,800 times per 1/200 run (about 1,700 per 1/50 run); unoptimised a 1/200
+run takes about two minutes, optimised a few seconds. It does not change results: rustc never contracts into a fused
 multiply-add or enables fast-math at any level, and the exact gates re-prove
 bit-equality on every run. Do not add `target-cpu`, fast-math or `mul_add`.
 

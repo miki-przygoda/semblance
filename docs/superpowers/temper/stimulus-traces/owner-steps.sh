@@ -32,11 +32,11 @@ step_syn_count() {
   done
   # The rerun writes the tracked file in place; start from a clean copy so
   # any difference afterwards is the script's.
-  git -C "$root" diff --quiet -- "$out" \
+  git -C "$root" diff --quiet HEAD -- "$out" \
     || die "$out already has local changes; commit or restore it first"
   say "rerunning tools/export_syn_count.py"
   (cd "$root" && "$python" -B tools/export_syn_count.py)
-  if git -C "$root" diff --exit-code -- "$out"; then
+  if git -C "$root" diff --exit-code HEAD -- "$out"; then
     say "ok: $out rewritten byte for byte"
   else
     die "$out changed (diff above); restore it with: git -C \"$root\" checkout -- $out"
