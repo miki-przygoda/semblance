@@ -10,6 +10,8 @@
 //! (`json.rs` returns the first); the file is hash-pinned.
 //!
 //! Spec: docs/superpowers/specs/2026-10-28-graded-settling-design.md, section 5.
+//! The manifest's `sequences`, read by [`parse_sequences`]:
+//! docs/superpowers/specs/2026-10-28-stimulus-traces-design.md, section 2.
 
 use crate::json::{self, Json};
 
@@ -69,6 +71,47 @@ pub struct Manifest {
     pub files: Vec<FileInfo>,
 }
 
+/// One reference stimulus sequence, from the manifest's `sequences`. Field
+/// names are the manifest's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequenceInfo {
+    /// `index`: the sequence's key in every per-sequence block.
+    pub index: u32,
+    /// `family`: `"flashes"` or `"moving_edge"`.
+    pub family: String,
+    /// `flyvis_index`: its index within flyvis's own stimulus dataset.
+    pub flyvis_index: u32,
+    /// `args`: every numeric entry, in file order. Non-numeric entries
+    /// (`offsets`, `post_pad_mode`) are skipped.
+    pub args: Vec<(String, f64)>,
+    /// `frames`: one entry per dt id, in file order.
+    pub frames: Vec<SequenceFrames>,
+}
+
+/// A sequence's frame layout at one dt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequenceFrames {
+    /// The key: `"1/200"` or `"1/50"`.
+    pub dt: String,
+    pub n_frames: usize,
+    /// `[start, end)`: end is exclusive.
+    pub stimulus_frames: (usize, usize),
+    /// The frames `snapshots.*.bin` holds the full state at, ascending.
+    pub snapshot_frames: Vec<usize>,
+}
+
+impl SequenceInfo {
+    /// The numeric argument `name`, if the manifest gives one.
+    pub fn arg(&self, name: &str) -> Option<f64> {
+        self.args.iter().find(|(k, _)| k == name).map(|&(_, v)| v)
+    }
+
+    /// The frame layout at dt id `dt`.
+    pub fn frames(&self, dt: &str) -> Option<&SequenceFrames> {
+        self.frames.iter().find(|f| f.dt == dt)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReferenceError {
     Json { offset: usize },
@@ -86,6 +129,8 @@ pub enum ReferenceError {
     ByteLength { file: String, expected: usize, found: usize },
     Dtype { file: String, expected: Dtype, found: Dtype },
     NoBlock { file: String },
+    /// A sequence's frame indices are out of order or past its `n_frames`.
+    FrameRange(String),
 }
 
 impl std::fmt::Display for ReferenceError {
@@ -104,6 +149,7 @@ impl std::fmt::Display for ReferenceError {
             ByteLength { file, expected, found } => write!(f, "{file}: {found} bytes, manifest says {expected}"),
             Dtype { file, expected, found } => write!(f, "{file} is {found:?}, asked for {expected:?}"),
             NoBlock { file } => write!(f, "{file}: no block has that key"),
+            FrameRange(p) => write!(f, "manifest {p} is out of order or past n_frames"),
         }
     }
 }
@@ -149,6 +195,74 @@ fn require(obj: &Json, key: &str, want: &str) -> Result<(), ReferenceError> {
         other => other.as_str().map(str::to_string).ok_or_else(|| ReferenceError::WrongType(format!("manifest.{key}")))?,
     };
     if found == want { Ok(()) } else { Err(ReferenceError::Unsupported { field: key.to_string(), found }) }
+}
+
+/// An object's entries, in file order.
+fn object<'a>(obj: &'a Json, key: &str, at: &str) -> Result<&'a [(String, Json)], ReferenceError> {
+    match get(obj, key, at)? {
+        Json::Object(pairs) => Ok(pairs),
+        _ => Err(ReferenceError::WrongType(format!("{at}.{key}"))),
+    }
+}
+
+/// A non-negative integer: a frame index or count.
+fn frame_index(value: &Json, at: &str) -> Result<usize, ReferenceError> {
+    value.as_i64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| ReferenceError::WrongType(at.to_string()))
+}
+
+fn parse_frames(dt: &str, f: &Json, at: &str) -> Result<SequenceFrames, ReferenceError> {
+    let n_frames = count(f, "n_frames", at)?;
+    let window_at = format!("{at}.stimulus_frames");
+    let [start, end] = array(f, "stimulus_frames", at)? else {
+        return Err(ReferenceError::WrongType(window_at));
+    };
+    let stimulus_frames = (frame_index(start, &window_at)?, frame_index(end, &window_at)?);
+    if !(stimulus_frames.0 <= stimulus_frames.1 && stimulus_frames.1 <= n_frames) {
+        return Err(ReferenceError::FrameRange(window_at));
+    }
+    let snapshots_at = format!("{at}.snapshot_frames");
+    let snapshot_frames = array(f, "snapshot_frames", at)?
+        .iter()
+        .map(|v| frame_index(v, &snapshots_at))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ascending = snapshot_frames.windows(2).all(|w| w[0] < w[1]);
+    if !ascending || snapshot_frames.last().is_some_and(|&last| last >= n_frames) {
+        return Err(ReferenceError::FrameRange(snapshots_at));
+    }
+    Ok(SequenceFrames { dt: dt.to_string(), n_frames, stimulus_frames, snapshot_frames })
+}
+
+/// Reads the manifest's `sequences`. Separate from [`Manifest::parse`], which
+/// does not require them.
+///
+/// Checks structure only: every field present and typed, each
+/// `stimulus_frames` with start <= end <= `n_frames`, each `snapshot_frames`
+/// strictly ascending and inside `0..n_frames`. How many sequences there are,
+/// and which dts each covers, are the caller's to check.
+pub fn parse_sequences(json: &str) -> Result<Vec<SequenceInfo>, ReferenceError> {
+    let root = json::parse(json).map_err(|e| ReferenceError::Json { offset: e.offset })?;
+    array(&root, "sequences", "manifest")?
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let at = format!("sequences[{i}]");
+            let args = object(s, "args", &at)?
+                .iter()
+                .filter_map(|(k, v)| v.as_f64().map(|x| (k.clone(), x)))
+                .collect();
+            let frames = object(s, "frames", &at)?
+                .iter()
+                .map(|(dt, f)| parse_frames(dt, f, &format!("{at}.frames.{dt}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SequenceInfo {
+                index: index(get(s, "index", &at)?, &format!("{at}.index"))?,
+                family: string(s, "family", &at)?,
+                flyvis_index: index(get(s, "flyvis_index", &at)?, &format!("{at}.flyvis_index"))?,
+                args,
+                frames,
+            })
+        })
+        .collect()
 }
 
 fn parse_file(f: &Json, at: &str) -> Result<FileInfo, ReferenceError> {
@@ -350,6 +464,148 @@ mod tests {
 
     fn file_error(text: &str) -> ReferenceError {
         Manifest::parse(text).expect_err("must be refused")
+    }
+
+    const SEQUENCES: &str = r#"{"sequences":[
+        {"index":0,"family":"flashes","flyvis_index":0,
+         "args":{"baseline":0.5,"intensity":0.0,"radius":-1},
+         "frames":{"1/200":{"n_frames":600,"stimulus_frames":[200,400],"snapshot_frames":[0,119,239,359,479,599]},
+                   "1/50":{"n_frames":150,"stimulus_frames":[50,100],"snapshot_frames":[0,29,59,89,119,149]}}},
+        {"index":1,"family":"moving_edge","flyvis_index":4,
+         "args":{"angle":90,"intensity":0.0,"speed":13.0,"offsets":[-10,11],"post_pad_mode":"continue"},
+         "frames":{"1/50":{"n_frames":131,"stimulus_frames":[50,81],"snapshot_frames":[0,26,52,78,104,130]}}}]}"#;
+
+    fn sequence_error(text: &str) -> ReferenceError {
+        parse_sequences(text).expect_err("must be refused")
+    }
+
+    #[test]
+    fn parses_the_sequences_of_a_synthetic_manifest() {
+        let s = parse_sequences(SEQUENCES).expect("valid");
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].index, s[0].family.as_str(), s[0].flyvis_index), (0, "flashes", 0));
+        assert_eq!(
+            s[0].args,
+            vec![("baseline".to_string(), 0.5), ("intensity".to_string(), 0.0), ("radius".to_string(), -1.0)]
+        );
+        assert_eq!(
+            s[0].frames("1/200"),
+            Some(&SequenceFrames {
+                dt: "1/200".into(),
+                n_frames: 600,
+                stimulus_frames: (200, 400),
+                snapshot_frames: vec![0, 119, 239, 359, 479, 599],
+            })
+        );
+        assert_eq!(s[0].frames.iter().map(|f| f.dt.as_str()).collect::<Vec<_>>(), ["1/200", "1/50"]);
+        assert_eq!((s[1].arg("angle"), s[1].arg("speed"), s[1].arg("radius")), (Some(90.0), Some(13.0), None));
+        assert_eq!(s[1].arg("offsets"), None, "a non-numeric arg is skipped");
+        assert_eq!(s[1].frames("1/200"), None);
+        assert_eq!(s[1].frames("1/50").map(|f| f.stimulus_frames), Some((50, 81)));
+    }
+
+    #[test]
+    fn sequences_refuse_frames_out_of_order_or_past_n_frames() {
+        let at = |p: &str| ReferenceError::FrameRange(p.to_string());
+        let snap = "sequences[1].frames.1/50.snapshot_frames";
+        let window = "sequences[1].frames.1/50.stimulus_frames";
+        assert_eq!(sequence_error(&SEQUENCES.replace("104,130]", "104,131]")), at(snap), "a snapshot at n_frames");
+        assert_eq!(sequence_error(&SEQUENCES.replace("[0,26,52,78,104,130]", "[0,52,26,78,104,130]")), at(snap));
+        assert_eq!(sequence_error(&SEQUENCES.replace("[0,26,52,78,104,130]", "[0,26,26,78,104,130]")), at(snap));
+        assert_eq!(sequence_error(&SEQUENCES.replace("[50,81]", "[50,132]")), at(window), "a window past n_frames");
+        assert_eq!(sequence_error(&SEQUENCES.replace("[50,81]", "[82,81]")), at(window), "a window that ends first");
+        // the window may be empty, and may end at n_frames exactly
+        assert!(parse_sequences(&SEQUENCES.replace("[50,81]", "[131,131]")).is_ok());
+    }
+
+    #[test]
+    fn sequences_refuse_a_missing_or_mistyped_field() {
+        use ReferenceError::{Missing, WrongType};
+        assert_eq!(sequence_error(r#"{"runs":[]}"#), Missing("manifest.sequences".into()));
+        assert_eq!(
+            sequence_error(&SEQUENCES.replacen(r#""flyvis_index":0,"#, "", 1)),
+            Missing("sequences[0].flyvis_index".into())
+        );
+        assert_eq!(
+            sequence_error(&SEQUENCES.replacen(r#""n_frames":600"#, r#""n_frames":"600""#, 1)),
+            WrongType("sequences[0].frames.1/200.n_frames".into())
+        );
+        assert_eq!(
+            sequence_error(&SEQUENCES.replace("[50,81]", "[50]")),
+            WrongType("sequences[1].frames.1/50.stimulus_frames".into())
+        );
+        assert_eq!(
+            sequence_error(&SEQUENCES.replace("[0,26,52,78,104,130]", "[0,-26,52,78,104,130]")),
+            WrongType("sequences[1].frames.1/50.snapshot_frames".into())
+        );
+        assert_eq!(
+            sequence_error(&SEQUENCES.replacen(r#""args":{"baseline":0.5,"intensity":0.0,"radius":-1}"#, r#""args":[]"#, 1)),
+            WrongType("sequences[0].args".into())
+        );
+        assert_eq!(sequence_error(&SEQUENCES.replacen(r#""family":"flashes""#, r#""family":1"#, 1)), WrongType("sequences[0].family".into()));
+    }
+
+    /// The reference set's content, which the parser leaves to its caller:
+    /// a frame layout for every dt id, with six snapshot frames each.
+    fn check_content(sequences: &[SequenceInfo], dt_ids: &[&str]) -> Result<(), String> {
+        for s in sequences {
+            for &dt in dt_ids {
+                let f = s.frames(dt).ok_or_else(|| format!("sequence {} has no frames for dt {dt}", s.index))?;
+                if f.snapshot_frames.len() != 6 {
+                    return Err(format!("sequence {} dt {dt}: {} snapshot frames", s.index, f.snapshot_frames.len()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_content_check_refuses_a_missing_dt_entry_and_five_snapshots() {
+        let s = parse_sequences(SEQUENCES).unwrap();
+        assert_eq!(check_content(&s[..1], &["1/200", "1/50"]), Ok(()));
+        assert_eq!(check_content(&s, &["1/200", "1/50"]), Err("sequence 1 has no frames for dt 1/200".into()));
+        let five = parse_sequences(&SEQUENCES.replace("[0,26,52,78,104,130]", "[0,26,52,78,130]")).unwrap();
+        assert_eq!(check_content(&five[1..], &["1/50"]), Err("sequence 1 dt 1/50: 5 snapshot frames".into()));
+    }
+
+    /// The published manifest's sequences are the twelve the trace gates
+    /// play: flashes 0-3, then moving edges 4-11 at angles 0/30/90/150, OFF
+    /// then ON, speed 13, height 80 (spec, fact H6).
+    #[test]
+    fn the_real_manifest_lists_the_twelve_reference_sequences() {
+        let Some(text) = load_reference_fixture("manifest.json") else { return };
+        let m = Manifest::parse(&text).expect("manifest.json must parse");
+        let s = parse_sequences(&text).expect("manifest.json's sequences must parse");
+        let dt_ids: Vec<&str> = m.dts.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(dt_ids, ["1/200", "1/50"]);
+        check_content(&s, &dt_ids).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(s.len(), 12);
+        for (i, q) in s.iter().enumerate() {
+            assert_eq!(q.index, i as u32, "sequences are listed in index order");
+            assert_eq!(q.frames.len(), 2, "sequence {i}: one layout per dt, no others");
+            let (family, flyvis_index, n_frames, window): (&str, usize, [usize; 2], [(usize, usize); 2]) = if i < 4 {
+                ("flashes", i, [600, 150], [(200, 400), (50, 100)])
+            } else {
+                ("moving_edge", i - 4, [525, 131], [(200, 325), (50, 81)])
+            };
+            assert_eq!((q.family.as_str(), q.flyvis_index as usize), (family, flyvis_index), "sequence {i}");
+            for (k, dt) in dt_ids.iter().enumerate() {
+                let f = q.frames(dt).unwrap();
+                assert_eq!((f.n_frames, f.stimulus_frames), (n_frames[k], window[k]), "sequence {i} dt {dt}");
+                // trunc(linspace(0, n - 1, 6))
+                let want: Vec<usize> = (0..6).map(|j| (j as f64 * (n_frames[k] - 1) as f64 / 5.0) as usize).collect();
+                assert_eq!(f.snapshot_frames, want, "sequence {i} dt {dt}");
+            }
+            if i < 4 {
+                assert_eq!(q.arg("intensity"), Some(if i < 2 { 0.0 } else { 1.0 }), "sequence {i}");
+                assert_eq!(q.arg("radius"), Some(if i % 2 == 0 { -1.0 } else { 6.0 }), "sequence {i}");
+            } else {
+                let e = i - 4;
+                assert_eq!(q.arg("angle"), Some([0.0, 30.0, 90.0, 150.0][e / 2]), "sequence {i}");
+                assert_eq!(q.arg("intensity"), Some((e % 2) as f64), "sequence {i}");
+                assert_eq!((q.arg("speed"), q.arg("height"), q.arg("width")), (Some(13.0), Some(80.0), Some(80.0)), "sequence {i}");
+            }
+        }
     }
 
     #[test]
