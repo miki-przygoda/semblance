@@ -5,13 +5,14 @@
 //! crate's public `semblance_flyvis::reference` API (`parse_sequences`,
 //! `SequenceInfo`, `SequenceFrames`, `Manifest::parse`).
 //!
-//! SEQUENCES-07 and SEQUENCES-08 also run the crate's own tests through
-//! cargo, in a target directory under `CARGO_TARGET_TMPDIR`: SEQUENCES-07
-//! runs the real-manifest fixture test in a copy of the workspace's sources
-//! whose `data/flyvis-reference/manifest.json` gives one sequence five
-//! snapshot frames (the real `data/` is never written); SEQUENCES-08 runs
-//! `reference::tests` and `acceptance_reference.rs` as they stand. Tests that
-//! read the real manifest skip without it unless
+//! SEQUENCES-07 also runs the crate's own tests through cargo, in a target
+//! directory under `CARGO_TARGET_TMPDIR`: it runs the real-manifest fixture
+//! test in a copy of the workspace's sources whose
+//! `data/flyvis-reference/manifest.json` gives one sequence five snapshot
+//! frames (the real `data/` is never written). SEQUENCES-08 checks
+//! `Manifest::parse` in process; `reference::tests` and
+//! `acceptance_reference.rs` run directly in the same suite rather than
+//! nested. Tests that read the real manifest skip without it unless
 //! `SEMBLANCE_REQUIRE_FIXTURES=1`, which turns a skip into a failure.
 
 use std::path::{Path, PathBuf};
@@ -461,11 +462,13 @@ fn manifest_with(sequences: Option<&str>) -> String {
 }
 
 /// SEQUENCES-08: `Manifest::parse` still accepts manifests with no or partial
-/// `sequences`; `Manifest::parse`'s tests and `acceptance_reference.rs`
-/// pass. That they are unchanged since the epic's base is a review-time
-/// check: no test here reads git history.
+/// `sequences`, and `parse_sequences` refuses them separately. Checked in
+/// process: `Manifest::parse`'s own tests (`reference::tests`) and
+/// `acceptance_reference.rs` run directly in the same suite, so this test no
+/// longer runs them again in a nested cargo. That they are unchanged since
+/// the epic's base is a review-time check: no test here reads git history.
 #[test]
-fn sequences_08_manifest_parse_its_tests_and_acceptance_reference_are_unchanged_and_pass() {
+fn sequences_08_the_manifest_and_sequences_parse_in_process() {
     // No or partial sequences: Manifest::parse does not read them, even
     // where parse_sequences refuses them.
     for (what, seqs) in [
@@ -480,23 +483,6 @@ fn sequences_08_manifest_parse_its_tests_and_acceptance_reference_are_unchanged_
         if seqs != Some("[]") {
             assert!(parse_sequences(&text).is_err(), "{what}: parse_sequences refuses it, separately");
         }
-    }
-
-    // "Unchanged" is checked at review, not here: a CI checkout is shallow,
-    // so the epic's base commit is not there to compare against. What the
-    // current tree must do is checked: the tests still pass.
-    let ws = Path::new(WORKSPACE);
-
-    // And they still pass: reference.rs's own tests and acceptance_reference.rs.
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("acceptance-sequences").join("target-08");
-    for args in [
-        &["test", "-p", "semblance-flyvis", "--lib", "--locked", "--offline", "--", "reference::tests::"][..],
-        &["test", "-p", "semblance-flyvis", "--test", "acceptance_reference", "--locked", "--offline"][..],
-    ] {
-        let (passed, output) = cargo(ws, &target, args);
-        assert!(passed, "{args:?} must pass:\n{output}");
-        assert!(output.contains("test result: ok."), "{args:?} ran:\n{output}");
-        assert!(!output.contains("running 0 tests"), "{args:?} ran no tests:\n{output}");
     }
 }
 
