@@ -478,6 +478,13 @@ fn integrator_15_real_is_sealed_and_exactly_f32_and_f64() {
     let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("integrator_15_sealed");
     let check = |name: &str, body: &str| -> (bool, String) {
         let dir = base.join(name);
+        // Start from an empty source directory, so nothing left by an earlier
+        // run is compiled. `target` is a sibling and is kept.
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("removing {}: {e}", dir.display()),
+        }
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("Cargo.toml"),
@@ -527,6 +534,7 @@ fn integrator_15_real_is_sealed_and_exactly_f32_and_f64() {
              fn from_f64(x: f64) -> Self { Mine(x) }\n\
              fn to_f64(self) -> f64 { self.0 }\n\
              fn is_finite(self) -> bool { self.0.is_finite() }\n\
+             fn is_nan(self) -> bool { self.0.is_nan() }\n\
          }\n",
     );
     assert!(!ok, "implementing Real for a downstream type must not compile");

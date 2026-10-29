@@ -52,6 +52,7 @@ pub trait Real:
     /// Exact.
     fn to_f64(self) -> f64;
     fn is_finite(self) -> bool;
+    fn is_nan(self) -> bool;
 }
 
 impl Real for f32 {
@@ -61,6 +62,7 @@ impl Real for f32 {
     fn from_f64(x: f64) -> Self { x as f32 }
     fn to_f64(self) -> f64 { self as f64 }
     fn is_finite(self) -> bool { f32::is_finite(self) }
+    fn is_nan(self) -> bool { f32::is_nan(self) }
 }
 
 impl Real for f64 {
@@ -70,6 +72,7 @@ impl Real for f64 {
     fn from_f64(x: f64) -> Self { x }
     fn to_f64(self) -> f64 { self }
     fn is_finite(self) -> bool { f64::is_finite(self) }
+    fn is_nan(self) -> bool { f64::is_nan(self) }
 }
 
 /// A model's parameters, as flyvis holds them: f32, one per cell type or
@@ -88,7 +91,7 @@ pub enum GradedError {
     Length { what: &'static str, expected: usize, found: usize },
     /// A parameter or count is NaN or infinite.
     NonFinite { what: &'static str, index: usize },
-    /// `dt` is not finite and positive, in f64 or as f32.
+    /// `dt` is not finite and positive in f64, or not a positive normal f32.
     BadDt(f64),
 }
 
@@ -98,7 +101,7 @@ impl std::fmt::Display for GradedError {
             GradedError::Length { what, expected, found } =>
                 write!(f, "{what} has {found} values, expected {expected}"),
             GradedError::NonFinite { what, index } => write!(f, "{what}[{index}] is not finite"),
-            GradedError::BadDt(dt) => write!(f, "dt {dt} is not finite and positive"),
+            GradedError::BadDt(dt) => write!(f, "dt {dt} is not finite and positive, or not a normal f32"),
         }
     }
 }
@@ -125,17 +128,19 @@ fn max<R: Real>(a: R, b: R) -> R {
     if a > b { a } else { b }
 }
 
+/// `torch.relu`: NaN passes through rather than becoming 0.
 fn relu<R: Real>(x: R) -> R {
-    if x > R::ZERO { x } else { R::ZERO }
+    if x > R::ZERO || x.is_nan() { x } else { R::ZERO }
 }
 
 impl<R: Real> Graded<R> {
     pub fn new(net: &TypedNetwork, params: &GradedParams<R>, dt: f64) -> Result<Self, GradedError> {
-        // The floor and the f32 step use f32(dt), so that must be finite and
-        // positive too: a dt that rounds to 0 or overflows in f32 would make
-        // inv_tau 1/0 or 1/inf.
+        // The floor and the f32 step use f32(dt), so that must be a positive
+        // normal f32: a dt that rounds to 0 or overflows in f32 would make
+        // inv_tau 1/0 or 1/inf, and a subnormal one's reciprocal overflows
+        // f32. `is_normal` accepts negatives, so `> 0.0` stays.
         let dt32 = dt as f32;
-        if !(dt.is_finite() && dt > 0.0 && dt32.is_finite() && dt32 > 0.0) {
+        if !(dt.is_finite() && dt > 0.0 && dt32.is_normal() && dt32 > 0.0) {
             return Err(GradedError::BadDt(dt));
         }
         let n_types = net.cell_types().len();
@@ -235,6 +240,21 @@ impl<R: Real> Graded<R> {
     /// Back to the initial state: every node at its bias.
     pub fn reset(&mut self) {
         self.state.copy_from_slice(&self.bias);
+    }
+
+    /// Replaces the state, one value per node, so a run can restart from a
+    /// state saved earlier (a settled state, say). A wrong length or a NaN or
+    /// infinite value is an error and changes nothing.
+    pub fn set_state(&mut self, state: &[R]) -> Result<(), GradedError> {
+        let n = self.state.len();
+        if state.len() != n {
+            return Err(GradedError::Length { what: "state", expected: n, found: state.len() });
+        }
+        if let Some(index) = state.iter().position(|v| !v.is_finite()) {
+            return Err(GradedError::NonFinite { what: "state", index });
+        }
+        self.state.copy_from_slice(state);
+        Ok(())
     }
 
     pub fn state(&self) -> &[R] {
@@ -464,10 +484,84 @@ mod tests {
                 assert_eq!(Graded::<f32>::new(&net, &p32, dt).map(|_| ()), Err(GradedError::BadDt(dt)), "f32 dt {dt}");
             }
         }
-        // The smallest positive f32 is still a usable dt.
+        // The smallest positive f32 is subnormal, and its reciprocal
+        // overflows f32: refused in both precisions.
         let tiny = f64::from(f32::from_bits(1));
         let p = GradedParams { bias: &[0.5], time_const: &[0.0], syn_strength: &[], edge_syn_count: &[] };
-        assert!(Graded::<f64>::new(&net, &p, tiny).is_ok());
+        assert_eq!(Graded::<f64>::new(&net, &p, tiny).map(|_| ()), Err(GradedError::BadDt(tiny)));
+        let p32 = GradedParams { bias: &[0.5], time_const: &[0.0], syn_strength: &[], edge_syn_count: &[] };
+        assert_eq!(Graded::<f32>::new(&net, &p32, tiny).map(|_| ()), Err(GradedError::BadDt(tiny)));
+    }
+
+    /// Below the smallest normal f32 the floor's reciprocal overflows f32, so
+    /// such a dt is refused in both precisions. The smallest normal f32 is
+    /// accepted: its reciprocal, about 8.5e37, is finite.
+    #[test]
+    fn refuses_a_dt_that_is_subnormal_in_f32() {
+        let net = network(&[0], 1, &[], &[]);
+        let half = f64::from(f32::MIN_POSITIVE) / 2.0;
+        let p64 = GradedParams { bias: &[0.5], time_const: &[0.0], syn_strength: &[], edge_syn_count: &[] };
+        let p32 = GradedParams { bias: &[0.5], time_const: &[0.0], syn_strength: &[], edge_syn_count: &[] };
+        assert_eq!(Graded::<f64>::new(&net, &p64, half).map(|_| ()), Err(GradedError::BadDt(half)));
+        assert_eq!(Graded::<f32>::new(&net, &p32, half).map(|_| ()), Err(GradedError::BadDt(half)));
+        let normal = f64::from(f32::MIN_POSITIVE);
+        assert!(Graded::<f64>::new(&net, &p64, normal).is_ok());
+        assert!(Graded::<f32>::new(&net, &p32, normal).is_ok());
+    }
+
+    #[test]
+    fn is_nan_is_true_for_nan_only() {
+        assert!(<f32 as Real>::is_nan(f32::NAN));
+        assert!(<f64 as Real>::is_nan(f64::NAN));
+        for x in [0.0f32, -0.0, 1.0, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!<f32 as Real>::is_nan(x), "{x}");
+            assert!(!<f64 as Real>::is_nan(f64::from(x)), "{x}");
+        }
+    }
+
+    /// `torch.relu(nan)` is nan. A NaN source must poison its targets, not
+    /// vanish into a zero that hides it.
+    #[test]
+    fn relu_passes_nan_through_like_torch() {
+        assert!(relu(f32::NAN).is_nan());
+        assert!(relu(f64::NAN).is_nan());
+        assert_eq!(relu(-1.5f32), 0.0);
+        assert_eq!(relu(2.5f64), 2.5);
+        assert_eq!(relu(f64::NEG_INFINITY), 0.0);
+    }
+
+    fn set_state_then_step<R: Real>() {
+        let net = network(&[0, 1], 2, &[(0, 1, 1.0)], &[(0, 1, 0)]);
+        let new = || graded::<R>(&net, &[0.5, -0.25], &[0.1, 0.1], &[1.0], &[R::ONE], 0.01);
+        // Step a reference twice; capture its state after one step.
+        let mut a = new();
+        a.step(&[r::<R>(0.3), R::ZERO]).unwrap();
+        let after_one = a.state().to_vec();
+        a.step(&[R::ZERO, r::<R>(0.7)]).unwrap();
+        // A fresh integrator set to that state steps to the same place.
+        let mut b = new();
+        b.set_state(&after_one).unwrap();
+        assert_eq!(b.state(), &after_one[..]);
+        b.step(&[R::ZERO, r::<R>(0.7)]).unwrap();
+        assert_eq!(b.state(), a.state());
+    }
+
+    #[test]
+    fn set_state_then_step_equals_stepping_from_that_state_f32() { set_state_then_step::<f32>() }
+    #[test]
+    fn set_state_then_step_equals_stepping_from_that_state_f64() { set_state_then_step::<f64>() }
+
+    #[test]
+    fn set_state_refuses_a_wrong_length_or_a_non_finite_value_and_changes_nothing() {
+        let net = network(&[0, 1], 2, &[(0, 1, 1.0)], &[(0, 1, 0)]);
+        let mut g = graded::<f64>(&net, &[0.5, -0.25], &[0.1, 0.1], &[1.0], &[1.0], 0.01);
+        g.step(&[1.0, 0.0]).unwrap();
+        let before = g.state().to_vec();
+        assert_eq!(g.set_state(&[0.0]), Err(GradedError::Length { what: "state", expected: 2, found: 1 }));
+        assert_eq!(g.set_state(&[0.0, 0.0, 0.0]), Err(GradedError::Length { what: "state", expected: 2, found: 3 }));
+        assert_eq!(g.set_state(&[0.0, f64::NAN]), Err(GradedError::NonFinite { what: "state", index: 1 }));
+        assert_eq!(g.set_state(&[f64::INFINITY, 0.0]), Err(GradedError::NonFinite { what: "state", index: 0 }));
+        assert_eq!(g.state(), &before[..]);
     }
 
     #[test]
