@@ -37,3 +37,16 @@ semblance-fidelity = { path = "crates/fidelity", version = "0.2.0" }
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# The trace gates (crates/flyvis/src/trace_checks.rs) step the 45,669-cell,
+# 1.5M-synapse network 6,800 times per 1/200 run, twice per run. Unoptimised
+# that is about 17 ms a step, two minutes a test; at opt-level 3 about
+# 0.9 ms, with bit-identical states. No optimisation level contracts into a
+# fused multiply-add or enables fast-math, and the exact gates re-prove it on
+# every run. Only the two crates doing that arithmetic are optimised; dev
+# builds otherwise keep the default.
+[profile.dev.package.semblance-sim]
+opt-level = 3
+
+[profile.dev.package.semblance-flyvis]
+opt-level = 3

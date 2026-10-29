@@ -37,6 +37,8 @@ mod stimuli_checks;
 pub mod syn_count_torch;
 #[cfg(test)]
 mod syn_count_torch_checks;
+#[cfg(test)]
+mod trace_checks;
 pub mod wiring;
 
 pub use expand::{expand, ExpandError, DEFAULT_EXTENT, DEFAULT_N_SYN_FILL};
@@ -46,4 +48,4 @@ pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
 };
 pub use moving_edge::{MovingEdge, MovingEdgeParams};
-pub use wiring::{edge_syn_groups, input_nodes, WiringError};
+pub use wiring::{edge_syn_groups, input_nodes, scatter_hexals, WiringError};
