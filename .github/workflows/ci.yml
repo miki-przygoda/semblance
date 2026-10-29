@@ -19,10 +19,7 @@ concurrency:
 
 jobs:
   test:
-    # The repo variable CI_RUNNER picks the runner; unset, it is GitHub's
-    # ubuntu-latest. Set it to `self-hosted` only while the repo is private:
-    # on a public repo any fork PR could run code on that machine.
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -127,7 +124,7 @@ jobs:
           grep -qF 'behavioural distance: 0.000000' <<<"$out"
 
   msrv:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
