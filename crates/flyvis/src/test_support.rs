@@ -27,39 +27,11 @@ fn fixtures_required() -> bool {
 }
 
 /// The real, published flyvis connectome spec, under `data/`.
-const REAL_SPEC: &str = "flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json";
+pub(crate) const REAL_SPEC: &str = "flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json";
 
 /// `rel`'s path under the workspace's `data/`, as every notice prints it.
 fn data_path(rel: &str) -> String {
     format!("{}/../../data/{rel}", env!("CARGO_MANIFEST_DIR"))
-}
-
-/// How to produce a file under `data/`, by its directory.
-fn how_to_get(rel: &str) -> &'static str {
-    match rel.split('/').next() {
-        Some("flyvis-supplementary") => {
-            "Download \
-             https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip \
-             and extract Lappalainen_et_al_connectome_avg_filters.json into data/flyvis-supplementary/, \
-             or run ci/fetch-fixtures.sh"
-        }
-        Some("flyvis-build") => {
-            "Run `uv run --project tools tools/export_build.py` to generate it, or run ci/fetch-fixtures.sh."
-        }
-        Some("flyvis-stimuli") => {
-            "Run `uv run --project tools tools/export_stimuli.py`, \
-             `uv run --project tools tools/export_moving_edges.py` and, \
-             for the `_h80` files, `uv run --project tools tools/export_reference.py` \
-             to generate the stimulus fixtures, or run ci/fetch-fixtures.sh."
-        }
-        Some("flyvis-pretrained") => {
-            "Run ci/fetch-fixtures.sh, or `uv run --project tools tools/export_params.py`."
-        }
-        Some("flyvis-reference") => {
-            "Run ci/fetch-fixtures.sh, or `uv run --project tools tools/export_reference.py`."
-        }
-        _ => "Run ci/fetch-fixtures.sh.",
-    }
 }
 
 /// A missing fixture's notice, `<path> not found. <how to get it>`, without
@@ -67,7 +39,7 @@ fn how_to_get(rel: &str) -> &'static str {
 /// this panics instead, naming the path.
 fn missing(path: &str, rel: &str) -> String {
     assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing");
-    format!("{path} not found. {}", how_to_get(rel))
+    format!("{path} not found. {}", crate::parity::how_to_get(rel))
 }
 
 /// The bytes of `data/<rel>`, or its missing-fixture notice. Prints nothing.

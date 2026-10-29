@@ -18,6 +18,4 @@ path = "src/lib.rs"
 
 [dependencies]
 semblance-connectome.workspace = true
-
-[dev-dependencies]
 semblance-sim.workspace = true
