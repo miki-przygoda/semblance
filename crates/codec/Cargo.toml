@@ -10,7 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
-description = "The compress/uncompress round-trip: a Codec trait, a lossless WeightCodec baseline, and a ReducedCodec whose encode and decode are not implemented yet."
+description = "The compress/uncompress round-trip: a Codec trait, a lossless WeightCodec baseline, and a ReducedCodec whose encode and decode are not implemented yet: calling them panics (todo!())."
 
 [lib]
 name = "semblance_codec"

@@ -10,7 +10,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
-description = "Neuron dynamics (LIF baseline) and the simulation engine that couples a connectome to sensory input and motor readout."
+description = "Neuron dynamics: flyvis's graded (non-spiking) integrator in f32 and f64, plus a legacy LIF spiking baseline and the engine that couples a connectome to input and readout."
+# The acceptance tests read the workspace's fixtures and sources, which no
+# package carries.
+exclude = ["tests/"]
 
 [lib]
 name = "semblance_sim"

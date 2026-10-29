@@ -20,7 +20,7 @@ authors = ["Mikolaj Mikuliszyn"]
 repository = "https://github.com/miki-przygoda/semblance"
 homepage = "https://github.com/miki-przygoda/semblance"
 keywords = ["connectome", "neuroevolution", "compression", "neuroscience"]
-categories = ["science", "simulation"]
+categories = ["science::neuroscience", "simulation"]
 
 # Shared dependency versions. Individual crates opt in under [dependencies].
 [workspace.dependencies]
