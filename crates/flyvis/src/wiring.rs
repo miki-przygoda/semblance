@@ -1,8 +1,10 @@
 //! What the graded integrator needs from flyvis's build besides the network:
-//! which synapse-count group each edge belongs to, and which nodes receive
-//! the visual input.
+//! which synapse-count group each edge belongs to, which nodes receive the
+//! visual input, and how one stimulus frame reaches them.
 //!
-//! Spec: docs/superpowers/specs/2026-10-28-graded-settling-design.md, section 2.
+//! Specs: docs/superpowers/specs/2026-10-28-graded-settling-design.md,
+//! section 2; docs/superpowers/specs/2026-10-28-stimulus-traces-design.md,
+//! section 1 (`scatter_hexals`).
 
 use std::collections::HashMap;
 
@@ -18,6 +20,10 @@ pub enum WiringError {
     GroupCount { expected: usize, found: usize },
     /// An input unit names no cell type of the network.
     UnknownInputUnit(String),
+    /// An input type's node list and the stimulus frame differ in length.
+    FrameLength { expected: usize, found: usize },
+    /// An input node is past the end of the buffer being written.
+    NodeOutOfRange { node: u32, len: usize },
 }
 
 impl std::fmt::Display for WiringError {
@@ -26,6 +32,10 @@ impl std::fmt::Display for WiringError {
             WiringError::GroupCount { expected, found } =>
                 write!(f, "{found} synapse-count groups, expected {expected}"),
             WiringError::UnknownInputUnit(u) => write!(f, "input unit {u:?} is not a cell type"),
+            WiringError::FrameLength { expected, found } =>
+                write!(f, "a frame of {found} hexals, but an input type has {expected} nodes"),
+            WiringError::NodeOutOfRange { node, len } =>
+                write!(f, "input node {node} is past the end of a buffer of {len}"),
         }
     }
 }
@@ -80,10 +90,34 @@ pub fn input_nodes(spec: &ConnectomeSpec, net: &TypedNetwork) -> Result<Vec<Vec<
         .collect()
 }
 
+/// Writes one stimulus frame onto the input nodes: `out[nodes[k][h]] =
+/// frame[h]` for every input type k and hexal h. Nodes not in `nodes` are left
+/// as they are; the input nodes are overwritten, so a buffer zeroed once stays
+/// zero elsewhere. flyvis `stimulus.py:206`.
+///
+/// `nodes` is [`input_nodes`]'s [8][721]. Everything is checked before
+/// anything is written, so an error leaves `out` untouched.
+pub fn scatter_hexals<T: Copy>(nodes: &[Vec<u32>], frame: &[T], out: &mut [T]) -> Result<(), WiringError> {
+    for k in nodes {
+        if k.len() != frame.len() {
+            return Err(WiringError::FrameLength { expected: k.len(), found: frame.len() });
+        }
+        if let Some(&node) = k.iter().find(|&&i| i as usize >= out.len()) {
+            return Err(WiringError::NodeOutOfRange { node, len: out.len() });
+        }
+    }
+    for k in nodes {
+        for (&i, &x) in k.iter().zip(frame) {
+            out[i as usize] = x;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::real_spec_and_network;
+    use crate::test_support::{load_stimulus_fixture, real_spec_and_network};
     use semblance_connectome::TypedNetworkParts;
 
     /// Types A and B on two columns; one connection type A -> B, realised at
@@ -142,6 +176,88 @@ mod tests {
             input_nodes(&spec(r#"["C"]"#), &net()),
             Err(WiringError::UnknownInputUnit("C".into()))
         );
+    }
+
+    #[test]
+    fn scatter_writes_every_type_and_leaves_other_nodes_alone() {
+        let nodes = input_nodes(&spec(r#"["B","A"]"#), &net()).unwrap();
+        let mut out = [-1i32; 4];
+        assert_eq!(scatter_hexals(&nodes, &[7, 9], &mut out), Ok(()));
+        assert_eq!(out, [7, 9, 7, 9], "hexal h lands on each type's h-th node");
+        let mut out = [-1i32; 5];
+        assert_eq!(scatter_hexals(&[vec![2, 3]], &[7, 9], &mut out), Ok(()));
+        assert_eq!(out, [-1, -1, 7, 9, -1], "nodes outside `nodes` keep their values");
+    }
+
+    #[test]
+    fn scatter_refuses_a_frame_of_the_wrong_length_and_writes_nothing() {
+        let mut out = [-1i32; 4];
+        assert_eq!(
+            scatter_hexals(&[vec![0, 1], vec![2, 3]], &[7, 9, 11], &mut out),
+            Err(WiringError::FrameLength { expected: 2, found: 3 })
+        );
+        assert_eq!(
+            scatter_hexals(&[vec![0, 1], vec![2]], &[7, 9], &mut out),
+            Err(WiringError::FrameLength { expected: 1, found: 2 }),
+            "checked for every type before the first is written"
+        );
+        assert_eq!(out, [-1; 4]);
+    }
+
+    #[test]
+    fn scatter_refuses_a_node_past_the_buffer_and_writes_nothing() {
+        let mut out = [-1i32; 4];
+        assert_eq!(
+            scatter_hexals(&[vec![0, 1], vec![2, 4]], &[7, 9], &mut out),
+            Err(WiringError::NodeOutOfRange { node: 4, len: 4 })
+        );
+        assert_eq!(out, [-1; 4], "the first type is valid, and still not written");
+    }
+
+    /// The input mapping, gated on flyvis's own lattice: a frame lit at
+    /// hexal h alone lights exactly eight nodes, one in each input type, each
+    /// at hex_coords.csv row h's (u, v). A transposed or reflected mapping
+    /// fails here, before any dynamics run.
+    #[test]
+    fn input_mapping_matches_flyviss_lattice() {
+        let Some(csv) = load_stimulus_fixture("hex_coords.csv") else { return };
+        let Some((spec, net)) = real_spec_and_network() else { return };
+        let mut lines = csv.lines();
+        assert_eq!(lines.next(), Some("index,u,v"), "hex_coords.csv header");
+        let rows: Vec<(i32, i32)> = lines
+            .enumerate()
+            .map(|(h, line)| {
+                let f: Vec<i32> = line.split(',').map(|x| x.trim().parse().expect("an integer")).collect();
+                assert_eq!((f.len(), f[0]), (3, h as i32), "hex_coords.csv row {h}");
+                (f[1], f[2])
+            })
+            .collect();
+        assert_eq!(rows.len(), 721);
+        let nodes = input_nodes(&spec, &net).expect("input units are cell types");
+        let input_types: Vec<u16> = nodes.iter().map(|k| net.node_cell_type()[k[0] as usize]).collect();
+        let mut frame = vec![0u8; 721];
+        let mut out = vec![0u8; net.num_nodes()];
+        for (h, &(u, v)) in rows.iter().enumerate() {
+            frame[h] = 1;
+            out.fill(0);
+            scatter_hexals(&nodes, &frame, &mut out).expect("721 hexals onto 8 x 721 nodes");
+            frame[h] = 0;
+            let lit: Vec<usize> = (0..out.len()).filter(|&i| out[i] == 1).collect();
+            assert_eq!(lit.len(), 8, "hexal {h} lights {} nodes", lit.len());
+            let mut types: Vec<u16> = lit.iter().map(|&i| net.node_cell_type()[i]).collect();
+            types.sort_unstable();
+            let mut want = input_types.clone();
+            want.sort_unstable();
+            assert_eq!(types, want, "hexal {h}: one node in each input type");
+            for &i in &lit {
+                assert_eq!(
+                    (i32::from(net.node_u()[i]), i32::from(net.node_v()[i])),
+                    (u, v),
+                    "hexal {h} lands on node {i} ({})",
+                    net.cell_types()[net.node_cell_type()[i] as usize]
+                );
+            }
+        }
     }
 
     #[test]
