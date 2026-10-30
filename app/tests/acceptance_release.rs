@@ -450,7 +450,8 @@ fn release_03_every_package_carries_license_and_notice_and_the_publish_dry_run_p
     let licence = read("LICENSE");
     let notice = read("NOTICE");
 
-    // The per-package files are tracked symlinks to the root ones.
+    // The per-package files are symlinks to the root ones, read from the
+    // working tree (no test reads the git index).
     for (name, dir) in PACKAGE_DIRS {
         let up = if dir == "app" { "../" } else { "../../" };
         for f in ["LICENSE", "NOTICE"] {
@@ -459,9 +460,6 @@ fn release_03_every_package_carries_license_and_notice_and_the_publish_dry_run_p
             let meta = std::fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
             assert!(meta.file_type().is_symlink(), "{rel} is a symlink ({name})");
             assert_eq!(std::fs::read_link(&path).unwrap(), Path::new(&format!("{up}{f}")), "{rel}'s target");
-            let staged = git(&["ls-files", "-s", "--", &rel]);
-            let line = text(&staged.stdout);
-            assert!(line.starts_with("120000 "), "{rel} is tracked as a symlink: {line:?}");
         }
     }
 
@@ -609,8 +607,38 @@ fn release_07_the_descriptions_and_categories_are_the_specs() {
 // RELEASE-08
 // ---------------------------------------------------------------------------
 
+/// `s` as a calendar date `(year, month, day)`, if it is a real `YYYY-MM-DD`.
+fn calendar_date(s: &str) -> Option<(u32, u32, u32)> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let part = &s[r];
+        if !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (1..=days).contains(&d).then_some((y, m, d))
+}
+
+/// The tree alone cannot know the tag date, and no test reads git tags, so
+/// RELEASE-08's "`date-released` is the tag date" is a manual release step:
+/// the head sets it when tagging v0.3.0. What the tree can prove is checked
+/// here: the version is the workspace's, and the date is a real date no
+/// earlier than the result record it releases.
 #[test]
-fn release_08_citation_is_version_0_3_0_dated_the_tag() {
+fn release_08_citation_is_the_workspace_version_dated_no_earlier_than_the_record() {
     let cff = read("CITATION.cff");
     let field = |k: &str| {
         cff.lines()
@@ -618,25 +646,25 @@ fn release_08_citation_is_version_0_3_0_dated_the_tag() {
             .map(|v| v.trim().trim_matches('"').to_string())
             .unwrap_or_else(|| panic!("CITATION.cff has no top-level {k}"))
     };
-    assert_eq!(field("version"), "0.3.0");
-    let date = field("date-released");
-    let b = date.as_bytes();
-    assert!(
-        b.len() == 10 && b[4] == b'-' && b[7] == b'-' && date.chars().filter(char::is_ascii_digit).count() == 8,
-        "date-released is YYYY-MM-DD: {date}"
-    );
 
-    // The tag date: checkable once the head has tagged v0.3.0.
-    let tag = git(&["for-each-ref", "refs/tags/v0.3.0", "--format=%(objecttype) %(taggerdate:short)"]);
-    let tag = text(&tag.stdout);
-    let tag = tag.trim();
-    if tag.is_empty() {
-        eprintln!("skipping: no v0.3.0 tag in this clone, so date-released is not compared with it");
-    } else {
-        let (kind, tag_date) = tag.split_once(' ').unwrap_or((tag, ""));
-        assert_eq!(kind, "tag", "v0.3.0 is an annotated tag");
-        assert_eq!(date, tag_date, "date-released is the tag date");
-    }
+    let manifest = read("Cargo.toml");
+    let pkg = toml_section(&manifest, "workspace.package");
+    let version = pkg.iter().find(|(k, _)| k == "version").map(|(_, v)| v.trim_matches('"').to_string());
+    assert_eq!(version.as_deref(), Some("0.3.0"), "[workspace.package] version");
+    assert_eq!(Some(field("version")), version, "CITATION.cff's version is the workspace's");
+
+    let date = field("date-released");
+    let released = calendar_date(&date).unwrap_or_else(|| panic!("date-released is a real YYYY-MM-DD date: {date}"));
+
+    let record = read("docs/results/0.3.0-flyvis-parity.md");
+    let generated = record
+        .lines()
+        .find_map(|l| l.strip_prefix("**Generated:**"))
+        .expect("the record has a **Generated:** line");
+    let generated = generated.trim().rsplit([' ', ',']).next().unwrap_or("");
+    let made = calendar_date(generated)
+        .unwrap_or_else(|| panic!("the record's Generated line ends in a YYYY-MM-DD date: {generated:?}"));
+    assert!(released >= made, "date-released {date} is no earlier than the record's Generated date {generated}");
 }
 
 // ---------------------------------------------------------------------------

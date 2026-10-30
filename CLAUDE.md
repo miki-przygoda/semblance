@@ -157,8 +157,7 @@ its own (`acceptance_traces.rs`'s
 `every_fixture_gated_acceptance_test_prints_its_own_skip_notice` holds the
 acceptance files to that). A test that reads more than one missing fixture
 prints more than one: 166 of the 172 print a notice, 178 notices in all
-under `--nocapture --test-threads=1` (one more, `release_08`'s, says there is
-no `v0.3.0` tag; it is not a fixture). The other six -- `validate_02`, `_07`,
+under `--nocapture --test-threads=1`. The other six -- `validate_02`, `_07`,
 `_11`, `_12`, `_13` and `_20` in `app/tests/acceptance_validate.rs` -- share
 `good()`'s cached run, which prints its notice only for the first test to
 ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 172 fails
