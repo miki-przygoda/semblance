@@ -700,6 +700,29 @@ fn claude_counts() -> (u32, u32) {
     (tests, skips)
 }
 
+/// The `#[test]` functions written out in the workspace's sources: a floor
+/// under the real count, which also has the tests the settling and trace
+/// macros expand to and the doctests. It needs no nested cargo, so a count
+/// measured before tests were added cannot pass unnoticed.
+fn written_tests() -> u32 {
+    fn walk(dir: &Path, n: &mut u32) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display())) {
+            let path = entry.unwrap_or_else(|e| panic!("reading {}: {e}", dir.display())).path();
+            if path.is_dir() {
+                walk(&path, n);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                *n += src.lines().filter(|l| l.trim() == "#[test]").count() as u32;
+            }
+        }
+    }
+    let mut n = 0;
+    for top in ["app", "crates"] {
+        walk(&workspace().join(top), &mut n);
+    }
+    n
+}
+
 // ---------------------------------------------------------------------------
 // RELEASE-10
 // ---------------------------------------------------------------------------
@@ -772,6 +795,8 @@ fn release_11_claude_md_is_at_0_3_0_and_describes_validate_the_record_and_the_ya
 
     let (tests, skips) = claude_counts();
     assert_ne!((tests, skips), (429, 123), "the counts are re-measured, not 0.2.0's");
+    let written = written_tests();
+    assert!(tests >= written, "CLAUDE.md's {tests} tests are fewer than the {written} `#[test]` functions in the tree: re-measure");
     assert!(f.contains(&format!("\"{tests} passed, 0 failed\"")), "the passed count matches {tests}");
     assert!(f.contains(&format!("every one of the {skips} fails")), "the require-fixtures count matches {skips}");
 
