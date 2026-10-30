@@ -9,7 +9,14 @@
 //! The data directories are temporary, under `CARGO_TARGET_TMPDIR`: either
 //! placeholder files (enough for the missing-data report, which only looks
 //! at which paths exist), or symlinks to the workspace's real fixtures with
-//! one file copied and altered. The real `data/` is never written.
+//! one or two files copied and altered. The real `data/` is never written.
+//!
+//! A full `validate` on the real fixtures is minutes of CPU, so only three
+//! run one: the unaltered fixtures, `exact` and `nonfinite`, each once per
+//! test binary, whose tests read every row. Where a test checks a code path
+//! rather than the numbers (an errored control, a write error, 2 over 1, the
+//! thread count), its fixtures are altered so that most jobs stop within
+//! their first steps, and say so.
 //!
 //! A test that needs the real fixtures skips without them, printing
 //! `skipping: ...`, unless `SEMBLANCE_REQUIRE_FIXTURES=1`, which turns the
@@ -21,16 +28,17 @@ use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
 use semblance_flyvis::parity::{how_to_get, required_files, CONTROL_MISS, COVERAGE_THRESHOLD, F64_BOUND};
+use semblance_flyvis::reference::{Dtype, Manifest};
 
 const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 const USAGE: &str = "usage: semblance validate [--data DIR] [--threads N] [--markdown]";
 const RECORD: &str = "docs/results/0.3.0-flyvis-parity.md";
 
 const SETTLED_F64: &str = "flyvis-reference/settled.f64.bin";
+const SETTLED_F32: &str = "flyvis-reference/settled.f32.bin";
+const INPUT: &str = "flyvis-reference/input.f64.bin";
 const ENSEMBLE: &str = "flyvis-pretrained/ensemble.csv";
 const MANIFEST: &str = "flyvis-reference/manifest.json";
-/// Nodes in the network: one settled block's length.
-const N_NODES: usize = 45669;
 
 // ---------------------------------------------------------------------------
 // Running the binary
@@ -158,22 +166,45 @@ fn linked(name: &str, copied: &[&str]) -> PathBuf {
     dir
 }
 
-/// Overwrites the f64 at index `i` of the (copied) file `rel` under `dir`.
-fn set_f64(dir: &Path, rel: &str, i: usize, v: f64) {
-    let p = dir.join(rel);
+/// The real fixtures' manifest, which places every block.
+fn manifest() -> &'static Manifest {
+    static M: OnceLock<Manifest> = OnceLock::new();
+    M.get_or_init(|| Manifest::parse(&fs::read_to_string(real_data().join(MANIFEST)).unwrap()).unwrap())
+}
+
+/// Overwrites value `i` of the block (run, dt, sequence) of the (copied)
+/// reference file `name` under `dir`, in that file's own dtype.
+fn set_value(dir: &Path, name: &str, run: Option<u32>, dt: &str, sequence: Option<u32>, i: usize, v: f64) {
+    let info = manifest().file(name).unwrap_or_else(|| panic!("{name} is in the manifest"));
+    let b = info
+        .blocks
+        .iter()
+        .find(|b| b.run == run && b.dt == dt && b.sequence == sequence)
+        .unwrap_or_else(|| panic!("{name} has a block for run {run:?}, dt {dt}, sequence {sequence:?}"));
+    let p = dir.join("flyvis-reference").join(name);
     let mut bytes = fs::read(&p).unwrap();
-    bytes[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    let at = b.offset + i * info.dtype.size();
+    match info.dtype {
+        Dtype::F32 => bytes[at..at + 4].copy_from_slice(&(v as f32).to_le_bytes()),
+        Dtype::F64 => bytes[at..at + 8].copy_from_slice(&v.to_le_bytes()),
+    }
     fs::write(&p, bytes).unwrap();
 }
 
-/// settled.f64.bin holds runs 1, 3, 5, 7 in that order, one block each.
-fn settled_f64_index(run: usize, node: usize) -> usize {
-    assert!(run % 2 == 1);
-    (run / 2) * N_NODES + node
+/// Overwrites run `run`'s settled reference value at `node`, in whichever
+/// settled file holds that run.
+fn set_settled(dir: &Path, run: u32, node: usize, v: f64) {
+    let r = &manifest().runs[run as usize];
+    assert_eq!(r.index, run);
+    let name = match r.precision {
+        Dtype::F32 => "settled.f32.bin",
+        Dtype::F64 => "settled.f64.bin",
+    };
+    set_value(dir, name, Some(run), &r.dt, None, node, v);
 }
 
 // ---------------------------------------------------------------------------
-// Shared runs: each full `validate` takes seconds, so each kind runs once
+// Shared runs: a full `validate` is minutes of CPU, so each kind runs once
 // ---------------------------------------------------------------------------
 
 /// The log a trapped `git`, `uv` or `python` writes to if it is ever run.
@@ -236,16 +267,13 @@ fn run_altered(kind: &str) -> Run {
         // from flyvis's settled state.
         "exact" => {
             let d = linked("exact", &[SETTLED_F64]);
-            set_f64(&d, SETTLED_F64, settled_f64_index(3, 100), 7.0);
+            set_settled(&d, 3, 100, 7.0);
             validate_on(&d, &[])
         }
         // run 3's settled value at node 100 is NaN: the control that starts
-        // from flyvis's settled state returns an error.
-        "nan" => {
-            let d = linked("nan", &[SETTLED_F64]);
-            set_f64(&d, SETTLED_F64, settled_f64_index(3, 100), f64::NAN);
-            validate_on(&d, &[])
-        }
+        // from flyvis's settled state returns an error. Exit 1. Cheap: see
+        // nan_dir.
+        "nan" => validate_on(nan_dir(), &[]),
         // model 049's synapse strengths are 1e20: its runs' state becomes
         // non-finite during settling.
         "nonfinite" => {
@@ -266,16 +294,45 @@ fn run_altered(kind: &str) -> Run {
             fs::write(&p, out.join("\n") + "\n").unwrap();
             validate_on(&d, &[])
         }
-        // run 1's settled value differs (a gate failure, 1) and run 5's is
-        // +0.0 (a mismatched fixture, 2), in the same run.
-        "both" => {
-            let d = linked("both", &[SETTLED_F64]);
-            set_f64(&d, SETTLED_F64, settled_f64_index(1, 100), 7.0);
-            set_f64(&d, SETTLED_F64, settled_f64_index(5, 100), 0.0);
-            validate_on(&d, &[])
-        }
+        // run 2's settled value differs (a gate failure, 1) and run 5's is
+        // +0.0 (a mismatched fixture, 2), in the same run. Cheap: see
+        // both_dir. At 3 threads, which VALIDATE-07 compares with 16.
+        "both" => validate_on(both_dir(), &["--threads", "3"]),
         other => panic!("no such altered fixture: {other}"),
     }
+}
+
+/// Node 100 of run 3's settled reference is NaN, and frame 0 of sequence 0's
+/// input is NaN at hexal 0 at both dts. Every job settles, then becomes
+/// non-finite on its first step of sequence 0 (a gate failure, 1), so no job
+/// plays its 6,800 or 1,700 steps; the controls play sequence 8 only, whose
+/// input is untouched. Built once.
+fn nan_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let d = linked("nan", &[SETTLED_F64, INPUT]);
+        set_settled(&d, 3, 100, f64::NAN);
+        for dt in &manifest().dts {
+            set_value(&d, "input.f64.bin", None, &dt.id, Some(0), 0, f64::NAN);
+        }
+        d
+    })
+}
+
+/// Run 2's settled reference differs at node 100 (7.0) and every other run's
+/// but run 3's is +0.0 there, so runs 2 and 3 finish (1/50, the short runs)
+/// and the other six runs' jobs stop when settling is compared, before
+/// playing anything. Built once.
+fn both_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let d = linked("both", &[SETTLED_F32, SETTLED_F64]);
+        set_settled(&d, 2, 100, 7.0);
+        for run in [0, 1, 4, 5, 6, 7] {
+            set_settled(&d, run, 100, 0.0);
+        }
+        d
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -476,12 +533,25 @@ fn validate_04_exits_2_on_a_fixture_that_does_not_fit_and_2_wins_over_1() {
         fs::set_permissions(d.join(ENSEMBLE), fs::Permissions::from_mode(0o644)).unwrap();
     }
 
-    // Mismatched inside one job (a reference value of +0.0, run 5) while
-    // another job fails its gate (run 1): 2, though most jobs finished.
+    // Mismatched inside a job (a reference value of +0.0, run 5) while
+    // another job fails its gate (run 2): 2, though some jobs finished.
     let Some(b) = altered("both") else { return };
     assert_eq!(b.code, Some(2), "2 wins over 1: {}", b.all());
-    assert!(row(&b.stdout, "settling", 1, "exact").ends_with("FAIL"), "{}", b.stdout);
+    let failed = row(&b.stdout, "settling", 2, "exact");
+    assert!(failed.ends_with("  FAIL") && failed.contains("node 100"), "a gate failure, not an error: {}", b.stdout);
     assert!(row(&b.stdout, "settling", 5, "exact").contains("±0.0"), "{}", b.stdout);
+    // Runs 2 and 3 finished: their traces were compared and hold.
+    for run in [2, 3] {
+        for counts in ["exact", "libm"] {
+            assert!(!row(&b.stdout, "traces", run, counts).ends_with("FAIL"), "run {run} finished:\n{}", b.stdout);
+        }
+    }
+    // The other runs stopped at settling (which keeps this run cheap).
+    for run in [0, 1, 4, 5, 6, 7] {
+        for counts in ["exact", "libm"] {
+            assert!(row(&b.stdout, "traces", run, counts).contains("±0.0"), "run {run} stopped:\n{}", b.stdout);
+        }
+    }
     let v = verdict(&b.stdout);
     assert!(v.contains("NOT VERIFIED") && v.contains("nothing counts as verified"), "{v}");
     assert!(!v.contains("PASS"), "{v}");
@@ -542,20 +612,30 @@ fn validate_07_threads_default_to_available_parallelism_capped_at_16_and_do_not_
     };
     assert_eq!(threads_of(&g.run.stdout), format!("{want} threads"), "{}", g.run.stdout);
 
-    let d = linked("07", &[]);
-    let many = validate_on(&d, &["--threads", "64"]);
-    assert_eq!(many.code, Some(0), "--threads 64 is accepted: {}", many.all());
-    assert_eq!(threads_of(&many.stdout), "16 threads", "capped at 16:\n{}", many.stdout);
-
-    let few = validate_on(&d, &["--threads", "3"]);
-    assert_eq!(few.code, Some(0), "{}", few.all());
+    // On both_dir (runs 2 and 3 run in full, the others stop at settling;
+    // see there), at 3 threads (altered("both")) and at 64.
+    let Some(few) = altered("both") else { return };
     assert_eq!(threads_of(&few.stdout), "3 threads", "{}", few.stdout);
+    let many = validate_on(both_dir(), &["--threads", "64"]);
+    assert!(!many.stderr.contains(USAGE) && many.code == few.code, "--threads 64 is accepted: {}", many.all());
+    assert_eq!(rows(&many.stdout).len(), 32, "--threads 64 is accepted: {}", many.all());
+    assert_eq!(threads_of(&many.stdout), "16 threads", "capped at 16:\n{}", many.stdout);
 
     // The data line differs (./data against --data); compare from the
     // reference line on.
     let body = |s: &str| thread_independent(&s[s.find("reference:").unwrap()..]);
     assert_eq!(body(&few.stdout), body(&many.stdout), "3 threads against 64");
-    assert_eq!(body(&few.stdout), body(&g.run.stdout), "3 threads against the default");
+    // Against the default thread count, on the unaltered fixtures: every
+    // row whose inputs both_dir did not alter, computed in full.
+    for (stage, run) in [("settling", 3), ("traces", 2), ("traces", 3)] {
+        for counts in ["exact", "libm"] {
+            assert_eq!(
+                row(&few.stdout, stage, run, counts),
+                row(&g.run.stdout, stage, run, counts),
+                "3 threads against the default"
+            );
+        }
+    }
 }
 
 /// VALIDATE-08: with fixture files absent: stderr names how many, lists each
@@ -775,6 +855,12 @@ fn validate_15_an_errored_control_prints_its_error_and_fail_and_exits_1() {
     assert!(!c.contains("unequal"), "the error, not a measurement: {c}");
     assert!(c.contains("run 3") && c.contains("not finite"), "the error: {c}");
     assert!(verdict(&r.stdout).contains("control flyvis's settled start (run 3, seq 8)"), "{}", r.stdout);
+    // Every job stopped on its first step of sequence 0 (see nan_dir): a gate
+    // failure, so the exit code is still 1, and this run stays cheap.
+    assert_eq!(rows(&r.stdout).len(), 32, "{}", r.stdout);
+    for l in rows(&r.stdout) {
+        assert!(l.contains("is not finite after frame 0 of sequence 0") && l.ends_with("FAIL"), "{l}");
+    }
 }
 
 /// VALIDATE-16: stdout closed early: output stops and the command exits
@@ -782,16 +868,17 @@ fn validate_15_an_errored_control_prints_its_error_and_fail_and_exits_1() {
 /// is exit 2.
 #[test]
 fn validate_16_a_closed_stdout_keeps_the_exit_code_and_another_write_error_is_2() {
-    if !fixtures_or_skip("validate_16") {
-        return;
-    }
+    // On nan_dir, whose run computes exit 1 (VALIDATE-15's run, with its
+    // stdout open) and is cheap: every job stops within its first steps.
+    let Some(open) = altered("nan") else { return };
+    assert_eq!(open.code, Some(1), "{}", open.all());
+    let d = nan_dir();
+
     // A failing run (exit 1) whose stdout is closed before it writes.
-    let d = linked("16-exact", &[SETTLED_F64]);
-    set_f64(&d, SETTLED_F64, settled_f64_index(3, 100), 7.0);
     let mut child = bin()
         .arg("validate")
         .arg("--data")
-        .arg(&d)
+        .arg(d)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -801,19 +888,19 @@ fn validate_16_a_closed_stdout_keeps_the_exit_code_and_another_write_error_is_2(
     assert_eq!(r.code, Some(1), "the computed code, not a panic: {}", r.all());
     assert!(!r.stderr.contains("panicked"), "{}", r.stderr);
 
-    // A passing run (exit 0) whose stdout is a file it may not grow: with
+    // The same run (exit 1) whose stdout is a file it may not grow: with
     // the file-size limit at 0 and SIGXFSZ ignored, every write fails with
-    // EFBIG, a write error other than a closed pipe: exit 2. (A read-only
-    // descriptor would not do: Rust's stdout treats EBADF as success.)
+    // EFBIG, a write error other than a closed pipe: exit 2, not the 1 it
+    // computed. (A read-only descriptor would not do: Rust's stdout treats
+    // EBADF as success.)
     #[cfg(unix)]
     {
-        let d = linked("16-good", &[]);
         let sink = fresh("16-sink").join("stdout.txt");
         let r: Run = Command::new("/bin/sh")
             .arg("-c")
             .arg("trap '' XFSZ; ulimit -f 0; exec \"$0\" validate --data \"$1\" > \"$2\"")
             .arg(env!("CARGO_BIN_EXE_semblance"))
-            .arg(&d)
+            .arg(d)
             .arg(&sink)
             .output()
             .expect("sh runs the binary")
