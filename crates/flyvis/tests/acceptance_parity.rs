@@ -1805,6 +1805,8 @@ struct Outcome {
 
 impl Shadow {
     /// Lays out data/ with every real fixture linked in, `alter` applied.
+    /// A fixture missing from the real data/ is missing here too, so a test
+    /// that needs no fixture (PARITY-31) still runs on a fresh clone.
     fn data(&self, alter: &[(&str, Alter)]) {
         let data = self.root.join("data");
         if data.symlink_metadata().is_ok() {
@@ -1819,7 +1821,8 @@ impl Shadow {
         }
         for dir in ["flyvis-pretrained", "flyvis-reference"] {
             std::fs::create_dir_all(data.join(dir)).unwrap();
-            for entry in std::fs::read_dir(real.join(dir)).unwrap() {
+            let Ok(entries) = std::fs::read_dir(real.join(dir)) else { continue };
+            for entry in entries {
                 let entry = entry.unwrap();
                 link(&entry.path(), &data.join(dir).join(entry.file_name()));
             }
