@@ -135,8 +135,22 @@ pub fn cmd(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let missing: Vec<&str> =
-        parity::required_files().iter().copied().filter(|rel| std::fs::metadata(a.data.join(rel)).is_err()).collect();
+    // Only an absent file (`NotFound`) is missing. Any other error is a file
+    // that is present but cannot be read: the library's `Unreadable`, with
+    // the real error, not the missing list and its fetch instructions.
+    let mut missing: Vec<&str> = Vec::new();
+    for &rel in parity::required_files() {
+        let path = a.data.join(rel);
+        match std::fs::metadata(&path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(rel),
+            Err(e) => {
+                let e = parity::ParityError::Unreadable { rel: rel.to_string(), path, kind: e.kind() };
+                eprintln!("validate: nothing was verified: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     if !missing.is_empty() {
         eprint!("{}", missing_message(&a.data, &missing));
         return ExitCode::from(2);

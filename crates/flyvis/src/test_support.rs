@@ -88,23 +88,46 @@ pub(crate) fn write_new(path: &std::path::Path, bytes: &[u8]) -> std::io::Result
 pub(crate) fn require_present(rels: &[&str]) -> Result<(), String> {
     for rel in rels {
         let path = data_path(rel);
-        if std::fs::metadata(&path).is_err() {
-            return Err(missing(&path, rel));
+        if let Err(e) = std::fs::metadata(&path) {
+            return Err(read_error(&path, rel, e));
         }
     }
     Ok(())
 }
 
+/// What an io error reading the fixture at `path` means: a missing file
+/// (`NotFound`) is its notice, for the caller to skip with. Anything else --
+/// permission denied, not UTF-8, a directory -- is a fixture that is present
+/// but broken, and panics naming the path and the error, with or without
+/// `SEMBLANCE_REQUIRE_FIXTURES` (spec R21): it never becomes a skip.
+fn read_error(path: &str, rel: &str, e: std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => missing(path, rel),
+        _ => panic!("{path}: present but cannot be read: {e}"),
+    }
+}
+
+/// The bytes at `path` (`data/<rel>`), or its missing-fixture notice.
+fn read_bytes_at(path: &str, rel: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| read_error(path, rel, e))
+}
+
+/// The text at `path` (`data/<rel>`), or its missing-fixture notice.
+fn read_text_at(path: &str, rel: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| read_error(path, rel, e))
+}
+
 /// The bytes of `data/<rel>`, or its missing-fixture notice. Prints nothing.
+/// A file that is present but cannot be read panics instead (R21).
 pub(crate) fn read_fixture_bytes(rel: &str) -> Result<Vec<u8>, String> {
-    let path = data_path(rel);
-    std::fs::read(&path).map_err(|_| missing(&path, rel))
+    read_bytes_at(&data_path(rel), rel)
 }
 
 /// The text of `data/<rel>`, or its missing-fixture notice. Prints nothing.
+/// A file that is present but cannot be read, or is not UTF-8, panics
+/// instead (R21).
 pub(crate) fn read_fixture_text(rel: &str) -> Result<String, String> {
-    let path = data_path(rel);
-    std::fs::read_to_string(&path).map_err(|_| missing(&path, rel))
+    read_text_at(&data_path(rel), rel)
 }
 
 /// `Some` of a loaded fixture, or `None` after printing
@@ -222,6 +245,51 @@ mod tests {
         write_new(&dir.join("fresh"), b"new").unwrap();
         assert_eq!(std::fs::read(dir.join("fresh")).unwrap(), b"new");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fixture that is present but not UTF-8 is broken, not missing: the
+    /// text read panics with the real error rather than handing back the
+    /// skip notice (spec R21). The bytes read of the same file succeeds.
+    #[test]
+    fn a_present_fixture_that_is_not_utf8_panics_rather_than_skips() {
+        let dir = scratch_dir("fixture-not-utf8");
+        let path = dir.join("manifest.json");
+        write_new(&path, b"{}\xff").unwrap();
+        let path = path.to_str().unwrap().to_string();
+        assert_eq!(read_bytes_at(&path, "flyvis-reference/manifest.json"), Ok(b"{}\xff".to_vec()));
+        let text = std::panic::catch_unwind(|| read_text_at(&path, "flyvis-reference/manifest.json"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        let msg = *text.expect_err("a non-UTF-8 fixture must panic, not skip").downcast::<String>().unwrap();
+        assert!(msg.starts_with(&format!("{path}: present but cannot be read: ")), "{msg}");
+        assert!(!msg.contains("not found") && !msg.contains("missing"), "names the wrong problem: {msg}");
+    }
+
+    /// A fixture path that is present but cannot be read (here a directory)
+    /// panics with the real error, for both reads, never the skip notice.
+    #[test]
+    fn a_present_fixture_that_cannot_be_read_panics_rather_than_skips() {
+        let dir = scratch_dir("fixture-unreadable");
+        let path = dir.to_str().unwrap().to_string();
+        let bytes = std::panic::catch_unwind(|| read_bytes_at(&path, "flyvis-reference/centre.f64.bin"));
+        let text = std::panic::catch_unwind(|| read_text_at(&path, "flyvis-reference/manifest.json"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        for r in [bytes.map(|_| ()), text.map(|_| ())] {
+            let msg = *r.expect_err("an unreadable fixture must panic, not skip").downcast::<String>().unwrap();
+            assert!(msg.starts_with(&format!("{path}: present but cannot be read: ")), "{msg}");
+        }
+    }
+
+    /// Only `NotFound` is a missing fixture; a permission error, which a
+    /// `chmod 000` fixture or directory gives, is not, and panics naming it.
+    #[test]
+    fn only_not_found_is_a_missing_fixture() {
+        let r = std::panic::catch_unwind(|| {
+            let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+            read_error("d/ensemble.csv", "flyvis-pretrained/ensemble.csv", denied)
+        });
+        let msg = *r.expect_err("permission denied must panic, not skip").downcast::<String>().unwrap();
+        assert!(msg.starts_with("d/ensemble.csv: present but cannot be read: "), "{msg}");
+        assert!(msg.to_lowercase().contains("permission denied"), "{msg}");
     }
 
     /// A missing file is an `Err` carrying its notice, unprinted and without
