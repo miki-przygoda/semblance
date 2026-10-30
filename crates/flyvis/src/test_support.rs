@@ -47,6 +47,41 @@ pub(crate) fn data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{}/../../data", env!("CARGO_MANIFEST_DIR")))
 }
 
+/// A fresh, empty scratch directory for one test, under this build's own
+/// target dir (`<target>/<profile>/test-scratch/<name>-<pid>`, found from the
+/// test binary, which cargo puts in `<target>/<profile>/deps/`). Never under
+/// `std::env::temp_dir()`: on a shared host that is a world-writable `/tmp`,
+/// where another local account can pre-create a predictable path, plant
+/// symlinks in it and have a test write through them. Lib unit tests have no
+/// `CARGO_TARGET_TMPDIR`; this is their equivalent.
+///
+/// A leftover dir of the same name (from a run that died before cleaning up)
+/// is removed first, and any failure to remove it panics rather than being
+/// ignored. The dir itself is made with `create_dir`, which fails if anything
+/// is already at the path, so the test always owns what it gets.
+pub(crate) fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let profile = exe.parent().and_then(|deps| deps.parent()).expect("<target>/<profile>/deps/<binary>");
+    let base = profile.join("test-scratch");
+    std::fs::create_dir_all(&base).unwrap_or_else(|e| panic!("{}: {e}", base.display()));
+    let dir = base.join(format!("{name}-{}", std::process::id()));
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("cannot clear the stale scratch dir {}: {e}", dir.display()),
+    }
+    std::fs::create_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    dir
+}
+
+/// Writes `bytes` to a new file at `path`, refusing (`AlreadyExists`) if
+/// anything is already there. `create_new` is `O_CREAT | O_EXCL`, which never
+/// follows a symlink at `path`, so a planted link cannot redirect the write.
+pub(crate) fn write_new(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(bytes)
+}
+
 /// Whether every file in `rels` is present under `data/`, by metadata only:
 /// `Err` of the first absent one's notice, unprinted. Under
 /// `SEMBLANCE_REQUIRE_FIXTURES=1` an absent file panics instead.
@@ -157,6 +192,37 @@ pub(crate) fn load_reference_bytes(name: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch dir lives under this build's own target dir, never in the
+    /// shared temp dir another local account can write to, and is fresh.
+    #[test]
+    fn a_scratch_dir_is_fresh_and_under_the_target_dir_not_the_shared_tmp() {
+        let dir = scratch_dir("scratch-self-test");
+        let exe = std::env::current_exe().unwrap();
+        let target = exe.parent().unwrap().parent().unwrap();
+        assert!(dir.starts_with(target), "{} is not under {}", dir.display(), target.display());
+        assert!(!dir.starts_with(std::env::temp_dir()), "{} is in the shared temp dir", dir.display());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "a scratch dir starts empty");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `write_new` refuses a path that already exists, a planted symlink
+    /// above all, and leaves the link's target untouched.
+    #[cfg(unix)]
+    #[test]
+    fn write_new_refuses_a_planted_symlink_and_never_follows_it() {
+        let dir = scratch_dir("write-new-self-test");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let planted = dir.join("planted");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let e = write_new(&planted, b"overwritten").expect_err("a planted link must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        write_new(&dir.join("fresh"), b"new").unwrap();
+        assert_eq!(std::fs::read(dir.join("fresh")).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A missing file is an `Err` carrying its notice, unprinted and without
     /// the `skipping: ` prefix; under `SEMBLANCE_REQUIRE_FIXTURES=1` it is a

@@ -263,8 +263,10 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_missing_and_names_its_path() {
-        let dir = std::env::temp_dir().join(format!("semblance-parity-{}-missing", std::process::id()));
-        match read_bytes(&dir, "flyvis-reference/manifest.json") {
+        let dir = crate::test_support::scratch_dir("parity-missing");
+        let r = read_bytes(&dir, "flyvis-reference/manifest.json");
+        std::fs::remove_dir_all(&dir).unwrap();
+        match r {
             Err(ParityError::Missing { rel, path }) => {
                 assert_eq!(rel, "flyvis-reference/manifest.json");
                 assert_eq!(path, dir.join("flyvis-reference/manifest.json"));

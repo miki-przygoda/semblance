@@ -317,7 +317,7 @@ fn first(r: Result<Vec<SequenceResult>, ParityError>) -> Result<SequenceResult, 
 mod tests {
     use super::*;
     use crate::parity::SettlingResult;
-    use crate::test_support::{data_dir, or_skip, require_present};
+    use crate::test_support::{data_dir, or_skip, require_present, scratch_dir, write_new};
 
     fn diff0() -> Diff {
         Diff { max: 0.0, at: 0, differ: 0 }
@@ -493,16 +493,16 @@ mod tests {
         assert_eq!(one.coverage, four.coverage);
     }
 
-    /// A temporary data dir of links to the real files, with one replaced.
+    /// A fresh scratch data dir of links to the real files, with one
+    /// replaced, under the target dir (see `test_support::scratch_dir`).
     #[cfg(unix)]
     fn altered_data(test: &str, rel: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("semblance-parity-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch_dir(&format!("parity-{test}"));
         for r in required_files() {
             let to = dir.join(r);
             std::fs::create_dir_all(to.parent().unwrap()).unwrap();
             if *r == rel {
-                std::fs::write(&to, bytes).unwrap();
+                write_new(&to, bytes).unwrap_or_else(|e| panic!("{}: {e}", to.display()));
             } else {
                 std::os::unix::fs::symlink(data_dir().join(r), &to).unwrap();
             }

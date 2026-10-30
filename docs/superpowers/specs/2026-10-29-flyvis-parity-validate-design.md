@@ -1474,8 +1474,10 @@ test that gets `Err` skips with its own `skipping:` notice through
 - `run_equals_settle_then_play` (T3): R20's test, for run 3.
 - `validate_refuses_a_provenance_gap_one_ulp_off` and
   `validate_refuses_a_file_whose_size_disagrees` (`#[cfg(unix)]`): each builds
-  a temp data dir under `std::env::temp_dir()` with a unique name (the process
-  id and the test name), of symlinks to the real files except one altered
+  a fresh data dir from `test_support::scratch_dir` (under the build's own
+  target dir, never the shared `std::env::temp_dir()`, which another local
+  account can pre-populate; named from the test name and the process id), of
+  symlinks to the real files except one altered
   copy (PROVENANCE with one gap one ulp off; a `centre.f64.bin` one byte
   short). Each requires `Mismatch` before any job runs, naming the gap or the
   file, and removes the dir at the end. (`CARGO_TARGET_TMPDIR` is not set for
