@@ -22,42 +22,37 @@
 //! ratios, do not just watch them pass. All skip without fixtures;
 //! `SEMBLANCE_REQUIRE_FIXTURES=1` makes a skip a failure (see `CLAUDE.md`).
 //!
-//! The fixture, settling itself and the comparison live in `gate_support.rs`,
-//! shared with the trace gates in `trace_checks.rs`.
+//! What the gates compute -- settling, the comparison, the bounds -- lives
+//! in `crate::parity`, which `semblance validate` runs too. These tests are
+//! thin wrappers over it, and keep their names and their printed strings.
 
-use crate::gate_support::{cell_type, diff, fixture, settle, Counts, Precision, F64_BOUND};
-use crate::json;
+use crate::gate_support::fixture;
+use crate::parity::{
+    self, cell_type, check_settling_gaps, settle, settling_bounds, Counts, Precision, CONTROL_MISS, F64_BOUND,
+};
 use crate::pretrained::CELL_TYPES;
-use crate::reference::Dtype;
+use crate::reference::{Dtype, Provenance};
 use crate::test_support::load_reference_fixture;
 
-/// flyvis's own float32-vs-float64 gaps, PROVENANCE.json `f32_f64_gap`:
-/// (model, dt, settled, settling_centre). The libm gate's f32 bound is twice
-/// each (two f32 computations can sit on opposite sides of the exact value).
-/// `pre_registered_bounds_match_provenance` pins these to the file.
-const F32_GAPS: [(&str, &str, f64, f64); 4] = [
-    ("000", "1/200", 1.4114366875261908e-06, 1.347661143569212e-06),
-    ("049", "1/200", 6.1578304686449314e-06, 1.9363140433270587e-06),
-    ("000", "1/50", 1.276739533651039e-06, 2.6109457484935206e-06),
-    ("049", "1/50", 6.4440782598373936e-06, 1.1488733433040466e-05),
-];
+/// The test's name says which precision it runs; the registry must agree.
+fn assert_registered<R: Precision>(run: u32) {
+    assert_eq!(R::DTYPE, parity::RUNS[run as usize].3, "run {run}'s registered precision");
+}
 
 fn exact<R: Precision>(run: u32) {
+    assert_registered::<R>(run);
     let Some(f) = fixture() else { return };
     let info = &f.manifest.runs[run as usize];
-    let s = settle::<R>(f, run, &info.model, Counts::Torch);
-    let (settled, centre) = (diff(&s.rust, &s.flyvis), diff(&s.rust_centre, &s.flyvis_centre));
+    let s = settle(f, run, &info.model, Counts::Torch).unwrap_or_else(|e| panic!("{e}"));
+    let (settled, centre) = (s.settled, s.settling_centre);
     let n_centre = f.manifest.centre_nodes.len();
     eprintln!(
         "exact run {run} ({}, dt {}, {}): settled {} of {} differ; settling centre {} of {} differ",
-        info.model, info.dt, R::SUFFIX, settled.differ, s.rust.len(), centre.differ, s.rust_centre.len()
+        info.model, info.dt, R::SUFFIX, settled.differ, s.settled_len, centre.differ, s.centre_len
     );
     if settled.differ + centre.differ > 0 {
         let first = s
-            .rust_centre
-            .iter()
-            .zip(&s.flyvis_centre)
-            .position(|(a, b)| a != b)
+            .first_centre_difference
             .map(|i| format!("settle step {} ({})", i / n_centre, f.manifest.centre_nodes[i % n_centre].cell_type));
         panic!(
             "run {run} is not bit-equal to flyvis: {} settled and {} settling-centre values differ; \
@@ -72,32 +67,18 @@ fn exact<R: Precision>(run: u32) {
     }
 }
 
-fn bounds(model: &str, dt: &str, precision: Dtype) -> (f64, f64) {
-    match precision {
-        Dtype::F64 => (F64_BOUND, F64_BOUND),
-        Dtype::F32 => {
-            let &(_, _, s, c) = F32_GAPS.iter().find(|g| g.0 == model && g.1 == dt).expect("a gap for every f32 run");
-            (2.0 * s, 2.0 * c)
-        }
-    }
-}
-
 fn libm<R: Precision>(run: u32) {
+    assert_registered::<R>(run);
     let Some(f) = fixture() else { return };
     let info = &f.manifest.runs[run as usize];
-    let (bound_settled, bound_centre) = bounds(&info.model, &info.dt, info.precision);
-    let s = settle::<R>(f, run, &info.model, Counts::Libm);
-    let (settled, centre) = (diff(&s.rust, &s.flyvis), diff(&s.rust_centre, &s.flyvis_centre));
+    let (bound_settled, bound_centre) =
+        settling_bounds(&info.model, &info.dt, info.precision, Counts::Libm).unwrap_or_else(|e| panic!("{e}"));
+    let (bound_settled, bound_centre) = (bound_settled.value(), bound_centre.value());
+    let s = settle(f, run, &info.model, Counts::Libm).unwrap_or_else(|e| panic!("{e}"));
+    let (settled, centre) = (s.settled, s.settling_centre);
     let n_centre = f.manifest.centre_nodes.len();
-
-    let mut per_type = vec![0.0f64; f.net.cell_types().len()];
-    for (i, (a, b)) in s.rust.iter().zip(&s.flyvis).enumerate() {
-        let t = f.net.node_cell_type()[i] as usize;
-        per_type[t] = per_type[t].max((a - b).abs());
-    }
-    let mut worst: Vec<usize> = (0..per_type.len()).collect();
-    worst.sort_by(|&a, &b| per_type[b].total_cmp(&per_type[a]));
-    let worst: Vec<String> = worst[..3].iter().map(|&t| format!("{} {:.2e}", f.net.cell_types()[t], per_type[t])).collect();
+    let worst: Vec<String> =
+        s.worst_types(3).iter().map(|&t| format!("{} {:.2e}", f.net.cell_types()[t], s.per_type_max[t])).collect();
 
     eprintln!(
         "libm run {run} ({}, dt {}, {}): settled max {:.3e} at node {} ({}), {:.3e} of bound; \
@@ -105,7 +86,7 @@ fn libm<R: Precision>(run: u32) {
         info.model, info.dt, R::SUFFIX,
         settled.max, settled.at, cell_type(&f.net, settled.at), settled.max / bound_settled,
         centre.max, centre.at / n_centre, f.manifest.centre_nodes[centre.at % n_centre].cell_type, centre.max / bound_centre,
-        worst.join(", "), s.rust.len() - settled.differ, s.rust.len()
+        worst.join(", "), s.settled_len - settled.differ, s.settled_len
     );
     assert!(
         settled.max <= bound_settled && centre.max <= bound_centre,
@@ -161,16 +142,8 @@ fn reference_runs_are_the_eight_expected() {
 #[test]
 fn pre_registered_bounds_match_provenance() {
     let Some(text) = load_reference_fixture("PROVENANCE.json") else { return };
-    let root = json::parse(&text).expect("PROVENANCE.json must parse");
-    let gaps = root.get("f32_f64_gap").expect("PROVENANCE.json has f32_f64_gap");
-    for &(model, dt, settled, centre) in &F32_GAPS {
-        let key = format!("{model} {dt}");
-        let g = gaps.get(&key).unwrap_or_else(|| panic!("no gap for {key}"));
-        for (name, want) in [("settled", settled), ("settling_centre", centre)] {
-            let got = g.get(name).and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("{key} {name}"));
-            assert_eq!(got.to_bits(), want.to_bits(), "{key} {name}: PROVENANCE {got:e}, gate {want:e}");
-        }
-    }
+    let p = Provenance::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+    check_settling_gaps(&p).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// A control: the wrong model's parameters, against run 3's reference
@@ -179,9 +152,8 @@ fn pre_registered_bounds_match_provenance() {
 #[test]
 fn the_gate_tells_models_apart() {
     let Some(f) = fixture() else { return };
-    let s = settle::<f64>(f, 3, "049", Counts::Torch);
-    let d = diff(&s.rust, &s.flyvis);
-    assert!(d.max > 1e-3, "model 049 against model 000's reference: max {:e}", d.max);
+    let d = settle(f, 3, "049", Counts::Torch).unwrap_or_else(|e| panic!("{e}")).settled;
+    assert!(d.max > CONTROL_MISS, "model 049 against model 000's reference: max {:e}", d.max);
 }
 
 /// A control at the scale the libm bound exists to resolve: the spec's
@@ -194,7 +166,6 @@ fn the_gate_tells_models_apart() {
 #[test]
 fn the_gate_resolves_integer_counts() {
     let Some(f) = fixture() else { return };
-    let s = settle::<f64>(f, 3, "000", Counts::IntegerNSyn);
-    let d = diff(&s.rust, &s.flyvis);
+    let d = settle(f, 3, "000", Counts::IntegerNSyn).unwrap_or_else(|e| panic!("{e}")).settled;
     assert!(d.max > F64_BOUND, "integer counts: settled max {:e}", d.max);
 }

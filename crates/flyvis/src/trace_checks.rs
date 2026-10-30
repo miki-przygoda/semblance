@@ -28,29 +28,14 @@
 
 use std::sync::OnceLock;
 
-use crate::expand::{hex_coords, DEFAULT_EXTENT};
-use crate::gate_support::{cell_type, diff, fixture, read, settle_state, Counts, Diff, Fixture, Precision, F64_BOUND};
+use crate::gate_support::fixture;
 use crate::json;
-use crate::reference::{parse_sequences, BlockKey, Dtype, FileInfo, SequenceInfo};
+use crate::parity::{
+    self, cell_type, check_trace_gaps, file, play, trace_bounds, Counts, Fixtures, Precision, SequenceResult, Start,
+    TraceInputs, CONTROL_MISS, HEXALS, SNAPSHOTS,
+};
+use crate::reference::{parse_sequences, BlockKey, Provenance, SequenceInfo};
 use crate::test_support::{load_reference_fixture, or_skip, read_fixture_bytes, read_fixture_text};
-use crate::wiring::scatter_hexals;
-
-const HEXALS: usize = 721;
-
-/// Snapshot frames per sequence, at every dt (`snapshots.*.bin`'s first axis).
-const SNAPSHOTS: usize = 6;
-
-/// flyvis's own float32-vs-float64 gaps over the stimulus traces,
-/// PROVENANCE.json `f32_f64_gap`: (model, dt, centre, snapshots). The libm
-/// gate's f32 bound is twice each (spec R3). They include the moving edges'
-/// one rounding of the input to f32. `trace_bounds_match_provenance` pins
-/// these to the file.
-const TRACE_F32_GAPS: [(&str, &str, f64, f64); 4] = [
-    ("000", "1/200", 1.7249018977594233e-06, 2.6318956276583094e-06),
-    ("049", "1/200", 2.600224337356849e-05, 5.1135401793800384e-05),
-    ("000", "1/50", 2.5357808688397654e-06, 2.9820266052027478e-06),
-    ("049", "1/50", 3.4419031081256435e-05, 1.4233448473766064e-04),
-];
 
 const TRACE_FILES: [&str; 5] =
     ["input.f64.bin", "centre.f32.bin", "centre.f64.bin", "snapshots.f32.bin", "snapshots.f64.bin"];
@@ -81,21 +66,17 @@ fn sequences() -> Result<&'static [SequenceInfo], String> {
 
 /// Everything one precision's trace run reads.
 struct Traces {
-    f: &'static Fixture,
-    sequences: &'static [SequenceInfo],
-    input: &'static [u8],
-    centre: &'static [u8],
-    snapshots: &'static [u8],
+    f: &'static Fixtures,
+    inputs: TraceInputs<'static>,
 }
 
-fn load_traces<R: Precision>(f: &'static Fixture) -> Result<Traces, String> {
-    Ok(Traces {
-        f,
-        sequences: sequences()?,
-        input: trace_file("input.f64.bin")?,
-        centre: trace_file(&format!("centre.{}.bin", R::SUFFIX))?,
-        snapshots: trace_file(&format!("snapshots.{}.bin", R::SUFFIX))?,
-    })
+/// Read in the gates' order: sequences, input, centre, snapshots.
+fn load_traces<R: Precision>(f: &'static Fixtures) -> Result<Traces, String> {
+    let sequences = sequences()?;
+    let input = trace_file("input.f64.bin")?;
+    let centre = trace_file(&format!("centre.{}.bin", R::SUFFIX))?;
+    let snapshots = trace_file(&format!("snapshots.{}.bin", R::SUFFIX))?;
+    Ok(Traces { f, inputs: TraceInputs { precision: R::DTYPE, sequences, input, centre, snapshots } })
 }
 
 /// The traces for precision `R`, or `None` after printing a skip notice.
@@ -103,127 +84,22 @@ fn traces<R: Precision>() -> Option<Traces> {
     or_skip(load_traces::<R>(fixture()?))
 }
 
-fn file<'a>(f: &'a Fixture, name: &str) -> &'a FileInfo {
-    f.manifest.file(name).unwrap_or_else(|| panic!("{name} is not in the manifest"))
-}
-
-/// For each hexal h, the hexal at (-u, -v): a point reflection of the frame.
-fn mirrored_hexals() -> Vec<usize> {
-    let c: Vec<(i32, i32)> = hex_coords(DEFAULT_EXTENT).collect();
-    c.iter()
-        .map(|&(u, v)| c.iter().position(|&p| p == (-u, -v)).expect("the lattice is point-symmetric"))
-        .collect()
-}
-
-/// Which settled state each sequence starts from.
-#[derive(Clone, Copy)]
-enum Start {
-    /// Rust's own settling (spec R2): settling and stimulus, end to end.
-    Rust,
-    /// flyvis's `settled.<p>.bin`: R2's first diagnostic step, isolating the
-    /// stimulus phase.
-    Flyvis,
-}
-
-/// One sequence played and compared, Rust's and flyvis's values widened to
-/// f64.
-struct Played {
-    sequence: u32,
-    n_frames: usize,
-    snapshot_frames: Vec<usize>,
-    /// Over [n_frames, 65].
-    centre: Diff,
-    /// Over [6, 45,669].
-    snapshots: Diff,
-    /// The first unequal centre value, as an index into [n_frames, 65].
-    first: Option<usize>,
-}
-
-/// Settles reference run `run`, then plays `sequences` from the settled
-/// state, each with flyvis's input (mirrored hexal by hexal if `mirror`), and
-/// compares every frame's centre and every snapshot with flyvis's.
-fn play<R: Precision>(t: &Traces, run: u32, counts: Counts, start: Start, sequences: &[u32], mirror: bool) -> Vec<Played> {
-    let f = t.f;
-    let info = &f.manifest.runs[run as usize];
-    let (mut g, _) = settle_state::<R>(f, run, &info.model, counts);
-    if let Start::Flyvis = start {
-        let key = BlockKey { run: Some(run), dt: &info.dt, sequence: None };
-        let settled = read::<R>(f, &format!("settled.{}.bin", R::SUFFIX), &key);
-        g.set_state(&settled.data).expect("flyvis's settled state: one finite value per node");
-    }
-    let settled = g.state().to_vec();
-    let n = f.net.num_nodes();
-    let centre: Vec<usize> = f.manifest.centre_nodes.iter().map(|c| c.node as usize).collect();
-    let source: Vec<usize> = if mirror { mirrored_hexals() } else { (0..HEXALS).collect() };
-    let input_file = file(f, "input.f64.bin");
-    let centre_file = file(f, &format!("centre.{}.bin", R::SUFFIX));
-    let snapshots_file = file(f, &format!("snapshots.{}.bin", R::SUFFIX));
-
-    // Zeroed once per run: every frame overwrites the same input nodes, and
-    // every other node stays 0, as in flyvis's zeroed buffer.
-    let mut input = vec![R::ZERO; n];
-    let mut frame = vec![R::ZERO; HEXALS];
-    let mut played = Vec::with_capacity(sequences.len());
-    for &s in sequences {
-        let q = &t.sequences[s as usize];
-        assert_eq!(q.index, s, "manifest sequences must be listed in index order");
-        let layout = q.frames(&info.dt).unwrap_or_else(|| panic!("sequence {s} has no frames at dt {}", info.dt));
-        let n_frames = layout.n_frames;
-        assert_eq!(layout.snapshot_frames.len(), SNAPSHOTS, "sequence {s}'s snapshot frames");
-        g.set_state(&settled).expect("the settled state: one finite value per node");
-
-        let x = input_file
-            .read_f64(t.input, &BlockKey { run: None, dt: &info.dt, sequence: Some(s) })
-            .unwrap_or_else(|e| panic!("input.f64.bin: {e}"));
-        assert_eq!(x.shape, [n_frames, HEXALS], "input shape, sequence {s}");
-        let key = BlockKey { run: Some(run), dt: &info.dt, sequence: Some(s) };
-        let flyvis_centre = R::read(centre_file, t.centre, &key).unwrap_or_else(|e| panic!("{}: {e}", centre_file.name));
-        assert_eq!(flyvis_centre.shape, [n_frames, centre.len()], "centre shape, sequence {s}");
-        let flyvis_snapshots =
-            R::read(snapshots_file, t.snapshots, &key).unwrap_or_else(|e| panic!("{}: {e}", snapshots_file.name));
-        assert_eq!(flyvis_snapshots.shape, [SNAPSHOTS, n], "snapshots shape, sequence {s}");
-
-        let mut rust_centre = Vec::with_capacity(n_frames * centre.len());
-        let mut rust_snapshots = Vec::with_capacity(SNAPSHOTS * n);
-        for i in 0..n_frames {
-            let row = &x.data[i * HEXALS..(i + 1) * HEXALS];
-            for (slot, &h) in frame.iter_mut().zip(&source) {
-                *slot = R::from_f64(row[h]);
-            }
-            scatter_hexals(&f.input_nodes, &frame, &mut input).expect("721 hexals onto 8 x 721 input nodes");
-            g.step(&input).expect("one input value per node");
-            if let Some(k) = g.state().iter().position(|v| !v.is_finite()) {
-                panic!("run {run}: node {k} ({}) is not finite after frame {i} of sequence {s}", cell_type(&f.net, k));
-            }
-            // frame i is the state after i + 1 steps from the settled state
-            rust_centre.extend(centre.iter().map(|&k| g.state()[k].to_f64()));
-            if layout.snapshot_frames.contains(&i) {
-                rust_snapshots.extend(g.state().iter().map(|v| v.to_f64()));
-            }
-        }
-        let flyvis_centre: Vec<f64> = flyvis_centre.data.iter().map(|v| v.to_f64()).collect();
-        let flyvis_snapshots: Vec<f64> = flyvis_snapshots.data.iter().map(|v| v.to_f64()).collect();
-        played.push(Played {
-            sequence: s,
-            n_frames,
-            snapshot_frames: layout.snapshot_frames.clone(),
-            first: rust_centre.iter().zip(&flyvis_centre).position(|(a, b)| a != b),
-            centre: diff(&rust_centre, &flyvis_centre),
-            snapshots: diff(&rust_snapshots, &flyvis_snapshots),
-        });
-    }
-    played
+/// The test's name says which precision it runs; the registry must agree.
+fn assert_registered<R: Precision>(run: u32) {
+    assert_eq!(R::DTYPE, parity::RUNS[run as usize].3, "run {run}'s registered precision");
 }
 
 fn all_sequences(t: &Traces) -> Vec<u32> {
-    t.sequences.iter().map(|q| q.index).collect()
+    t.inputs.sequences.iter().map(|q| q.index).collect()
 }
 
 fn exact<R: Precision>(run: u32) {
+    assert_registered::<R>(run);
     let Some(t) = traces::<R>() else { return };
     let f = t.f;
     let info = &f.manifest.runs[run as usize];
-    let played = play::<R>(&t, run, Counts::Torch, Start::Rust, &all_sequences(&t), false);
+    let played = play(f, &t.inputs, run, Counts::Torch, Start::Rust, &all_sequences(&t), false)
+        .unwrap_or_else(|e| panic!("{e}"));
     let (n, n_centre) = (f.net.num_nodes(), f.manifest.centre_nodes.len());
     let mut failures = Vec::new();
     for p in &played {
@@ -255,27 +131,19 @@ fn exact<R: Precision>(run: u32) {
     assert!(failures.is_empty(), "run {run} is not bit-equal to flyvis under stimulus:\n{}", failures.join("\n"));
 }
 
-/// R3's bounds for one run: (centre, snapshots).
-fn trace_bounds(model: &str, dt: &str, precision: Dtype) -> (f64, f64) {
-    match precision {
-        Dtype::F64 => (F64_BOUND, F64_BOUND),
-        Dtype::F32 => {
-            let &(_, _, c, s) =
-                TRACE_F32_GAPS.iter().find(|g| g.0 == model && g.1 == dt).expect("a gap for every f32 run");
-            (2.0 * c, 2.0 * s)
-        }
-    }
-}
-
 fn libm<R: Precision>(run: u32) {
+    assert_registered::<R>(run);
     let Some(t) = traces::<R>() else { return };
     let f = t.f;
     let info = &f.manifest.runs[run as usize];
-    let (bound_centre, bound_snapshots) = trace_bounds(&info.model, &info.dt, info.precision);
-    let played = play::<R>(&t, run, Counts::Libm, Start::Rust, &all_sequences(&t), false);
+    let (bound_centre, bound_snapshots) =
+        trace_bounds(&info.model, &info.dt, info.precision, Counts::Libm).unwrap_or_else(|e| panic!("{e}"));
+    let (bound_centre, bound_snapshots) = (bound_centre.value(), bound_snapshots.value());
+    let played = play(f, &t.inputs, run, Counts::Libm, Start::Rust, &all_sequences(&t), false)
+        .unwrap_or_else(|e| panic!("{e}"));
     let (n, n_centre) = (f.net.num_nodes(), f.manifest.centre_nodes.len());
 
-    let ratio = |p: &Played| (p.centre.max / bound_centre).max(p.snapshots.max / bound_snapshots);
+    let ratio = |p: &SequenceResult| (p.centre.max / bound_centre).max(p.snapshots.max / bound_snapshots);
     let worst = played.iter().max_by(|a, b| ratio(a).total_cmp(&ratio(b))).expect("twelve sequences");
     let c = played.iter().max_by(|a, b| a.centre.max.total_cmp(&b.centre.max)).expect("twelve sequences");
     let s = played.iter().max_by(|a, b| a.snapshots.max.total_cmp(&b.snapshots.max)).expect("twelve sequences");
@@ -332,16 +200,8 @@ trace_runs! {
 #[test]
 fn trace_bounds_match_provenance() {
     let Some(text) = load_reference_fixture("PROVENANCE.json") else { return };
-    let root = json::parse(&text).expect("PROVENANCE.json must parse");
-    let gaps = root.get("f32_f64_gap").expect("PROVENANCE.json has f32_f64_gap");
-    for &(model, dt, centre, snapshots) in &TRACE_F32_GAPS {
-        let key = format!("{model} {dt}");
-        let g = gaps.get(&key).unwrap_or_else(|| panic!("no gap for {key}"));
-        for (name, want) in [("centre", centre), ("snapshots", snapshots)] {
-            let got = g.get(name).and_then(|v| v.as_f64()).unwrap_or_else(|| panic!("{key} {name}"));
-            assert_eq!(got.to_bits(), want.to_bits(), "{key} {name}: PROVENANCE {got:e}, gate {want:e}");
-        }
-    }
+    let p = Provenance::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+    check_trace_gaps(&p).unwrap_or_else(|e| panic!("{e}"));
 }
 
 fn snapshots_hold_the_centre_column<R: Precision>() {
@@ -349,15 +209,15 @@ fn snapshots_hold_the_centre_column<R: Precision>() {
     let f = t.f;
     let n = f.net.num_nodes();
     let centre: Vec<usize> = f.manifest.centre_nodes.iter().map(|c| c.node as usize).collect();
-    let centre_file = file(f, &format!("centre.{}.bin", R::SUFFIX));
-    let snapshots_file = file(f, &format!("snapshots.{}.bin", R::SUFFIX));
+    let centre_file = file(f, &format!("centre.{}.bin", R::SUFFIX)).unwrap_or_else(|e| panic!("{e}"));
+    let snapshots_file = file(f, &format!("snapshots.{}.bin", R::SUFFIX)).unwrap_or_else(|e| panic!("{e}"));
     let mut checked = 0;
     for info in f.manifest.runs.iter().filter(|r| r.precision == R::DTYPE) {
-        for q in t.sequences {
+        for q in t.inputs.sequences {
             let layout = q.frames(&info.dt).unwrap_or_else(|| panic!("sequence {} at dt {}", q.index, info.dt));
             let key = BlockKey { run: Some(info.index), dt: &info.dt, sequence: Some(q.index) };
-            let c = R::read(centre_file, t.centre, &key).unwrap_or_else(|e| panic!("{e}"));
-            let s = R::read(snapshots_file, t.snapshots, &key).unwrap_or_else(|e| panic!("{e}"));
+            let c = R::read(centre_file, t.inputs.centre, &key).unwrap_or_else(|e| panic!("{e}"));
+            let s = R::read(snapshots_file, t.inputs.snapshots, &key).unwrap_or_else(|e| panic!("{e}"));
             assert_eq!(c.shape, [layout.n_frames, centre.len()], "run {} sequence {}", info.index, q.index);
             assert_eq!(s.shape, [SNAPSHOTS, n], "run {} sequence {}", info.index, q.index);
             for (k, &frame) in layout.snapshot_frames.iter().enumerate() {
@@ -374,7 +234,7 @@ fn snapshots_hold_the_centre_column<R: Precision>() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 4 * t.sequences.len(), "four {} runs, every sequence", R::SUFFIX);
+    assert_eq!(checked, 4 * t.inputs.sequences.len(), "four {} runs, every sequence", R::SUFFIX);
 }
 
 /// `centre[snapshot_frames]` is `snapshots[:, centre_nodes]` in flyvis's
@@ -393,9 +253,9 @@ fn snapshots_agree_with_the_centre_column() {
 #[test]
 fn the_trace_gate_sees_a_wrong_mapping() {
     let Some(t) = traces::<f64>() else { return };
-    let p = &play::<f64>(&t, 3, Counts::Torch, Start::Rust, &[8], true)[0];
+    let p = &play(t.f, &t.inputs, 3, Counts::Torch, Start::Rust, &[8], true).unwrap_or_else(|e| panic!("{e}"))[0];
     eprintln!("mirrored mapping, run 3, sequence 8: snapshots max {:e}, centre max {:e}", p.snapshots.max, p.centre.max);
-    assert!(p.snapshots.max > 1e-3, "a mirrored mapping must miss by far more than any bound: snapshots max {:e}", p.snapshots.max);
+    assert!(p.snapshots.max > CONTROL_MISS, "a mirrored mapping must miss by far more than any bound: snapshots max {:e}", p.snapshots.max);
 }
 
 /// R2's first diagnostic step works: restarting from flyvis's own settled
@@ -404,7 +264,7 @@ fn the_trace_gate_sees_a_wrong_mapping() {
 #[test]
 fn a_run_from_flyviss_settled_state_is_bit_equal_too() {
     let Some(t) = traces::<f64>() else { return };
-    let p = &play::<f64>(&t, 3, Counts::Torch, Start::Flyvis, &[8], false)[0];
+    let p = &play(t.f, &t.inputs, 3, Counts::Torch, Start::Flyvis, &[8], false).unwrap_or_else(|e| panic!("{e}"))[0];
     assert_eq!((p.centre.differ, p.snapshots.differ), (0, 0), "run 3, sequence 8, from settled.f64.bin");
 }
 

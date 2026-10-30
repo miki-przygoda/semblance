@@ -131,6 +131,9 @@ pub enum ReferenceError {
     NoBlock { file: String },
     /// A sequence's frame indices are out of order or past its `n_frames`.
     FrameRange(String),
+    /// PROVENANCE.json lacks this field, or has it with the wrong type.
+    /// Named by its JSON path (`git.dirty`, `models[1].id`).
+    ProvenanceMissing(String),
 }
 
 impl std::fmt::Display for ReferenceError {
@@ -150,6 +153,7 @@ impl std::fmt::Display for ReferenceError {
             Dtype { file, expected, found } => write!(f, "{file} is {found:?}, asked for {expected:?}"),
             NoBlock { file } => write!(f, "{file}: no block has that key"),
             FrameRange(p) => write!(f, "manifest {p} is out of order or past n_frames"),
+            ProvenanceMissing(p) => write!(f, "PROVENANCE.json has no {p}"),
         }
     }
 }
@@ -430,6 +434,189 @@ impl FileInfo {
             .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
             .collect();
         Ok(Array { shape: b.shape.clone(), data })
+    }
+}
+
+/// What `PROVENANCE.json` records about the export the reference came from:
+/// the fields `semblance validate` checks or prints. Each field names the
+/// JSON path it is read from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Provenance {
+    /// `exported`
+    pub exported: String,
+    /// `export_id`
+    pub export_id: String,
+    /// `generator.path`
+    pub generator_path: String,
+    /// `generator.sha256`
+    pub generator_sha256: String,
+    /// `git.head`
+    pub git_head: String,
+    /// `git.dirty`
+    pub git_dirty: bool,
+    /// `versions`, in file order
+    pub versions: Vec<(String, String)>,
+    /// `machine.platform`
+    pub platform: String,
+    /// `machine.machine`
+    pub machine: String,
+    /// `device`
+    pub device: String,
+    /// `uv_lock_sha256`
+    pub uv_lock_sha256: String,
+    /// `threads.default`
+    pub threads_default: u32,
+    /// `threads.determinism_check`
+    pub threads_checked: Vec<u32>,
+    /// `threads.bit_equal`
+    pub threads_bit_equal: bool,
+    /// `threads.runs_checked`
+    pub threads_runs_checked: Vec<u32>,
+    /// `models[]`
+    pub models: Vec<ProvenanceModel>,
+    /// `parameter_equality.all_50_checkpoints_equal_ensemble_csv`
+    pub all_checkpoints_equal_ensemble: bool,
+    /// `equivalence.stimulus_response_bit_equal`
+    pub stimulus_response_bit_equal: bool,
+    /// `equivalence.sequences`
+    pub equivalence_sequences: Vec<u32>,
+    /// `input_rounding`, per dt id, in file order
+    pub input_rounding: Vec<(String, f64)>,
+    /// `f32_f64_gap`, per "{model} {dt}" key, in file order
+    pub gaps: Vec<GapEntry>,
+    /// `sizes`, per file name, in file order
+    pub sizes: Vec<(String, u64)>,
+}
+
+/// One of PROVENANCE.json's `models`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProvenanceModel {
+    pub id: String,
+    pub name: String,
+    pub rank: String,
+    pub validation_loss: f64,
+    pub chkpt_00000_sha256: String,
+}
+
+/// One `f32_f64_gap` entry: flyvis's own float32-vs-float64 gaps for one
+/// (model, dt).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GapEntry {
+    /// "{model} {dt}", e.g. "000 1/200".
+    pub key: String,
+    pub settled: f64,
+    pub settling_centre: f64,
+    pub centre: f64,
+    pub snapshots: f64,
+}
+
+fn path(at: &str, key: &str) -> String {
+    if at.is_empty() { key.to_string() } else { format!("{at}.{key}") }
+}
+
+fn field<'a>(obj: &'a Json, at: &str, key: &str) -> Result<&'a Json, ReferenceError> {
+    obj.get(key).ok_or_else(|| ReferenceError::ProvenanceMissing(path(at, key)))
+}
+
+fn typed<T>(obj: &Json, at: &str, key: &str, f: impl Fn(&Json) -> Option<T>) -> Result<T, ReferenceError> {
+    f(field(obj, at, key)?).ok_or_else(|| ReferenceError::ProvenanceMissing(path(at, key)))
+}
+
+fn text(obj: &Json, at: &str, key: &str) -> Result<String, ReferenceError> {
+    typed(obj, at, key, |v| v.as_str().map(str::to_string))
+}
+
+fn flag(obj: &Json, at: &str, key: &str) -> Result<bool, ReferenceError> {
+    typed(obj, at, key, Json::as_bool)
+}
+
+fn small(v: &Json) -> Option<u32> {
+    v.as_i64().and_then(|n| u32::try_from(n).ok())
+}
+
+fn smalls(obj: &Json, at: &str, key: &str) -> Result<Vec<u32>, ReferenceError> {
+    typed(obj, at, key, |v| v.as_array()?.iter().map(small).collect())
+}
+
+/// An object's entries, in file order, each converted by `f`.
+fn entries<T>(obj: &Json, at: &str, key: &str, f: impl Fn(&Json) -> Option<T>) -> Result<Vec<(String, T)>, ReferenceError> {
+    let here = path(at, key);
+    let Json::Object(pairs) = field(obj, at, key)? else {
+        return Err(ReferenceError::ProvenanceMissing(here));
+    };
+    pairs
+        .iter()
+        .map(|(k, v)| f(v).map(|x| (k.clone(), x)).ok_or_else(|| ReferenceError::ProvenanceMissing(path(&here, k))))
+        .collect()
+}
+
+impl Provenance {
+    /// Parses the fields above, strictly; every other field is ignored. A
+    /// missing or mistyped field is `ProvenanceMissing`, naming its path.
+    pub fn parse(json: &str) -> Result<Provenance, ReferenceError> {
+        let root = json::parse(json).map_err(|e| ReferenceError::Json { offset: e.offset })?;
+        let r = &root;
+        let generator = field(r, "", "generator")?;
+        let git = field(r, "", "git")?;
+        let machine = field(r, "", "machine")?;
+        let threads = field(r, "", "threads")?;
+        let models = typed(r, "", "models", |v| v.as_array().map(<[Json]>::to_vec))?
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let at = format!("models[{i}]");
+                Ok(ProvenanceModel {
+                    id: text(m, &at, "id")?,
+                    name: text(m, &at, "name")?,
+                    rank: text(m, &at, "rank")?,
+                    validation_loss: typed(m, &at, "validation_loss", Json::as_f64)?,
+                    chkpt_00000_sha256: text(m, &at, "chkpt_00000_sha256")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ReferenceError>>()?;
+        let parameters = field(r, "", "parameter_equality")?;
+        let equivalence = field(r, "", "equivalence")?;
+        let Json::Object(gap_pairs) = field(r, "", "f32_f64_gap")? else {
+            return Err(ReferenceError::ProvenanceMissing("f32_f64_gap".into()));
+        };
+        let gaps = gap_pairs
+            .iter()
+            .map(|(key, g)| {
+                let at = format!("f32_f64_gap.{key}");
+                let n = |q: &str| typed(g, &at, q, Json::as_f64);
+                Ok(GapEntry {
+                    key: key.clone(),
+                    settled: n("settled")?,
+                    settling_centre: n("settling_centre")?,
+                    centre: n("centre")?,
+                    snapshots: n("snapshots")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ReferenceError>>()?;
+        Ok(Provenance {
+            exported: text(r, "", "exported")?,
+            export_id: text(r, "", "export_id")?,
+            generator_path: text(generator, "generator", "path")?,
+            generator_sha256: text(generator, "generator", "sha256")?,
+            git_head: text(git, "git", "head")?,
+            git_dirty: flag(git, "git", "dirty")?,
+            versions: entries(r, "", "versions", |v| v.as_str().map(str::to_string))?,
+            platform: text(machine, "machine", "platform")?,
+            machine: text(machine, "machine", "machine")?,
+            device: text(r, "", "device")?,
+            uv_lock_sha256: text(r, "", "uv_lock_sha256")?,
+            threads_default: typed(threads, "threads", "default", small)?,
+            threads_checked: smalls(threads, "threads", "determinism_check")?,
+            threads_bit_equal: flag(threads, "threads", "bit_equal")?,
+            threads_runs_checked: smalls(threads, "threads", "runs_checked")?,
+            models,
+            all_checkpoints_equal_ensemble: flag(parameters, "parameter_equality", "all_50_checkpoints_equal_ensemble_csv")?,
+            stimulus_response_bit_equal: flag(equivalence, "equivalence", "stimulus_response_bit_equal")?,
+            equivalence_sequences: smalls(equivalence, "equivalence", "sequences")?,
+            input_rounding: entries(r, "", "input_rounding", Json::as_f64)?,
+            gaps,
+            sizes: entries(r, "", "sizes", |v| v.as_i64().and_then(|n| u64::try_from(n).ok()))?,
+        })
     }
 }
 
@@ -750,5 +937,112 @@ mod tests {
                 assert_eq!(len, shape.iter().product::<usize>(), "{name}");
             }
         }
+    }
+
+    /// A minimal PROVENANCE.json with every field `Provenance::parse` reads.
+    const PROVENANCE: &str = r#"{"exported":"2026-10-27","export_id":"x-1",
+        "generator":{"path":"tools/export_reference.py","sha256":"ab"},
+        "git":{"head":"cd","dirty":false},
+        "versions":{"python":"3.12.11","flyvis":"1.2.0"},
+        "machine":{"platform":"p-1","machine":"arm64","torch_config":"ignored"},
+        "uv_lock_sha256":"ef","device":"cpu",
+        "threads":{"default":12,"determinism_check":[1,12],"bit_equal":true,"runs_checked":[0,1]},
+        "models":[{"id":"000","name":"flow/0000/000","validation_loss":5.25,"rank":"best","chkpt_00000_sha256":"01"}],
+        "parameter_equality":{"all_50_checkpoints_equal_ensemble_csv":true},
+        "equivalence":{"stimulus_response_bit_equal":true,"sequences":[0,4]},
+        "input_rounding":{"1/200":2.9801242251714655e-08,"1/50":1e-8},
+        "f32_f64_gap":{"000 1/200":{"settled":1.5,"settling_centre":2.5,"centre":3.5,"snapshots":4.5}},
+        "sizes":{"settled.f32.bin":730704},
+        "wall_time_s":248.9}"#;
+
+    #[test]
+    fn provenance_parses_a_minimal_document() {
+        let p = Provenance::parse(PROVENANCE).expect("valid");
+        assert_eq!((p.exported.as_str(), p.export_id.as_str()), ("2026-10-27", "x-1"));
+        assert_eq!((p.generator_path.as_str(), p.generator_sha256.as_str()), ("tools/export_reference.py", "ab"));
+        assert_eq!((p.git_head.as_str(), p.git_dirty), ("cd", false));
+        assert_eq!(p.versions, [("python".to_string(), "3.12.11".to_string()), ("flyvis".into(), "1.2.0".into())]);
+        assert_eq!((p.platform.as_str(), p.machine.as_str(), p.device.as_str()), ("p-1", "arm64", "cpu"));
+        assert_eq!(p.uv_lock_sha256, "ef");
+        assert_eq!((p.threads_default, p.threads_bit_equal), (12, true));
+        assert_eq!((p.threads_checked, p.threads_runs_checked), (vec![1, 12], vec![0, 1]));
+        assert_eq!(
+            p.models,
+            [ProvenanceModel {
+                id: "000".into(),
+                name: "flow/0000/000".into(),
+                rank: "best".into(),
+                validation_loss: 5.25,
+                chkpt_00000_sha256: "01".into(),
+            }]
+        );
+        assert!(p.all_checkpoints_equal_ensemble && p.stimulus_response_bit_equal);
+        assert_eq!(p.equivalence_sequences, [0, 4]);
+        assert_eq!(p.input_rounding, [("1/200".to_string(), 2.9801242251714655e-08), ("1/50".into(), 1e-8)]);
+        assert_eq!(
+            p.gaps,
+            [GapEntry { key: "000 1/200".into(), settled: 1.5, settling_centre: 2.5, centre: 3.5, snapshots: 4.5 }]
+        );
+        assert_eq!(p.sizes, [("settled.f32.bin".to_string(), 730704)]);
+    }
+
+    /// Every field read, missing or of the wrong type, is an error naming
+    /// its JSON path.
+    #[test]
+    fn provenance_refuses_a_missing_or_mistyped_field_naming_its_path() {
+        let cases: [(&str, &str, &str); 30] = [
+            (r#""exported":"2026-10-27","#, "", "exported"),
+            (r#""exported":"2026-10-27""#, r#""exported":1"#, "exported"),
+            (r#""export_id":"x-1","#, "", "export_id"),
+            (r#""path":"tools/export_reference.py","#, "", "generator.path"),
+            (r#""sha256":"ab""#, r#""sha256":null"#, "generator.sha256"),
+            (r#""head":"cd","#, "", "git.head"),
+            (r#""dirty":false"#, r#""dirty":"no""#, "git.dirty"),
+            (r#""versions":{"python":"3.12.11","#, r#""versions":{"python":3,"#, "versions.python"),
+            (r#""versions":{"python":"3.12.11","flyvis":"1.2.0"},"#, r#""versions":[],"#, "versions"),
+            (r#""platform":"p-1","#, "", "machine.platform"),
+            (r#""machine":"arm64","#, "", "machine.machine"),
+            (r#""device":"cpu","#, "", "device"),
+            (r#""uv_lock_sha256":"ef","#, "", "uv_lock_sha256"),
+            (r#""default":12,"#, r#""default":-1,"#, "threads.default"),
+            (r#""determinism_check":[1,12]"#, r#""determinism_check":[1,"12"]"#, "threads.determinism_check"),
+            (r#""bit_equal":true"#, r#""bit_equal":1"#, "threads.bit_equal"),
+            (r#","runs_checked":[0,1]"#, "", "threads.runs_checked"),
+            (r#""models":["#, r#""models":"none","x":["#, "models"),
+            (r#""id":"000","#, "", "models[0].id"),
+            (r#""name":"flow/0000/000","#, "", "models[0].name"),
+            (r#""validation_loss":5.25"#, r#""validation_loss":"5.25""#, "models[0].validation_loss"),
+            (r#""rank":"best","#, "", "models[0].rank"),
+            (r#","chkpt_00000_sha256":"01""#, "", "models[0].chkpt_00000_sha256"),
+            (
+                r#""all_50_checkpoints_equal_ensemble_csv":true"#,
+                r#""x":true"#,
+                "parameter_equality.all_50_checkpoints_equal_ensemble_csv",
+            ),
+            (r#""stimulus_response_bit_equal":true,"#, "", "equivalence.stimulus_response_bit_equal"),
+            (r#","sequences":[0,4]"#, "", "equivalence.sequences"),
+            (r#""1/50":1e-8"#, r#""1/50":"1e-8""#, "input_rounding.1/50"),
+            (r#""settled":1.5,"#, "", "f32_f64_gap.000 1/200.settled"),
+            (r#""snapshots":4.5"#, r#""snapshots":null"#, "f32_f64_gap.000 1/200.snapshots"),
+            (r#""settled.f32.bin":730704"#, r#""settled.f32.bin":-4"#, "sizes.settled.f32.bin"),
+        ];
+        for (from, to, want) in cases {
+            let doc = PROVENANCE.replacen(from, to, 1);
+            assert_ne!(doc, PROVENANCE, "{from} must occur in the document");
+            let e = Provenance::parse(&doc).expect_err(want);
+            assert_eq!(e, ReferenceError::ProvenanceMissing(want.to_string()), "{from} -> {to}");
+            assert_eq!(e.to_string(), format!("PROVENANCE.json has no {want}"));
+        }
+    }
+
+    /// The real PROVENANCE.json parses, and holds what the registry expects.
+    #[test]
+    fn the_real_provenance_parses() {
+        let Some(text) = load_reference_fixture("PROVENANCE.json") else { return };
+        let p = Provenance::parse(&text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["000", "049"]);
+        assert_eq!(p.gaps.len(), 4);
+        assert_eq!(p.sizes.len(), 9);
+        assert!(!p.git_dirty && p.threads_bit_equal && p.all_checkpoints_equal_ensemble && p.stimulus_response_bit_equal);
     }
 }

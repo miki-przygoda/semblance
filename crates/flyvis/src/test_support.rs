@@ -27,39 +27,11 @@ fn fixtures_required() -> bool {
 }
 
 /// The real, published flyvis connectome spec, under `data/`.
-const REAL_SPEC: &str = "flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json";
+pub(crate) const REAL_SPEC: &str = "flyvis-supplementary/Lappalainen_et_al_connectome_avg_filters.json";
 
 /// `rel`'s path under the workspace's `data/`, as every notice prints it.
 fn data_path(rel: &str) -> String {
     format!("{}/../../data/{rel}", env!("CARGO_MANIFEST_DIR"))
-}
-
-/// How to produce a file under `data/`, by its directory.
-fn how_to_get(rel: &str) -> &'static str {
-    match rel.split('/').next() {
-        Some("flyvis-supplementary") => {
-            "Download \
-             https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-024-07939-3/MediaObjects/41586_2024_7939_MOESM3_ESM.zip \
-             and extract Lappalainen_et_al_connectome_avg_filters.json into data/flyvis-supplementary/, \
-             or run ci/fetch-fixtures.sh"
-        }
-        Some("flyvis-build") => {
-            "Run `uv run --project tools tools/export_build.py` to generate it, or run ci/fetch-fixtures.sh."
-        }
-        Some("flyvis-stimuli") => {
-            "Run `uv run --project tools tools/export_stimuli.py`, \
-             `uv run --project tools tools/export_moving_edges.py` and, \
-             for the `_h80` files, `uv run --project tools tools/export_reference.py` \
-             to generate the stimulus fixtures, or run ci/fetch-fixtures.sh."
-        }
-        Some("flyvis-pretrained") => {
-            "Run ci/fetch-fixtures.sh, or `uv run --project tools tools/export_params.py`."
-        }
-        Some("flyvis-reference") => {
-            "Run ci/fetch-fixtures.sh, or `uv run --project tools tools/export_reference.py`."
-        }
-        _ => "Run ci/fetch-fixtures.sh.",
-    }
 }
 
 /// A missing fixture's notice, `<path> not found. <how to get it>`, without
@@ -67,19 +39,95 @@ fn how_to_get(rel: &str) -> &'static str {
 /// this panics instead, naming the path.
 fn missing(path: &str, rel: &str) -> String {
     assert!(!fixtures_required(), "SEMBLANCE_REQUIRE_FIXTURES=1 but {path} is missing");
-    format!("{path} not found. {}", how_to_get(rel))
+    format!("{path} not found. {}", crate::parity::how_to_get(rel))
+}
+
+/// The workspace's `data/` directory, the same one `data_path` names.
+pub(crate) fn data_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}/../../data", env!("CARGO_MANIFEST_DIR")))
+}
+
+/// A fresh, empty scratch directory for one test, under this build's own
+/// target dir (`<target>/<profile>/test-scratch/<name>-<pid>`, found from the
+/// test binary, which cargo puts in `<target>/<profile>/deps/`). Never under
+/// `std::env::temp_dir()`: on a shared host that is a world-writable `/tmp`,
+/// where another local account can pre-create a predictable path, plant
+/// symlinks in it and have a test write through them. Lib unit tests have no
+/// `CARGO_TARGET_TMPDIR`; this is their equivalent.
+///
+/// A leftover dir of the same name (from a run that died before cleaning up)
+/// is removed first, and any failure to remove it panics rather than being
+/// ignored. The dir itself is made with `create_dir`, which fails if anything
+/// is already at the path, so the test always owns what it gets.
+pub(crate) fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let profile = exe.parent().and_then(|deps| deps.parent()).expect("<target>/<profile>/deps/<binary>");
+    let base = profile.join("test-scratch");
+    std::fs::create_dir_all(&base).unwrap_or_else(|e| panic!("{}: {e}", base.display()));
+    let dir = base.join(format!("{name}-{}", std::process::id()));
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("cannot clear the stale scratch dir {}: {e}", dir.display()),
+    }
+    std::fs::create_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    dir
+}
+
+/// Writes `bytes` to a new file at `path`, refusing (`AlreadyExists`) if
+/// anything is already there. `create_new` is `O_CREAT | O_EXCL`, which never
+/// follows a symlink at `path`, so a planted link cannot redirect the write.
+pub(crate) fn write_new(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(bytes)
+}
+
+/// Whether every file in `rels` is present under `data/`, by metadata only:
+/// `Err` of the first absent one's notice, unprinted. Under
+/// `SEMBLANCE_REQUIRE_FIXTURES=1` an absent file panics instead.
+pub(crate) fn require_present(rels: &[&str]) -> Result<(), String> {
+    for rel in rels {
+        let path = data_path(rel);
+        if let Err(e) = std::fs::metadata(&path) {
+            return Err(read_error(&path, rel, e));
+        }
+    }
+    Ok(())
+}
+
+/// What an io error reading the fixture at `path` means: a missing file
+/// (`NotFound`) is its notice, for the caller to skip with. Anything else --
+/// permission denied, not UTF-8, a directory -- is a fixture that is present
+/// but broken, and panics naming the path and the error, with or without
+/// `SEMBLANCE_REQUIRE_FIXTURES` (spec R21): it never becomes a skip.
+fn read_error(path: &str, rel: &str, e: std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => missing(path, rel),
+        _ => panic!("{path}: present but cannot be read: {e}"),
+    }
+}
+
+/// The bytes at `path` (`data/<rel>`), or its missing-fixture notice.
+fn read_bytes_at(path: &str, rel: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| read_error(path, rel, e))
+}
+
+/// The text at `path` (`data/<rel>`), or its missing-fixture notice.
+fn read_text_at(path: &str, rel: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| read_error(path, rel, e))
 }
 
 /// The bytes of `data/<rel>`, or its missing-fixture notice. Prints nothing.
+/// A file that is present but cannot be read panics instead (R21).
 pub(crate) fn read_fixture_bytes(rel: &str) -> Result<Vec<u8>, String> {
-    let path = data_path(rel);
-    std::fs::read(&path).map_err(|_| missing(&path, rel))
+    read_bytes_at(&data_path(rel), rel)
 }
 
 /// The text of `data/<rel>`, or its missing-fixture notice. Prints nothing.
+/// A file that is present but cannot be read, or is not UTF-8, panics
+/// instead (R21).
 pub(crate) fn read_fixture_text(rel: &str) -> Result<String, String> {
-    let path = data_path(rel);
-    std::fs::read_to_string(&path).map_err(|_| missing(&path, rel))
+    read_text_at(&data_path(rel), rel)
 }
 
 /// `Some` of a loaded fixture, or `None` after printing
@@ -167,6 +215,82 @@ pub(crate) fn load_reference_bytes(name: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch dir lives under this build's own target dir, never in the
+    /// shared temp dir another local account can write to, and is fresh.
+    #[test]
+    fn a_scratch_dir_is_fresh_and_under_the_target_dir_not_the_shared_tmp() {
+        let dir = scratch_dir("scratch-self-test");
+        let exe = std::env::current_exe().unwrap();
+        let target = exe.parent().unwrap().parent().unwrap();
+        assert!(dir.starts_with(target), "{} is not under {}", dir.display(), target.display());
+        assert!(!dir.starts_with(std::env::temp_dir()), "{} is in the shared temp dir", dir.display());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "a scratch dir starts empty");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `write_new` refuses a path that already exists, a planted symlink
+    /// above all, and leaves the link's target untouched.
+    #[cfg(unix)]
+    #[test]
+    fn write_new_refuses_a_planted_symlink_and_never_follows_it() {
+        let dir = scratch_dir("write-new-self-test");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let planted = dir.join("planted");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let e = write_new(&planted, b"overwritten").expect_err("a planted link must be refused");
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        write_new(&dir.join("fresh"), b"new").unwrap();
+        assert_eq!(std::fs::read(dir.join("fresh")).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fixture that is present but not UTF-8 is broken, not missing: the
+    /// text read panics with the real error rather than handing back the
+    /// skip notice (spec R21). The bytes read of the same file succeeds.
+    #[test]
+    fn a_present_fixture_that_is_not_utf8_panics_rather_than_skips() {
+        let dir = scratch_dir("fixture-not-utf8");
+        let path = dir.join("manifest.json");
+        write_new(&path, b"{}\xff").unwrap();
+        let path = path.to_str().unwrap().to_string();
+        assert_eq!(read_bytes_at(&path, "flyvis-reference/manifest.json"), Ok(b"{}\xff".to_vec()));
+        let text = std::panic::catch_unwind(|| read_text_at(&path, "flyvis-reference/manifest.json"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        let msg = *text.expect_err("a non-UTF-8 fixture must panic, not skip").downcast::<String>().unwrap();
+        assert!(msg.starts_with(&format!("{path}: present but cannot be read: ")), "{msg}");
+        assert!(!msg.contains("not found") && !msg.contains("missing"), "names the wrong problem: {msg}");
+    }
+
+    /// A fixture path that is present but cannot be read (here a directory)
+    /// panics with the real error, for both reads, never the skip notice.
+    #[test]
+    fn a_present_fixture_that_cannot_be_read_panics_rather_than_skips() {
+        let dir = scratch_dir("fixture-unreadable");
+        let path = dir.to_str().unwrap().to_string();
+        let bytes = std::panic::catch_unwind(|| read_bytes_at(&path, "flyvis-reference/centre.f64.bin"));
+        let text = std::panic::catch_unwind(|| read_text_at(&path, "flyvis-reference/manifest.json"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        for r in [bytes.map(|_| ()), text.map(|_| ())] {
+            let msg = *r.expect_err("an unreadable fixture must panic, not skip").downcast::<String>().unwrap();
+            assert!(msg.starts_with(&format!("{path}: present but cannot be read: ")), "{msg}");
+        }
+    }
+
+    /// Only `NotFound` is a missing fixture; a permission error, which a
+    /// `chmod 000` fixture or directory gives, is not, and panics naming it.
+    #[test]
+    fn only_not_found_is_a_missing_fixture() {
+        let r = std::panic::catch_unwind(|| {
+            let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+            read_error("d/ensemble.csv", "flyvis-pretrained/ensemble.csv", denied)
+        });
+        let msg = *r.expect_err("permission denied must panic, not skip").downcast::<String>().unwrap();
+        assert!(msg.starts_with("d/ensemble.csv: present but cannot be read: "), "{msg}");
+        assert!(msg.to_lowercase().contains("permission denied"), "{msg}");
+    }
 
     /// A missing file is an `Err` carrying its notice, unprinted and without
     /// the `skipping: ` prefix; under `SEMBLANCE_REQUIRE_FIXTURES=1` it is a

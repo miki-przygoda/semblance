@@ -2,7 +2,9 @@
 name = "semblance-flyvis"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# flyvis's MIT data is compiled in (pretrained.rs, syn_count_torch.rs,
+# groundtruth.rs); see NOTICE.
+license = "Apache-2.0 AND MIT"
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -10,7 +12,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
-description = "Reads the published flyvis connectome spec and carries its curated ground truth, with no external dependencies."
+description = "flyvis (Lappalainen et al. 2024) in Rust: reads the published connectome spec, expands it bit-exactly into the realised network, carries flyvis's trained parameters and ground truth (MIT data; see NOTICE), and checks parity with flyvis's own traces. No external dependencies."
+# The acceptance tests read the workspace's fixtures and sources, which no
+# package carries.
+exclude = ["tests/"]
 
 [lib]
 name = "semblance_flyvis"
@@ -18,6 +23,4 @@ path = "src/lib.rs"
 
 [dependencies]
 semblance-connectome.workspace = true
-
-[dev-dependencies]
 semblance-sim.workspace = true

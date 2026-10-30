@@ -1,14 +1,19 @@
 //! `semblance` — a thin CLI that wires the crates into runnable pipelines so you can
 //! confirm the whole thing works before touching the research logic.
 //!
-//! Subcommands (all run on a synthetic connectome unless you point them at data):
+//! Subcommands:
 //!   demo       run the simulator once, print a behaviour summary
 //!   roundtrip  encode -> decode with the lossless WeightCodec, print fidelity
 //!   evolve     seed from the connectome's latent, run N generations of a toy
 //!              fitness, print best-fitness per generation
+//!   validate   check that this build reproduces flyvis bit for bit, from the
+//!              reference fixtures under data/ (see `validate.rs`)
 //!
-//! Arg parsing is hand-rolled (std only) to keep the dependency tree tiny. Swap in
-//! `clap` if/when you want richer flags.
+//! demo, roundtrip and evolve run on a synthetic connectome. Arg parsing is
+//! hand-rolled: std-only by design; the workspace has no external
+//! dependencies.
+
+mod validate;
 
 use std::env;
 use std::process::ExitCode;
@@ -30,6 +35,7 @@ fn main() -> ExitCode {
         "demo" => cmd_demo(),
         "roundtrip" => cmd_roundtrip(),
         "evolve" => cmd_evolve(),
+        "validate" => validate::cmd(&args[2..]),
         "help" | "-h" | "--help" => {
             print_help();
             ExitCode::SUCCESS
@@ -44,15 +50,18 @@ fn main() -> ExitCode {
 
 fn print_help() {
     println!(
-        "semblance — connectome compress / evolve scaffold\n\n\
-         USAGE:\n  semblance <command>\n\n\
+        "semblance — connectome compression research: flyvis in Rust\n\n\
+         USAGE:\n  semblance <command> [options]\n\n\
          COMMANDS:\n  \
          demo        run the LIF simulator once on a synthetic connectome\n  \
          roundtrip   lossless encode->decode, report structural + behavioural fidelity\n  \
          evolve      seed from the connectome latent and run a toy evolution loop\n  \
+         validate    check that this build reproduces flyvis bit for bit\n              \
+         [--data DIR] [--threads N] [--markdown]\n  \
          help        show this message\n\n\
-         Everything runs on a synthetic graph so it works with no data. See\n\
-         RESOURCES.md for how to load a real FlyWire / MaleCNS export instead."
+         demo, roundtrip and evolve run on a synthetic graph and need no data.\n\
+         validate needs flyvis's reference fixtures under data/ (get them with\n\
+         ci/fetch-fixtures.sh); the recorded result is docs/results/0.3.0-flyvis-parity.md."
     );
 }
 

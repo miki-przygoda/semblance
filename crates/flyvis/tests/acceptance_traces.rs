@@ -827,18 +827,30 @@ fn traces_06_torch_counts_trace_bit_equal_to_flyvis_in_all_eight_runs() {
             );
         }
     }
+    // The eight exact gates in one nested run (spec P2), under the same flag
+    // as `sh.gate(name, true)`. Each prints its line with one `eprintln!`, and
+    // stdout and stderr are captured apart, so lines do not interleave.
     let guard = shadow();
     let sh = guard.as_ref().unwrap();
     sh.data(&[]);
+    let out = sh
+        .cargo()
+        .args(["test", "-p", "semblance-flyvis", "--lib", "--locked", "--offline", "--"])
+        .args(["trace_checks::trace_exact_run_", "--nocapture", "--test-threads=4"])
+        .env("SEMBLANCE_REQUIRE_FIXTURES", "1")
+        .output()
+        .expect("cargo runs");
+    let output = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(output.contains("running 8 tests"), "the eight exact trace gates, in one run:\n{output}");
+    assert!(out.status.success(), "the eight exact trace gates must pass:\n{output}");
     for (run, name) in EXACT_GATES.iter().enumerate() {
-        let out = sh.gate(&tc(name), true);
-        assert!(out.passed, "{name} must pass:\n{}", out.output);
+        assert!(output.contains(&format!("test {} ... ok", tc(name))), "{name} must pass:\n{output}");
         let info = &f.manifest.runs[run];
         let want = format!(
             "trace exact run {run} ({}, dt {}, {}): 12 of 12 sequences bit-equal, centre and snapshots",
             info.model, info.dt, if info.precision == Dtype::F32 { "f32" } else { "f64" }
         );
-        assert!(out.output.contains(&want), "expected {want:?}:\n{}", out.output);
+        assert!(output.contains(&want), "expected {want:?}:\n{output}");
     }
 }
 
