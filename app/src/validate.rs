@@ -53,11 +53,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     return Err("--threads given twice".into());
                 }
                 let v = it.next().ok_or("--threads needs a number")?;
-                let n = v
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|_| v.bytes().all(|b| b.is_ascii_digit()))
-                    .ok_or_else(|| format!("--threads {v}: not a whole number"))?;
+                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(format!("--threads {v}: not a whole number"));
+                }
+                let n = v.parse::<usize>().map_err(|_| format!("--threads {v}: too large"))?;
                 if n == 0 {
                     return Err("--threads must be at least 1".into());
                 }
@@ -1022,6 +1021,14 @@ mod tests {
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn an_all_digit_threads_too_big_for_usize_is_out_of_range_not_malformed() {
+        let big = "99999999999999999999999";
+        assert_eq!(parse(&args(&["--threads", big])), Err(format!("--threads {big}: too large")));
+        assert_eq!(parse(&args(&["--threads", "x"])), Err("--threads x: not a whole number".into()));
+        assert_eq!(parse(&args(&["--threads", ""])), Err("--threads : not a whole number".into()));
     }
 
     struct Pipe {
