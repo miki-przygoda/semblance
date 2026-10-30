@@ -1303,9 +1303,9 @@ fn record_17_the_preamble_covers_what_the_record_must_say() {
     assert!(has_date, "a date: {g}");
 }
 
-/// The `test` job's text in ci.yml.
-fn test_job(ci: &str) -> &str {
-    let start = ci.find("\n  test:\n").expect("a test job");
+/// The text of the job called `name` in ci.yml.
+fn ci_job<'a>(ci: &'a str, name: &str) -> &'a str {
+    let start = ci.find(&format!("\n  {name}:\n")).unwrap_or_else(|| panic!("a {name} job"));
     let rest = &ci[start + 1..];
     // The job ends at the next line indented by exactly two spaces.
     let mut len = 0;
@@ -1333,25 +1333,28 @@ fn steps(job: &str) -> Vec<String> {
     out
 }
 
-/// RECORD-18: CI's test job runs `target/debug/semblance validate
+/// RECORD-18: CI's acceptance job runs `target/debug/semblance validate
 /// --markdown > parity-record.md` after Build and before the test step,
 /// uploads it as `parity-record` with `if: always()` through a pinned
 /// upload-artifact, lets a gate failure fail the job, and sets
-/// `SEMBLANCE_REQUIRE_LIBM_RECORD: "1"` on the test step.
+/// `SEMBLANCE_REQUIRE_LIBM_RECORD: "1"` on its test step, which runs the app
+/// package (the record test among it). The test job runs the rest of the
+/// workspace, so the two test steps together cover all of it, both with
+/// every fixture required.
 #[test]
 fn record_18_ci_writes_and_uploads_the_record_and_requires_the_libm_record() {
     let ci = fs::read_to_string(Path::new(WORKSPACE).join(".github/workflows/ci.yml")).unwrap();
-    let job = test_job(&ci);
+    let job = ci_job(&ci, "acceptance");
     let st = steps(job);
     let pos = |pred: &dyn Fn(&str) -> bool, what: &str| -> usize {
         let found: Vec<usize> = (0..st.len()).filter(|&i| pred(&st[i])).collect();
-        assert_eq!(found.len(), 1, "one {what} step in the test job:\n{job}");
+        assert_eq!(found.len(), 1, "one {what} step in the acceptance job:\n{job}");
         found[0]
     };
     let build = pos(&|s| s.contains("run: cargo build --workspace"), "Build");
     let validate = pos(&|s| s.contains("run: target/debug/semblance validate --markdown > parity-record.md"), "validate");
     let upload = pos(&|s| s.contains("actions/upload-artifact@"), "upload");
-    let test = pos(&|s| s.contains("run: cargo test --workspace"), "test");
+    let test = pos(&|s| s.contains("run: cargo test -p semblance\n"), "test");
     assert!(build < validate && validate < test, "after Build, before the tests");
     assert!(validate < upload && upload < test, "the upload follows the validate step");
     let v = &st[validate];
@@ -1364,6 +1367,14 @@ fn record_18_ci_writes_and_uploads_the_record_and_requires_the_libm_record() {
     let t = &st[test];
     assert!(t.contains("SEMBLANCE_REQUIRE_LIBM_RECORD: \"1\""), "{t}");
     assert!(t.contains("SEMBLANCE_REQUIRE_FIXTURES: \"1\""), "{t}");
+
+    // The test job runs everything else, with every fixture required.
+    let rest = ci_job(&ci, "test");
+    let rest_tests: Vec<String> = steps(rest).into_iter().filter(|s| s.contains("run: cargo test --workspace")).collect();
+    assert_eq!(rest_tests.len(), 1, "one workspace test step in the test job:\n{rest}");
+    let r = &rest_tests[0];
+    assert!(r.contains("run: cargo test --workspace --exclude semblance\n"), "{r}");
+    assert!(r.contains("SEMBLANCE_REQUIRE_FIXTURES: \"1\""), "{r}");
 }
 
 /// The body of `fn name` in `src`, up to the next top-level item.
@@ -1377,8 +1388,8 @@ fn body<'a>(src: &'a str, name: &str) -> &'a str {
 /// RECORD-19: MINORS-15 no longer re-runs `trace_checks::`; TRACES-06 runs
 /// the 8 exact trace gates in one nested invocation asserting `running 8
 /// tests` and the same 8 lines; SEQUENCES-08 has no nested cargo and its new
-/// name; the test job's cache no longer lists `target`; and no control,
-/// bound or TOLERANCE changed.
+/// name; neither the test job's cache nor the acceptance job's lists
+/// `target`; and no control, bound or TOLERANCE changed.
 #[test]
 fn record_19_the_ci_time_cuts_keep_every_gate() {
     let ws = Path::new(WORKSPACE);
@@ -1403,10 +1414,11 @@ fn record_19_the_ci_time_cuts_keep_every_gate() {
     assert!(!s8.contains("Command") && !s8.contains("cargo()") && !s8.contains("\"cargo\""), "no nested cargo:\n{s8}");
 
     let ci = read(".github/workflows/ci.yml");
-    let job = test_job(&ci);
-    for s in steps(job).iter().filter(|s| s.contains("uses: actions/cache@")) {
-        let paths: Vec<&str> = s.lines().map(str::trim).collect();
-        assert!(!paths.contains(&"target"), "the test job's cache lists target:\n{s}");
+    for name in ["test", "acceptance"] {
+        for s in steps(ci_job(&ci, name)).iter().filter(|s| s.contains("uses: actions/cache@")) {
+            let paths: Vec<&str> = s.lines().map(str::trim).collect();
+            assert!(!paths.contains(&"target"), "the {name} job's cache lists target:\n{s}");
+        }
     }
 
     // No control, bound or tolerance moved.

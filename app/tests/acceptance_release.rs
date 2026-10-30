@@ -713,8 +713,9 @@ fn claude_counts() -> (u32, u32) {
 
 /// The `#[test]` functions written out in the workspace's sources: a floor
 /// under the real count, which also has the tests the settling and trace
-/// macros expand to and the doctests. It needs no nested cargo, so a count
-/// measured before tests were added cannot pass unnoticed.
+/// macros expand to and the doctests. It needs no nested cargo. Being only a
+/// floor, it catches a count left over from before many tests were added,
+/// not one that is a few tests stale: re-measure when adding tests.
 fn written_tests() -> u32 {
     fn walk(dir: &Path, n: &mut u32) {
         for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display())) {
