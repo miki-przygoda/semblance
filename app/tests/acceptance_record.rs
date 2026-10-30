@@ -12,9 +12,18 @@
 //! user would: in a shadow copy of the workspace under `CARGO_TARGET_TMPDIR`
 //! they write a record (the committed one, or the committed one altered),
 //! lay out its `data/`, set or clear `SEMBLANCE_REQUIRE_FIXTURES` and
-//! `SEMBLANCE_REQUIRE_LIBM_RECORD`, run `cargo test --test record`, and read
-//! whether it passed and what it printed. The real record and the real
-//! `data/` are never written.
+//! `SEMBLANCE_REQUIRE_LIBM_RECORD`, run the record test, and read whether it
+//! passed and what it printed. The real record and the real `data/` are
+//! never written. The shadow is built once (`cargo test --test record
+//! --no-run`) and its record test executable is then run directly, as
+//! `cargo test` would run it. A full `validate --markdown` on the real
+//! fixtures costs minutes of CPU, so it is not run again under the record
+//! test: where the shadow's record test spawns `semblance`, it finds one
+//! that replays `good()` (this suite's build of the same sources, on the
+//! same fixtures) and logs its arguments, and each run that reaches it
+//! checks it was spawned once, with exactly the arguments RECORD-12 names.
+//! The record test against a real `validate` is `app/tests/record.rs`'s own
+//! run in the same suite.
 //!
 //! RECORD-17 .. RECORD-19 read what they are about: the committed record's
 //! preamble, CI's workflow, and the tests CI's time cuts changed.
@@ -322,7 +331,14 @@ fn today() -> String {
 
 struct Shadow {
     root: PathBuf,
-    target: PathBuf,
+    /// The shadow's built record test, run directly: no cargo per run.
+    test_exe: PathBuf,
+    /// Where the shadow's record test spawns `semblance` from: its
+    /// `CARGO_BIN_EXE_semblance`.
+    bin: PathBuf,
+    /// What a replaying `semblance` prints, and where it logs its arguments.
+    replay_out: PathBuf,
+    replay_log: PathBuf,
 }
 
 static SHADOW: Mutex<Option<Shadow>> = Mutex::new(None);
@@ -365,9 +381,40 @@ fn shadow() -> MutexGuard<'static, Option<Shadow>> {
         copy_tree(&ws.join("crates"), &root.join("crates"));
         copy_tree(&ws.join("app"), &root.join("app"));
         copy_tree(&ws.join("docs/results"), &root.join("docs/results"));
-        *guard = Some(Shadow { root, target: base.join("target") });
+        let (test_exe, bin) = build_shadow(&root, &base.join("target"));
+        let sh = Shadow { root, test_exe, bin, replay_out: base.join("replay.md"), replay_log: base.join("replay.log") };
+        *guard = Some(sh);
     }
     guard
+}
+
+/// The `"executable"` of the compiler-artifact line for target `name` of
+/// kind `kind` in cargo's JSON messages.
+fn executable(json: &str, kind: &str, name: &str) -> PathBuf {
+    let target = format!("\"kind\":[\"{kind}\"],\"crate_types\":[\"bin\"],\"name\":\"{name}\"");
+    let line = json
+        .lines()
+        .filter(|l| l.contains("\"reason\":\"compiler-artifact\"") && l.contains(&target))
+        .find(|l| l.contains("\"executable\":\""))
+        .unwrap_or_else(|| panic!("no {kind} {name} executable in cargo's messages:\n{json}"));
+    let start = line.find("\"executable\":\"").unwrap() + "\"executable\":\"".len();
+    let len = line[start..].find('"').unwrap();
+    PathBuf::from(&line[start..start + len])
+}
+
+/// Builds the shadow's record test once, as `cargo test` would, and returns
+/// (its executable, the `semblance` binary it spawns).
+fn build_shadow(root: &Path, target: &Path) -> (PathBuf, PathBuf) {
+    let out = Command::new(option_env!("CARGO").unwrap_or("cargo"))
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", target)
+        .args(["test", "-p", "semblance", "--test", "record", "--locked", "--offline", "--no-run"])
+        .args(["--message-format=json-render-diagnostics"])
+        .output()
+        .expect("cargo runs");
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "the shadow builds:\n{json}{}", String::from_utf8_lossy(&out.stderr));
+    (executable(&json, "test", "record"), executable(&json, "bin", "semblance"))
 }
 
 /// The shadow's data/.
@@ -412,20 +459,73 @@ impl Shadow {
         dir
     }
 
-    fn cargo(&self) -> Command {
-        let mut c = Command::new(option_env!("CARGO").unwrap_or("cargo"));
-        c.current_dir(&self.root)
-            .env("CARGO_TARGET_DIR", &self.target)
+    /// The shadow's record test executable, run as `cargo test` runs it: from
+    /// the package directory, with neither flag inherited.
+    fn record_test(&self) -> Command {
+        let mut c = Command::new(&self.test_exe);
+        c.current_dir(self.root.join("app"))
             .env_remove("SEMBLANCE_REQUIRE_FIXTURES")
             .env_remove("SEMBLANCE_REQUIRE_LIBM_RECORD");
         c
     }
 
+    /// The data directory the shadow's record test passes to `validate`.
+    fn data_arg(&self) -> String {
+        format!("{}/app/../data", self.root.display())
+    }
+
+    /// Puts at `bin` a `semblance` that logs its arguments and, given
+    /// exactly `validate --markdown --data <the shadow's data>`, prints
+    /// `run`'s stdout and exits 0. `run` is `validate --markdown` on the
+    /// same real fixtures by this suite's build of the same sources
+    /// (`good()`), so no record test run here computes it again: what the
+    /// record test does with that output is what these tests check. The
+    /// record test against a real `validate` is `app/tests/record.rs`'s own
+    /// run in the same suite, and CI's record step.
+    #[cfg(unix)]
+    fn replaying(&self, run: &Run) {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(run.code, Some(0), "a replayed run exits 0");
+        let (out, log) = (self.replay_out.display().to_string(), self.replay_log.display().to_string());
+        let want = format!("validate --markdown --data {}", self.data_arg());
+        for s in [&out, &log, &want] {
+            assert!(!s.contains('\''), "no quote in {s}");
+        }
+        fs::write(&self.replay_out, &run.stdout).unwrap();
+        let _ = fs::remove_file(&self.replay_log);
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n\
+             if [ \"$*\" != '{want}' ]; then echo \"replaying semblance: unexpected arguments: $*\" >&2; exit 2; fi\n\
+             exec /bin/cat '{out}'\n"
+        );
+        let _ = fs::remove_file(&self.bin);
+        fs::write(&self.bin, script).unwrap();
+        fs::set_permissions(&self.bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Elsewhere the shadow's own build stays at `bin` and runs for real.
+    #[cfg(not(unix))]
+    fn replaying(&self, _run: &Run) {}
+
+    /// The arguments each replayed `semblance` was given since it was put
+    /// in place (none on a host where nothing is replayed).
+    fn replayed(&self) -> Vec<String> {
+        fs::read_to_string(&self.replay_log).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    /// Checks the record test ran the replayed `validate` once, as RECORD-12
+    /// says it must: `validate --markdown --data <workspace>/data`.
+    fn ran_validate_once(&self) {
+        if cfg!(unix) {
+            assert_eq!(self.replayed(), [format!("validate --markdown --data {}", self.data_arg())]);
+            let _ = fs::remove_file(&self.replay_log);
+        }
+    }
+
     /// Runs the record test's fixture-reading test with `env` set.
     fn run_record(&self, env: &[(&str, &str)], path: Option<&Path>) -> Outcome {
-        let mut c = self.cargo();
-        c.args(["test", "-p", "semblance", "--test", "record", "--locked", "--offline", "--", "--exact", RECORD_TEST])
-            .args(["--nocapture", "--test-threads=1"]);
+        let mut c = self.record_test();
+        c.args(["--exact", RECORD_TEST, "--nocapture", "--test-threads=1"]);
         for (k, v) in env {
             c.env(k, v);
         }
@@ -435,7 +535,7 @@ impl Shadow {
             paths.extend(std::env::split_paths(&old));
             c.env("PATH", std::env::join_paths(paths).unwrap());
         }
-        let out = c.output().expect("cargo runs");
+        let out = c.output().expect("the record test runs");
         let o = Outcome {
             passed: out.status.success(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -982,12 +1082,17 @@ fn record_12_the_record_test_compares_validates_block_byte_for_byte() {
     if !fixtures_or_skip("record_12") {
         return;
     }
+    let g = good().expect("the fixtures are present");
     let rec = committed();
     let guard = shadow();
     let sh = guard.as_ref().unwrap();
     sh.data(Data::Real);
 
-    // The host-specific section is never compared, whatever it holds.
+    sh.replaying(g);
+
+    // The host-specific section is never compared, whatever it holds. The
+    // record test spawns the built `semblance validate --markdown --data
+    // <workspace>/data`, once, and nothing else.
     let host_altered = rec
         .replacen("| threads | ", "| threads | 99", 1)
         .replacen("| debug assertions | ", "| debug assertions | maybe ", 1);
@@ -998,6 +1103,7 @@ fn record_12_the_record_test_compares_validates_block_byte_for_byte() {
     assert!(o.passed, "the committed record matches validate's output:\n{}", o.all());
     let ran = fs::read_to_string(&log).unwrap_or_default();
     assert!(ran.is_empty(), "the record test ran: {ran}");
+    sh.ran_validate_once();
 
     // Outside the host and libm sections, one changed number fails, naming
     // the first differing line of each side.
@@ -1008,6 +1114,7 @@ fn record_12_the_record_test_compares_validates_block_byte_for_byte() {
     sh.record(Some(&swap(&rec, line, &changed)));
     let o = sh.run_record(&[], None);
     assert!(!o.passed, "a changed control must fail:\n{}", o.all());
+    sh.ran_validate_once();
     let out = combined(&o);
     assert!(out.contains(&changed) && out.contains(line), "both sides of the first differing line:\n{out}");
     sh.record(Some(&rec));
@@ -1033,16 +1140,20 @@ fn record_13_an_equal_fingerprint_compares_the_libm_section() {
     let guard = shadow();
     let sh = guard.as_ref().unwrap();
     sh.data(Data::Real);
+    sh.replaying(g);
     sh.record(Some(&rec));
     let o = sh.run_record(&[], None);
     assert!(o.passed, "this host's own block matches:\n{}", o.all());
     assert!(!combined(&o).contains("libm sections not compared"), "the libm section was compared:\n{}", o.all());
+    sh.ran_validate_once();
     let o = sh.run_record(&[("SEMBLANCE_REQUIRE_LIBM_RECORD", "1")], None);
     assert!(o.passed, "an equal fingerprint satisfies SEMBLANCE_REQUIRE_LIBM_RECORD=1:\n{}", o.all());
+    sh.ran_validate_once();
 
     sh.record(Some(&swap(&rec, &first_libm_row, &changed_row)));
     let o = sh.run_record(&[], None);
     assert!(!o.passed, "a changed libm row must fail when fingerprints agree:\n{}", o.all());
+    sh.ran_validate_once();
     let out = combined(&o);
     assert!(out.contains(&changed_row) && out.contains(&first_libm_row), "both sides of the differing libm line:\n{out}");
     sh.record(Some(&committed()));
@@ -1059,9 +1170,11 @@ fn record_14_require_libm_record_fails_on_a_different_fingerprint() {
     let guard = shadow();
     let sh = guard.as_ref().unwrap();
     sh.data(Data::Real);
+    sh.replaying(g);
     sh.record(Some(&rec));
     let o = sh.run_record(&[("SEMBLANCE_REQUIRE_LIBM_RECORD", "1")], None);
     assert!(!o.passed, "a different fingerprint under the flag must fail:\n{}", o.all());
+    sh.ran_validate_once();
     let want = format!("SEMBLANCE_REQUIRE_LIBM_RECORD=1 but this host's libm fingerprint {here} differs from the record's {FAKE_FP}");
     assert!(combined(&o).contains(&want), "expected {want:?}:\n{}", o.all());
     sh.record(Some(&committed()));
@@ -1084,9 +1197,11 @@ fn record_15_a_different_fingerprint_skips_only_the_libm_section() {
     let guard = shadow();
     let sh = guard.as_ref().unwrap();
     sh.data(Data::Real);
+    sh.replaying(g);
     sh.record(Some(&rec));
     let o = sh.run_record(&[], None);
     assert!(o.passed, "the libm section is not compared on another libm:\n{}", o.all());
+    sh.ran_validate_once();
     let want = format!("record: libm sections not compared: this host's libm fingerprint {here} differs from the record's {FAKE_FP}");
     assert!(o.stderr.contains(&want), "expected on stderr {want:?}:\n{}", o.all());
 
@@ -1096,6 +1211,7 @@ fn record_15_a_different_fingerprint_skips_only_the_libm_section() {
     sh.record(Some(&swap(&rec, line, &changed)));
     let o = sh.run_record(&[], None);
     assert!(!o.passed, "outside the libm section a difference still fails:\n{}", o.all());
+    sh.ran_validate_once();
     assert!(combined(&o).contains(&changed), "{}", o.all());
     sh.record(Some(&committed()));
 }
@@ -1109,11 +1225,7 @@ fn record_16_the_record_tests_text_functions_are_unit_tested_and_pass() {
     let sh = guard.as_ref().unwrap();
     sh.record(Some(&committed()));
     sh.data(Data::Empty);
-    let out = sh
-        .cargo()
-        .args(["test", "-p", "semblance", "--test", "record", "--locked", "--offline", "--", "--skip", RECORD_TEST])
-        .output()
-        .expect("cargo runs");
+    let out = sh.record_test().args(["--skip", RECORD_TEST]).output().expect("the record test runs");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the record test's unit tests pass:\n{text}");
     let n: usize = text
