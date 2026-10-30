@@ -1,16 +1,20 @@
 //! Acceptance tests for the 0.3.0 release: packaging and release metadata
 //! (behaviour group `release`, RELEASE-01 to RELEASE-11).
 //!
-//! These drive cargo itself (`cargo metadata`, `cargo package --workspace`,
-//! `cargo publish --workspace --dry-run`) and read the shipped documents and
-//! manifests as a reader would. Packaging and the dry run build into this
-//! test target's own temp dir, so they never touch the outer build. They need
-//! network access to the crates.io index, as `cargo package` always does.
+//! These drive cargo itself (`cargo metadata`, `cargo package --list`) and
+//! read the shipped documents and manifests as a reader would. Every cargo
+//! they run is offline (`CARGO_NET_OFFLINE`), so no test needs the network,
+//! and each command works on the 1.85 MSRV toolchain's cargo. `cargo package
+//! --list` builds nothing: it prints what each `.crate` would hold.
 //!
 //! `cargo package` is run with `--allow-dirty` so that working on this
 //! workspace does not fail the suite; on the clean tree the behaviour names
 //! it is a no-op.
 //!
+//! RELEASE-03's `cargo publish --workspace --dry-run` needs the crates.io
+//! index (and cargo 1.90 or later), so it is a manual release step, in the
+//! plan's "After the PR merges" list, not a test; so is the upload order it
+//! prints, which RELEASE-02 checks here only against the dependency graph.
 //! RELEASE-12 (the tag, no GitHub Release, publishing and yanking only on
 //! the owner's go-ahead) is a post-merge step of the head and the owner and
 //! has no test here.
@@ -58,7 +62,9 @@ fn text(b: &[u8]) -> String {
 
 fn cargo() -> Command {
     let mut cmd = Command::new(option_env!("CARGO").unwrap_or("cargo"));
-    cmd.current_dir(workspace());
+    // Offline always: a command that would reach for the network fails here,
+    // on every host, rather than only where the network is missing.
+    cmd.current_dir(workspace()).env("CARGO_NET_OFFLINE", "true");
     cmd
 }
 
@@ -301,62 +307,41 @@ fn toml_section(src: &str, section: &str) -> Vec<(String, String)> {
 // Packaging, shared by RELEASE-03 and RELEASE-06
 // ---------------------------------------------------------------------------
 
-fn package_target() -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("acceptance-release-package")
-}
-
-/// Runs `cargo package --workspace` once and extracts every `.crate`.
-/// Returns package name -> (extracted root, every entry path in the archive).
-fn packaged() -> &'static BTreeMap<String, (PathBuf, Vec<String>)> {
-    static P: OnceLock<BTreeMap<String, (PathBuf, Vec<String>)>> = OnceLock::new();
+/// `cargo package --list -p <name>` for every package, once: package name ->
+/// every path its `.crate` would hold, relative to the package root. Offline,
+/// and it builds nothing, so the packaging happens once and costs no build.
+fn packaged() -> &'static BTreeMap<String, Vec<String>> {
+    static P: OnceLock<BTreeMap<String, Vec<String>>> = OnceLock::new();
     P.get_or_init(|| {
-        let target = package_target();
-        let pkg_dir = target.join("package");
-        let _ = std::fs::remove_dir_all(&pkg_dir);
-        let mut cmd = cargo();
-        cmd.args(["package", "--workspace", "--locked", "--allow-dirty"]).env("CARGO_TARGET_DIR", &target);
-        run(cmd, "cargo package --workspace");
-
-        let extract = target.join("extracted");
-        let _ = std::fs::remove_dir_all(&extract);
-        std::fs::create_dir_all(&extract).unwrap();
-
         let mut out = BTreeMap::new();
         for (name, _) in PACKAGE_DIRS {
-            let file = pkg_dir.join(format!("{name}-0.3.0.crate"));
-            assert!(file.is_file(), "cargo package did not produce {}", file.display());
-            let mut list = Command::new("tar");
-            list.arg("tzf").arg(&file);
-            let entries: Vec<String> =
-                text(&run(list, "tar tzf").stdout).lines().map(str::to_string).collect();
-            let mut x = Command::new("tar");
-            x.arg("xzf").arg(&file).arg("-C").arg(&extract);
-            run(x, "tar xzf");
-            out.insert(name.to_string(), (extract.join(format!("{name}-0.3.0")), entries));
+            let mut cmd = cargo();
+            cmd.args(["package", "--list", "-p", name, "--locked", "--allow-dirty"]);
+            let what = format!("cargo package --list -p {name}");
+            let entries: Vec<String> = text(&run(cmd, &what).stdout).lines().map(str::to_string).collect();
+            assert!(entries.iter().any(|e| e == "Cargo.toml"), "{what} lists no Cargo.toml: {entries:?}");
+            out.insert(name.to_string(), entries);
         }
         out
     })
 }
 
-/// `cargo publish --workspace --dry-run`'s stderr, once.
-fn publish_dry_run() -> &'static str {
-    static D: OnceLock<String> = OnceLock::new();
-    D.get_or_init(|| {
-        let mut cmd = cargo();
-        cmd.args(["publish", "--workspace", "--dry-run", "--locked", "--allow-dirty"])
-            .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("acceptance-release-publish"));
-        let out = run(cmd, "cargo publish --workspace --dry-run");
-        text(&out.stderr)
-    })
-}
+/// The order `cargo publish --workspace` uploads in (spec F16). The manual
+/// release step's dry run confirms cargo prints this order; RELEASE-02 checks
+/// it against the dependency graph.
+const PUBLISH_ORDER: [&str; 8] = [
+    "semblance-rng",
+    "semblance-connectome",
+    "semblance-codec",
+    "semblance-sim",
+    "semblance-evo",
+    "semblance-fidelity",
+    "semblance-flyvis",
+    "semblance",
+];
 
-/// Package names in the order the dry run uploads them.
 fn publish_order() -> Vec<String> {
-    publish_dry_run()
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("Uploading "))
-        .map(|rest| rest.split_whitespace().next().unwrap().to_string())
-        .collect()
+    PUBLISH_ORDER.iter().map(|s| s.to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +412,11 @@ fn release_02_flyvis_depends_on_sim_app_depends_on_flyvis_and_publishing_order_i
     );
 
     let order = publish_order();
-    assert_eq!(order.len(), 8, "the dry run uploads all eight packages: {order:?}");
+    let mut all: Vec<&str> = order.iter().map(String::as_str).collect();
+    all.sort();
+    let mut members: Vec<&str> = PACKAGE_DIRS.iter().map(|(n, _)| *n).collect();
+    members.sort();
+    assert_eq!(all, members, "the publishing order names every package once: {order:?}");
     let at = |n: &str| order.iter().position(|o| o == n).unwrap_or_else(|| panic!("{n} not uploaded: {order:?}"));
     assert!(at("semblance-flyvis") > at("semblance-sim"), "flyvis publishes after sim: {order:?}");
     assert_eq!(order.last().map(String::as_str), Some("semblance"), "semblance publishes last: {order:?}");
@@ -446,7 +435,7 @@ fn release_02_flyvis_depends_on_sim_app_depends_on_flyvis_and_publishing_order_i
 // ---------------------------------------------------------------------------
 
 #[test]
-fn release_03_every_package_carries_license_and_notice_and_the_publish_dry_run_passes() {
+fn release_03_every_package_carries_license_and_notice() {
     let licence = read("LICENSE");
     let notice = read("NOTICE");
 
@@ -460,35 +449,29 @@ fn release_03_every_package_carries_license_and_notice_and_the_publish_dry_run_p
             let meta = std::fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
             assert!(meta.file_type().is_symlink(), "{rel} is a symlink ({name})");
             assert_eq!(std::fs::read_link(&path).unwrap(), Path::new(&format!("{up}{f}")), "{rel}'s target");
+            // cargo packages a symlink as the file it points to: the root text.
+            let body = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            let want = if f == "LICENSE" { &licence } else { &notice };
+            assert_eq!(&body, want, "{rel} reads as the root {f}");
         }
     }
 
-    // Every .crate holds LICENSE and NOTICE as real files with the root text.
+    // Every .crate holds LICENSE and NOTICE, once each.
     let mut entries = 0;
-    for (name, (root, list)) in packaged() {
+    for (name, list) in packaged() {
         for f in ["LICENSE", "NOTICE"] {
-            let entry = format!("{name}-0.3.0/{f}");
-            let n = list.iter().filter(|e| **e == entry).count();
+            let n = list.iter().filter(|e| *e == f).count();
             assert_eq!(n, 1, "{name}.crate holds {f} once: {list:?}");
             entries += n;
-            let path = root.join(f);
-            let meta = std::fs::symlink_metadata(&path).unwrap();
-            assert!(meta.file_type().is_file(), "{name}'s {f} is dereferenced into a file");
-            let body = std::fs::read_to_string(&path).unwrap();
-            let want = if f == "LICENSE" { &licence } else { &notice };
-            assert_eq!(&body, want, "{name}'s {f} is the root {f}");
         }
     }
     let total: usize = packaged()
         .values()
-        .flat_map(|(_, l)| l.iter())
-        .filter(|e| e.ends_with("/LICENSE") || e.ends_with("/NOTICE"))
+        .flat_map(|l| l.iter())
+        .filter(|e| e.rsplit('/').next().is_some_and(|b| b == "LICENSE" || b == "NOTICE"))
         .count();
     assert_eq!(entries, 16);
     assert_eq!(total, 16, "LICENSE/NOTICE entries across all eight .crate files");
-
-    let dry = publish_dry_run();
-    assert_eq!(publish_order().len(), 8, "the dry run reaches every package:\n{dry}");
 }
 
 // ---------------------------------------------------------------------------
@@ -546,8 +529,8 @@ fn release_05_notice_lists_syn_count_torch_and_credits_the_ported_code() {
 fn release_06_flyvis_sim_and_app_packages_carry_no_tests_and_rng_keeps_its_vectors() {
     let pkgs = packaged();
     for name in ["semblance-flyvis", "semblance-sim", "semblance"] {
-        let (_, list) = &pkgs[name];
-        let tests: Vec<&String> = list.iter().filter(|e| e.starts_with(&format!("{name}-0.3.0/tests/"))).collect();
+        let list = &pkgs[name];
+        let tests: Vec<&String> = list.iter().filter(|e| e.starts_with("tests/")).collect();
         assert!(tests.is_empty(), "{name}.crate carries tests/: {tests:?}");
         let dir = PACKAGE_DIRS.iter().find(|(n, _)| *n == name).unwrap().1;
         assert!(
@@ -555,9 +538,9 @@ fn release_06_flyvis_sim_and_app_packages_carry_no_tests_and_rng_keeps_its_vecto
             "{dir}/tests exists in the workspace, so the exclusion is what keeps it out"
         );
     }
-    let (_, rng) = &pkgs["semblance-rng"];
+    let rng = &pkgs["semblance-rng"];
     assert!(
-        rng.iter().any(|e| e == "semblance-rng-0.3.0/tests/vectors.rs"),
+        rng.iter().any(|e| e == "tests/vectors.rs"),
         "semblance-rng keeps tests/vectors.rs: {rng:?}"
     );
 }

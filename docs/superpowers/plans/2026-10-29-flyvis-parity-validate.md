@@ -7196,7 +7196,15 @@ Then wave 6 (task 11) runs.
 1. `git tag -a v0.3.0 -m "0.3.0: graded dynamics, validated against flyvis"`
    on the merge commit; `git push origin v0.3.0`. Set `CITATION.cff`'s
    `date-released` to the tag date in a follow-up commit if it was not set
-   before tagging.
+   before tagging. Then, from a clean checkout of the tag, with network
+   access and cargo 1.90 or later (`--workspace` is unstable on `publish`
+   before that): `cargo publish --workspace --dry-run --locked; echo "exit $?"`.
+   Expected: `Uploading` for rng, connectome, codec, sim, evo, fidelity,
+   flyvis, semblance (in that order), each followed by `warning: aborting
+   upload due to dry run`; `exit 0`. This is RELEASE-03's dry run and the
+   upload order RELEASE-02 names; they need the crates.io index, so they are
+   checked here and not by `app/tests/acceptance_release.rs`, which stays
+   offline. If it fails, stop: nothing is published.
 2. **Stop and ask the owner.** Only on an explicit go-ahead at that moment,
    from a clean checkout of the tag: `cargo publish --workspace` (it
    publishes rng, connectome, codec, sim, evo, fidelity, flyvis, semblance in
