@@ -117,12 +117,12 @@ in `crates/codec` are deliberately unimplemented. Do not fill them in
 opportunistically — that is an epic with its own design.
 
 `semblance-codec` 0.3.1 still contains both `todo!()`s; its description says
-so. The six 0.1.0 releases (semblance, -codec, -connectome, -evo, -fidelity,
--sim) are to be yanked once all eight 0.3.1 crates are live: they predate
-flyvis and graded dynamics, evo 0.1.0 depends on `rand`, and yanking codec
-alone would strand evo, fidelity and semblance 0.1.0. Publishing and yanking
-wait for the owner's go-ahead. A real `ReducedCodec` later needs no yank of
-its own.
+so. All eight 0.3.1 crates were published on 2026-10-31, and the six 0.1.0
+releases (semblance, -codec, -connectome, -evo, -fidelity, -sim) were yanked on
+2026-10-31: they predate flyvis and graded dynamics, evo 0.1.0 depends on
+`rand`, and yanking codec alone would strand evo, fidelity and semblance
+0.1.0. Every later publish or yank waits for the owner's go-ahead. A real
+`ReducedCodec` later needs no yank of its own.
 
 ---
 

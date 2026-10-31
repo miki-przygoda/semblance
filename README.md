@@ -99,10 +99,9 @@ The open work is `ReducedCodec` in `crates/codec/src/lib.rs`, whose `encode`
 and `decode` are deliberately `todo!()`, and the probe-battery note in
 `crates/fidelity/src/lib.rs`.
 
-`semblance-codec 0.1.0` on crates.io is an early placeholder:
-`ReducedCodec::encode` and `decode` panic with `todo!()` there too. The other
-`0.1.0` crates there predate the flyvis work. Build from this repository
-instead.
+All eight crates are on crates.io at `0.3.1`. In `semblance-codec 0.3.1`,
+`ReducedCodec::encode` and `decode` panic with `todo!()`, as they do here. The
+yanked `0.1.0` releases predate the flyvis work.
 
 ## Design notes
 
