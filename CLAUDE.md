@@ -4,7 +4,7 @@ Rust workspace for connectome compression research. Take a connectome-constraine
 model that predicts real neural recordings, compress its representation, and
 measure how far it can shrink before it stops behaving like the fly.
 
-Current: **v0.3.0**, crate versions `0.3.0`. See "Version bumps" below — they
+Current: **v0.3.1**, crate versions `0.3.1`. See "Version bumps" below — they
 mean something specific here.
 
 ---
@@ -116,9 +116,9 @@ spiking trait surface is planned work, so do not invest in extending `Lif`.
 in `crates/codec` are deliberately unimplemented. Do not fill them in
 opportunistically — that is an epic with its own design.
 
-`semblance-codec` 0.3.0 still contains both `todo!()`s; its description says
+`semblance-codec` 0.3.1 still contains both `todo!()`s; its description says
 so. The six 0.1.0 releases (semblance, -codec, -connectome, -evo, -fidelity,
--sim) are to be yanked once all eight 0.3.0 crates are live: they predate
+-sim) are to be yanked once all eight 0.3.1 crates are live: they predate
 flyvis and graded dynamics, evo 0.1.0 depends on `rand`, and yanking codec
 alone would strand evo, fidelity and semblance 0.1.0. Publishing and yanking
 wait for the owner's go-ahead. A real `ReducedCodec` later needs no yank of
