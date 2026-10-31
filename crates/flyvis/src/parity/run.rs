@@ -516,6 +516,21 @@ fn check_inputs(t: &TraceInputs, run: u32, want: Dtype) -> Result<(), ParityErro
             dtype_name(want)
         )));
     }
+    // `parse_sequences` refuses these, but `SequenceInfo`'s fields are pub, so
+    // a caller can build one by hand. Checked before anything is settled:
+    // out-of-order frames would misalign the snapshot comparison, and a
+    // repeated or out-of-range frame would record too few snapshot rows.
+    for q in t.sequences {
+        for layout in &q.frames {
+            let ascending = layout.snapshot_frames.windows(2).all(|w| w[0] < w[1]);
+            if !ascending || layout.snapshot_frames.last().is_some_and(|&last| last >= layout.n_frames) {
+                return Err(mismatch(format!(
+                    "sequence {}'s snapshot frames at dt {}, {:?}, are out of order or past n_frames {}",
+                    q.index, layout.dt, layout.snapshot_frames, layout.n_frames
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -689,6 +704,31 @@ mod tests {
         assert_eq!(r.sequences, p);
         assert_eq!(r.centre_movement.len(), 65);
         assert!(r.centre_movement.iter().all(|m| m.is_finite() && *m > 0.0), "{:?}", r.centre_movement);
+    }
+
+    /// Hand-built sequences whose snapshot frames repeat, run past the end
+    /// or are out of order are refused before anything is settled or read,
+    /// never a panic or a misaligned comparison.
+    #[test]
+    fn play_and_run_refuse_snapshot_frames_parse_sequences_would_refuse() {
+        use crate::reference::{SequenceFrames, SequenceInfo};
+        let Some(f) = fixture() else { return };
+        let sequence = |frames: Vec<usize>| SequenceInfo {
+            index: 0,
+            family: "flashes".into(),
+            flyvis_index: 0,
+            args: Vec::new(),
+            frames: vec![SequenceFrames { dt: "1/50".into(), n_frames: 150, stimulus_frames: (50, 100), snapshot_frames: frames }],
+        };
+        for frames in [vec![0, 0, 29, 59, 89, 119], vec![0, 29, 59, 89, 119, 200], vec![29, 0, 59, 89, 119, 149], vec![0, 29, 59, 89, 119, 150]] {
+            let sequences = [sequence(frames.clone())];
+            let t = TraceInputs { precision: Dtype::F64, sequences: &sequences, input: &[], centre: &[], snapshots: &[] };
+            let want = Err(ParityError::Mismatch(format!(
+                "sequence 0's snapshot frames at dt 1/50, {frames:?}, are out of order or past n_frames 150"
+            )));
+            assert_eq!(play(f, &t, 3, Counts::Torch, Start::Rust, &[0], false).map(|_| ()), want);
+            assert_eq!(run(f, &t, 3, Counts::Torch).map(|_| ()), want);
+        }
     }
 
     /// R19: the trace inputs' precision must be the run's.
