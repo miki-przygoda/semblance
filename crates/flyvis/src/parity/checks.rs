@@ -174,7 +174,9 @@ pub(crate) fn check_fixtures(f: &Fixtures, t: &TraceData, p: &Provenance) -> Res
             ("snapshots.f32.bin", t.snapshots_f32.len()),
             ("snapshots.f64.bin", t.snapshots_f64.len()),
         ]);
+    let mut checked = Vec::new();
     for (name, len) in lengths {
+        checked.push(name);
         let manifest = file(f, name)?.bytes;
         if len != manifest {
             return Err(mismatch(format!("{name}: {len} bytes, manifest says {manifest}")));
@@ -188,6 +190,11 @@ pub(crate) fn check_fixtures(f: &Fixtures, t: &TraceData, p: &Provenance) -> Res
         if len as u64 != size {
             return Err(mismatch(format!("{name}: {len} bytes, PROVENANCE sizes says {size}")));
         }
+    }
+    // and PROVENANCE sizes no file the checks above did not compare, so the
+    // record's count of size-checked files is the number actually checked
+    if let Some((extra, _)) = p.sizes.iter().find(|(k, _)| !checked.contains(&k.as_str())) {
+        return Err(mismatch(format!("{extra}: PROVENANCE sizes lists a file validate does not check")));
     }
 
     check_settling_gaps(p)?;

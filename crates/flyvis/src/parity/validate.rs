@@ -532,6 +532,24 @@ mod tests {
         }
     }
 
+    /// The record's files row counts PROVENANCE's sizes, so a sizes entry
+    /// for a file nothing compares is refused rather than counted.
+    #[cfg(unix)]
+    #[test]
+    fn validate_refuses_a_provenance_size_for_a_file_it_does_not_check() {
+        let Some(()) = or_skip(require_present(required_files())) else { return };
+        let text = std::fs::read_to_string(data_dir().join(PROVENANCE)).unwrap();
+        let at = text.find("\"sizes\": {").expect("PROVENANCE's sizes") + "\"sizes\": {".len();
+        let altered = format!("{}\n    \"manifest.json\": 1,{}", &text[..at], &text[at..]);
+        let dir = altered_data("extra-size", PROVENANCE, altered.as_bytes());
+        let r = validate(&dir, &Options::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            r.map(|_| ()),
+            Err(ParityError::Mismatch("manifest.json: PROVENANCE sizes lists a file validate does not check".into()))
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn validate_refuses_a_file_whose_size_disagrees() {
