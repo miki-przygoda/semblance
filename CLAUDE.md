@@ -4,7 +4,7 @@ Rust workspace for connectome compression research. Take a connectome-constraine
 model that predicts real neural recordings, compress its representation, and
 measure how far it can shrink before it stops behaving like the fly.
 
-Current: **v0.3.0**, crate versions `0.3.0`. See "Version bumps" below — they
+Current: **v0.3.1**, crate versions `0.3.1`. See "Version bumps" below — they
 mean something specific here.
 
 ---
@@ -116,9 +116,9 @@ spiking trait surface is planned work, so do not invest in extending `Lif`.
 in `crates/codec` are deliberately unimplemented. Do not fill them in
 opportunistically — that is an epic with its own design.
 
-`semblance-codec` 0.3.0 still contains both `todo!()`s; its description says
+`semblance-codec` 0.3.1 still contains both `todo!()`s; its description says
 so. The six 0.1.0 releases (semblance, -codec, -connectome, -evo, -fidelity,
--sim) are to be yanked once all eight 0.3.0 crates are live: they predate
+-sim) are to be yanked once all eight 0.3.1 crates are live: they predate
 flyvis and graded dynamics, evo 0.1.0 depends on `rand`, and yanking codec
 alone would strand evo, fidelity and semblance 0.1.0. Publishing and yanking
 wait for the owner's go-ahead. A real `ReducedCodec` later needs no yank of
@@ -130,13 +130,13 @@ its own.
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 568 tests, 0 failures
+cargo test --workspace          # 570 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 cargo run --release -- validate # exit 0: every parity gate and control holds
 ```
 
-172 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
+174 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
 `data/flyvis-stimuli/`, `data/flyvis-reference/` and
 `data/flyvis-pretrained/ensemble.csv` are absent (all five are gitignored
 real-data; the first is fetched per `RESOURCES.md`, the next two produced by
@@ -146,7 +146,7 @@ writes `data/flyvis-reference/` and also the three height-80 `_h80`
 moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "568 passed, 0 failed" whether the data is present
+the suite reports the same "570 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`,
 and even then not quite one per skipped test. Fixtures loaded once and shared
 -- the settling and trace gates' (`crates/flyvis/src/gate_support.rs`,
@@ -156,11 +156,11 @@ cache the miss, not the notice, so every test that finds one missing prints
 its own (`acceptance_traces.rs`'s
 `every_fixture_gated_acceptance_test_prints_its_own_skip_notice` holds the
 acceptance files to that). A test that reads more than one missing fixture
-prints more than one: 166 of the 172 print a notice, 178 notices in all
+prints more than one: 168 of the 174 print a notice, 180 notices in all
 under `--nocapture --test-threads=1`. The other six -- `validate_02`, `_07`,
 `_11`, `_12`, `_13` and `_20` in `app/tests/acceptance_validate.rs` -- share
 `good()`'s cached run, which prints its notice only for the first test to
-ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 172 fails
+ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 174 fails
 instead.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a

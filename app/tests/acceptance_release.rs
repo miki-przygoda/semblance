@@ -26,6 +26,10 @@ use std::sync::OnceLock;
 
 const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
+/// The released version: 0.3.1, a patch on epic 0.3.0 (whose record and
+/// headline keep the epic's number).
+const VERSION: &str = "0.3.1";
+
 const LIBRARIES: [&str; 7] = [
     "semblance-rng",
     "semblance-connectome",
@@ -349,12 +353,12 @@ fn publish_order() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn release_01_the_workspace_and_lockfile_are_at_0_3_0_with_only_the_eight_semblance_packages() {
+fn release_01_the_workspace_and_lockfile_are_at_the_release_version_with_only_the_eight_semblance_packages() {
     let manifest = read("Cargo.toml");
 
     let pkg = toml_section(&manifest, "workspace.package");
     let version = pkg.iter().find(|(k, _)| k == "version").map(|(_, v)| v.as_str());
-    assert_eq!(version, Some("\"0.3.0\""), "[workspace.package] version");
+    assert_eq!(version, Some(format!("\"{VERSION}\"").as_str()), "[workspace.package] version");
 
     let deps = toml_section(&manifest, "workspace.dependencies");
     let names: Vec<&str> = deps.iter().map(|(k, _)| k.as_str()).collect();
@@ -364,16 +368,16 @@ fn release_01_the_workspace_and_lockfile_are_at_0_3_0_with_only_the_eight_sembla
     got.sort();
     assert_eq!(got, want, "[workspace.dependencies] pins every library and nothing else");
     for (k, v) in &deps {
-        assert!(v.contains("version = \"0.3.0\""), "{k} is pinned at {v}");
+        assert!(v.contains(&format!("version = \"{VERSION}\"")), "{k} is pinned at {v}");
         assert!(!v.contains("0.2.0"), "{k} is pinned at {v}");
     }
 
-    // cargo's own view: every workspace member is 0.3.0.
+    // cargo's own view: every workspace member is at VERSION.
     for (name, _) in PACKAGE_DIRS {
-        assert_eq!(package(name).get("version").str(), Some("0.3.0"), "{name}'s version");
+        assert_eq!(package(name).get("version").str(), Some(VERSION), "{name}'s version");
     }
 
-    // Cargo.lock: exactly the eight, at 0.3.0, none from a registry.
+    // Cargo.lock: exactly the eight, at VERSION, none from a registry.
     let lock = read("Cargo.lock");
     let mut locked: Vec<(String, String)> = Vec::new();
     for block in lock.split("[[package]]").skip(1) {
@@ -388,7 +392,7 @@ fn release_01_the_workspace_and_lockfile_are_at_0_3_0_with_only_the_eight_sembla
         locked.push((field("name").expect("a name"), field("version").expect("a version")));
     }
     let mut expect: Vec<(String, String)> =
-        PACKAGE_DIRS.iter().map(|(n, _)| (n.to_string(), "0.3.0".to_string())).collect();
+        PACKAGE_DIRS.iter().map(|(n, _)| (n.to_string(), VERSION.to_string())).collect();
     expect.sort();
     locked.sort();
     assert_eq!(locked, expect, "Cargo.lock's packages");
@@ -617,7 +621,7 @@ fn calendar_date(s: &str) -> Option<(u32, u32, u32)> {
 
 /// The tree alone cannot know the tag date, and no test reads git tags, so
 /// RELEASE-08's "`date-released` is the tag date" is a manual release step:
-/// the head sets it when tagging v0.3.0. What the tree can prove is checked
+/// the head sets it when tagging the release. What the tree can prove is checked
 /// here: the version is the workspace's, and the date is a real date no
 /// earlier than the result record it releases.
 #[test]
@@ -633,7 +637,7 @@ fn release_08_citation_is_the_workspace_version_dated_no_earlier_than_the_record
     let manifest = read("Cargo.toml");
     let pkg = toml_section(&manifest, "workspace.package");
     let version = pkg.iter().find(|(k, _)| k == "version").map(|(_, v)| v.trim_matches('"').to_string());
-    assert_eq!(version.as_deref(), Some("0.3.0"), "[workspace.package] version");
+    assert_eq!(version.as_deref(), Some(VERSION), "[workspace.package] version");
     assert_eq!(Some(field("version")), version, "CITATION.cff's version is the workspace's");
 
     let date = field("date-released");
@@ -799,11 +803,11 @@ fn release_10_readme_has_the_headline_how_to_check_the_record_and_absolute_links
 // ---------------------------------------------------------------------------
 
 #[test]
-fn release_11_claude_md_is_at_0_3_0_and_describes_validate_the_record_and_the_yanks() {
+fn release_11_claude_md_is_at_the_release_version_and_describes_validate_the_record_and_the_yanks() {
     let c = read("CLAUDE.md");
     let f = flat(&c);
 
-    assert!(f.contains("Current: **v0.3.0**, crate versions `0.3.0`"), "the version line");
+    assert!(f.contains(&format!("Current: **v{VERSION}**, crate versions `{VERSION}`")), "the version line");
 
     let (tests, skips) = claude_counts();
     assert_ne!((tests, skips), (429, 123), "the counts are re-measured, not 0.2.0's");
@@ -826,12 +830,12 @@ fn release_11_claude_md_is_at_0_3_0_and_describes_validate_the_record_and_the_ya
     assert!(f.contains("it never runs `tools/` or git"), "validate never runs tools/ or git");
 
     // The yank sentence, before the yanks.
-    assert!(f.contains("`semblance-codec` 0.3.0 still contains both `todo!()`s; its description says so."));
+    assert!(f.contains(&format!("`semblance-codec` {VERSION} still contains both `todo!()`s; its description says so.")));
     assert!(
-        f.contains(
+        f.contains(&format!(
             "The six 0.1.0 releases (semblance, -codec, -connectome, -evo, -fidelity, -sim) are to be yanked \
-             once all eight 0.3.0 crates are live"
-        ) || f.contains("were yanked on"),
+             once all eight {VERSION} crates are live"
+        )) || f.contains("were yanked on"),
         "the yank sentence"
     );
     assert!(f.contains("yanking codec alone would strand evo, fidelity and semblance 0.1.0"));
