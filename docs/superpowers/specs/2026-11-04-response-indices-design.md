@@ -1,8 +1,8 @@
 # The response indices, validated: gates A, B and E
 
 **Date:** 2026-11-04
-**Status:** design approved by the owner in chat 2026-11-04; spec awaiting
-the owner's review.
+**Status:** design approved by the owner in chat 2026-11-04; spec approved
+2026-11-04.
 **Epic:** 0.4.0 fidelity against recordings, task 3 —
 `docs/project-outline/0.4.0-fidelity-against-recordings/` (not in git):
 gates A, B and E as rewritten 2026-11-04, owner's answers Q1, Q2, and
