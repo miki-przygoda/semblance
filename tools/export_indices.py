@@ -490,22 +490,51 @@ def read_block(m, name, run, dt, sequence):
     return np.frombuffer(data, dtype=f["dtype"]).astype(er.NUMPY_DTYPE[f["dtype"]]).reshape(b["shape"])
 
 
+F64_LINK_BOUND = 1e-10    # 0.3.0's libm rule at f64; never raise it
+
+
+def _max_abs(a, b):
+    """max |a - b| in float64 after exact widening; both sides finite."""
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    require(a.shape == b.shape, "link", f"shapes {a.shape} vs {b.shape}")
+    require(bool(np.isfinite(a).all() and np.isfinite(b).all()), "link", "non-finite values")
+    return float(np.max(np.abs(a - b))) if a.size else 0.0
+
+
+def link_record(diff, flyvis_gap, precision):
+    """One array's link: its max difference from fixtures-2, the bound
+    (1e-10 at f64; at f32 twice flyvis's own f32/f64 gap for that array, from
+    fixtures-2's f32 and f64 files: the trace gates' rule) and their ratio."""
+    bound = F64_LINK_BOUND if precision == "f64" else 2.0 * flyvis_gap
+    require(bound > 0.0 and np.isfinite(bound), "link", f"{precision}: bound {bound!r}")
+    return {"max_abs_diff": diff, "bound": bound, "ratio": diff / bound}
+
+
 def link_to_fixtures2(network, flash, edge, precision):
-    """Model 000's settled state and central traces equal fixtures-2's
-    reference (model 000, dt 1/200, this precision), bit for bit, and the
-    input fed equals the reference's input.f64.bin."""
+    """Model 000's settled state and central traces against fixtures-2's
+    reference (model 000, dt 1/200, this precision), within link_record's
+    bound per array; the input fed equals the reference's input.f64.bin bit
+    for bit. Prints every difference and ratio before requiring any. Beast's
+    torch differs from the Mac's in the last bits (plan, Amendment 2)."""
     m = reference_manifest()
-    runs = [r["index"] for r in m["runs"] if (r["model"], r["dt"], r["precision"]) == ("000", "1/200", precision)]
-    require(len(runs) == 1, "link", f"{len(runs)} reference runs for model 000, dt 1/200, {precision}")
-    run = runs[0]
+
+    def run_of(p):
+        runs = [r["index"] for r in m["runs"] if (r["model"], r["dt"], r["precision"]) == ("000", "1/200", p)]
+        require(len(runs) == 1, "link", f"{len(runs)} reference runs for model 000, dt 1/200, {p}")
+        return runs[0]
+    run, run32, run64 = run_of(precision), run_of("f32"), run_of("f64")
     np_dtype = np.float32 if precision == "f32" else np.float64
     centre_types = [c["cell_type"] for c in m["centre_nodes"]]
     require(centre_types == [str(t) for t in flash.cell_type.values], "link",
             "the reference's centre cell types differ from the responses' neuron order")
 
     settled = er.to_np(network.steady_state(1.0, DT, 1, 0.5, return_last=True).nodes.activity).ravel()
+    require(settled.dtype == np_dtype, "link", f"{precision}: settled state is {settled.dtype}")
     ref = read_block(m, f"settled.{precision}.bin", run, "1/200", None)
-    require(er.bits_equal(settled, ref), "link", f"{precision}: settled state differs from fixtures-2")
+    settled_diff = _max_abs(settled, ref)
+    settled_gap = _max_abs(read_block(m, "settled.f32.bin", run32, "1/200", None),
+                           read_block(m, "settled.f64.bin", run64, "1/200", None))
+    centre_diffs, centre_gaps = [], []
 
     for q in m["sequences"]:
         fam, args = q["family"], q["args"]
@@ -526,13 +555,27 @@ def link_to_fixtures2(network, flash, edge, precision):
         n = ref.shape[0]
         require(n == n_valid(s), "link", f"sequence {q['index']}: {n} reference frames, {n_valid(s)} valid here")
         got = ds["responses"].values[0, s, :n]
-        require(er.bits_equal(got, ref), "link", f"{precision}: sequence {q['index']} ({fam}) differs from fixtures-2")
+        require(got.dtype == np_dtype, "link", f"{precision}: sequence {q['index']} responses are {got.dtype}")
+        centre_diffs.append(_max_abs(got, ref))
+        centre_gaps.append(_max_abs(read_block(m, "centre.f32.bin", run32, "1/200", q["index"]),
+                                    read_block(m, "centre.f64.bin", run64, "1/200", q["index"])))
         inp = read_block(m, "input.f64.bin", None, "1/200", q["index"])
         x = ds["stimulus"].values[s, :n, 0]
         require(x.dtype == stim_dtype, "link", f"sequence {q['index']}: input is {x.dtype}, expected {np.dtype(stim_dtype)}")
         require(er.bits_equal(x.astype(np.float64), inp), "link",
                 f"sequence {q['index']}: input differs from fixtures-2's input.f64.bin")
-    return {"run": run, "sequences": len(m["sequences"])}
+
+    arrays = {"settled": link_record(settled_diff, settled_gap, precision),
+              "centre": link_record(max(centre_diffs), max(centre_gaps), precision)}
+    for name, r in arrays.items():
+        print(f"link {precision} {name}: max |diff| {r['max_abs_diff']:.3e}, bound {r['bound']:.3e}, "
+              f"ratio {r['ratio']:.3e}", flush=True)
+    print(f"link {precision} centre per sequence: " + ", ".join(f"{d:.3e}" for d in centre_diffs), flush=True)
+    for name, r in arrays.items():
+        require(r["ratio"] <= 1.0, "link", f"{precision}: {name} differs from fixtures-2 by {r['max_abs_diff']:.3e}, "
+                f"over its bound {r['bound']:.3e} (ratio {r['ratio']:.3e})")
+    return {"run": run, "sequences": len(m["sequences"]), "arrays": arrays,
+            "centre_max_abs_diff_per_sequence": centre_diffs, "inputs": "bit-equal"}
 
 
 def thread_invariance(ours, model_fn, threads):
@@ -571,9 +614,46 @@ def batch4_finding(network, flash_ds, edge_ds, flash_cfg, edge_cfg, ours):
     try:
         theirs = indices(responses(network, flash_ds, flash_cfg, batch_size=4),
                          responses(network, edge_ds, edge_cfg, batch_size=4))[0]
-    except Exception as e:      # the finding, whatever it is; never the export's failure
+    except (ExportError, RuntimeError, ValueError, IndexError, KeyError) as e:
+        # torch's and xarray's failures, and indices' replica guards: the finding.
+        # Anything else (MemoryError, KeyboardInterrupt, a bug here) still stops the run.
+        print(f"batch-4 finding: flyvis's batch-4 path failed: {type(e).__name__}: {e}", flush=True)
         return {"error": f"{type(e).__name__}: {e}"}
     return {k: gap_record(ours[k], theirs[k]) for k in ours}
+
+
+# Spec section 2, check 6: every index array's shape (per model) and a float dtype.
+INDEX_SHAPES = {"fri_peaks": (65, 2), "fri": (65,), "edge_peaks": (144, 65), "dsi": (2, 65), "pd": (2, 65),
+                "tuning_r": (8, 2, 6), "fri_to_known": (), "dsi_to_known": (), "pd_to_known": (8,)}
+
+
+def check_index_arrays(ix, first, mid, precision):
+    """Right after indices(), before anything is written: every index has
+    its shape, a float dtype, only finite values, and the dtype the first
+    model had at this precision (`first`, {key: dtype}, filled on first use)."""
+    require(sorted(ix) == sorted(INDEX_SHAPES), "indices", f"model {mid} {precision}: keys {sorted(ix)}")
+    for k, v in ix.items():
+        a = np.asarray(v)
+        where = f"model {mid} {precision}: {k}"
+        require(a.dtype in (np.dtype("float32"), np.dtype("float64")), "indices", f"{where} is {a.dtype}")
+        require(a.shape == INDEX_SHAPES[k], "indices", f"{where} has shape {a.shape}, expected {INDEX_SHAPES[k]}")
+        require(bool(np.isfinite(a).all()), "indices", f"{where} has {int((~np.isfinite(a)).sum())} non-finite values")
+        require(first.setdefault(k, a.dtype) == a.dtype, "indices", f"{where} is {a.dtype}, the first model's {first[k]}")
+
+
+PHOTORECEPTORS = [f"R{i}" for i in range(1, 9)]
+MAX_NAN_LAG = 10
+
+
+def check_nan_lags(lags):
+    """The NaN lag is where the padding's NaN reaches each neuron: the
+    photoreceptors are fed it directly (lag 0), and nothing is more than a
+    few synapses away (0-3 frames observed in model 000)."""
+    for t in PHOTORECEPTORS:
+        require(lags.get(t) == 0, "valid frames", f"photoreceptor {t} has NaN lag {lags.get(t)}, expected 0")
+    worst = max(lags.values())
+    require(0 <= min(lags.values()) and worst <= MAX_NAN_LAG, "valid frames",
+            f"NaN lags span {min(lags.values())}..{worst} frames; at most {MAX_NAN_LAG} allowed")
 
 
 def stimulus_tables(flash, edge, valid):
@@ -635,15 +715,19 @@ def run_models(ids, precisions, threads, name):
 
     shard = {"name": name, "models": {p: list(ids) for p in precisions}, "arrays": {},
              "cell_types": None, "tuning_types": None, "tables": None, "inputs": None, "edge_nan_lag": None,
-             "timing": {}, "check_seconds": {}, "checks": {}, "batch4": {}}
+             "timing": {}, "check_seconds": {}, "dataset_seconds": {}, "checks": {}, "batch4": {}}
+    index_dtypes = {p: {} for p in precisions}
     for precision in precisions:
         want = torch.float32 if precision == "f32" else torch.float64
         np_dtype = np.float32 if precision == "f32" else np.float64
         torch.set_default_dtype(want)
         flash_cfg = dict(FLASH_CFG)
         edge_cfg = {**EDGE_CFG_BASE, "device": flyvis.device}
+        t_ds = time.monotonic()
         flash_ds = Flashes(**flash_cfg)
-        edge_ds = MovingEdge(**edge_cfg)
+        edge_ds = MovingEdge(**edge_cfg)            # renders the edges once per shard (cached in scratch)
+        shard["dataset_seconds"][precision] = round(time.monotonic() - t_ds, 1)
+        print(f"{name}: {precision} datasets built in {shard['dataset_seconds'][precision]} s", flush=True)
         for mid in ids:
             t0 = time.monotonic()
             require(torch.get_default_dtype() == want, "A2", f"default dtype is {torch.get_default_dtype()}", mid)
@@ -668,10 +752,12 @@ def run_models(ids, precisions, threads, name):
             lags = response_nan_lags(edge["responses"].values[0], valid, "edges")
             require(lags is not None, "valid frames", "no edge is padded")
             lags = dict(zip([str(t) for t in edge.cell_type.values], lags))
+            check_nan_lags(lags)
             require(shard["edge_nan_lag"] in (None, lags), "valid frames",
                     f"model {mid} {precision}: NaN lags {lags}, the first model's {shard['edge_nan_lag']}")
             shard["edge_nan_lag"] = lags
             ix, types8 = indices(flash, edge)
+            check_index_arrays(ix, index_dtypes[precision], mid, precision)
             shard["timing"][f"{mid}.{precision}"] = round(time.monotonic() - t0, 1)
 
             if mid == "000":
@@ -679,15 +765,15 @@ def run_models(ids, precisions, threads, name):
                 check_windows(flash, edge)
                 print(f"{name}: 000 {precision}: windows hold", flush=True)
                 link = link_to_fixtures2(network, flash, edge, precision)
-                print(f"{name}: 000 {precision}: settled state and {link['sequences']} central traces equal "
-                      f"fixtures-2 run {link['run']}, bit for bit", flush=True)
+                print(f"{name}: 000 {precision}: settled state and {link['sequences']} central traces within "
+                      f"their bounds of fixtures-2 run {link['run']}; inputs bit-equal", flush=True)
                 thread_invariance(ix, lambda: indices(responses(network, flash_ds, flash_cfg),
                                                       responses(network, edge_ds, edge_cfg))[0], threads)
                 print(f"{name}: 000 {precision}: indices at 1 thread equal those at {threads}", flush=True)
                 shard["batch4"][precision] = b4 = batch4_finding(network, flash_ds, edge_ds, flash_cfg, edge_cfg, ix)
                 print(f"{name}: 000 {precision}: batch-4 finding {json.dumps(b4)}", flush=True)
                 shard["checks"][precision] = {"windows": "passed", "link_to_fixtures2": "passed",
-                                              "link_run": link["run"], "thread_invariance": "passed",
+                                              "link": link, "thread_invariance": "passed",
                                               "threads_compared": [1, threads]}
                 shard["check_seconds"][precision] = round(time.monotonic() - t1, 1)
 
@@ -768,7 +854,7 @@ def save_shard(directory, shard):
     np.savez(buf, frames=frames, index=np.concatenate(index), counts=np.array([len(i) for i in index], dtype=np.int64))
     er._write_synced(tmp / "inputs.npz", buf.getvalue())
     meta = {k: shard[k] for k in ("name", "models", "cell_types", "tuning_types", "tables", "edge_nan_lag", "timing",
-                                   "check_seconds", "checks", "batch4", "environment")}
+                                   "check_seconds", "dataset_seconds", "checks", "batch4", "environment")}
     meta = {"format": 1, **meta, "arrays": layout}
     er._write_synced(tmp / "shard.json", er.json_bytes(meta))     # last: a shard.json means a whole shard
     er._fsync_dir(tmp / "arrays")
@@ -784,6 +870,15 @@ def load_shard(directory):
     require((directory / "shard.json").is_file(), "merge", f"{directory} holds no shard.json")
     meta = json.loads((directory / "shard.json").read_text())
     require(meta.get("format") == 1, "merge", f"{directory}: shard format {meta.get('format')}")
+    expected = {f"{name}.{p}.{mid}.npy" for name, by_p in meta["arrays"].items()
+                for p, by_m in by_p.items() for mid in by_m}
+    present = {q.name for q in directory.iterdir()}
+    require(present == {"shard.json", "inputs.npz", "arrays"}, "merge",
+            f"{directory}: unexpected entries {sorted(present - {'shard.json', 'inputs.npz', 'arrays'})} "
+            f"or missing {sorted({'shard.json', 'inputs.npz', 'arrays'} - present)}")
+    listed = {q.name for q in (directory / "arrays").iterdir()}
+    require(listed == expected, "merge", f"{directory}/arrays: unlisted files {sorted(listed - expected)}, "
+            f"missing {sorted(expected - listed)}")
     arrays = {}
     for name, by_p in meta["arrays"].items():
         for p, by_m in by_p.items():
@@ -795,7 +890,10 @@ def load_shard(directory):
                         f"{directory}: {name}.{p}.{mid} is {a.dtype.str} {list(a.shape)}, recorded {rec}")
                 arrays.setdefault(name, {}).setdefault(p, {})[mid] = a
     with np.load(directory / "inputs.npz", allow_pickle=False) as z:
+        require(sorted(z.files) == ["counts", "frames", "index"], "merge", f"{directory}/inputs.npz holds {sorted(z.files)}")
         inputs = {k: z[k] for k in ("frames", "index", "counts")}
+    for k, dt in (("frames", np.float64), ("index", np.uint32), ("counts", np.int64)):
+        require(inputs[k].dtype == dt, "merge", f"{directory}/inputs.npz: {k} is {inputs[k].dtype}")
     return {**meta, "arrays": arrays, "inputs": inputs, "directory": str(directory)}
 
 
@@ -804,9 +902,16 @@ def load_shard(directory):
 CHECKS_PASSED = ("windows", "link_to_fixtures2", "thread_invariance")
 
 
-def merge(shards):
+# What every shard must share with the shard that ran model 000's checks at
+# f32: those checks proved the link and thread invariance only for its host,
+# build and thread count (and torch's bits differ between machines).
+SHARED_ENVIRONMENT = ("host", "machine", "flyvis", "torch", "numpy", "uv_lock_sha256", "threads")
+
+
+def merge(shards, merged_git):
     """Checks the shards against each other and the export's model set, and
-    returns (files, manifest, provenance) for write_set."""
+    returns (files, manifest, provenance) for write_set. `merged_git` is the
+    merging checkout's er.git_state(), passed in by main."""
     require(len(shards) >= 1, "merge", "no shards")
     names = [sh["name"] for sh in shards]
     require(len(set(names)) == len(names), "merge", f"shard names repeat: {names}")
@@ -823,28 +928,35 @@ def merge(shards):
         missing, extra = sorted(set(EXPORT_MODELS[p]) - got), sorted(got - set(EXPORT_MODELS[p]))
         require(not missing and not extra, "merge", f"{p}: models missing {missing}, unexpected {extra}")
 
-    first = shards[0]
-    for sh in shards[1:]:
+    first = owner[("f32", "000")]
+    env = first["environment"]
+    for sh in shards:
+        if sh is first:
+            continue
         for key in ("cell_types", "tuning_types", "tables", "edge_nan_lag"):
             require(sh[key] == first[key], "merge", f"shard {sh['name']}: {key} differ from shard {first['name']}'s")
         for key in ("frames", "index", "counts"):
             require(er.bits_equal(sh["inputs"][key], first["inputs"][key]), "merge",
                     f"shard {sh['name']}: inputs ({key}) differ from shard {first['name']}'s")
-        for key in ("flyvis", "torch", "numpy", "uv_lock_sha256"):
-            require(sh["environment"][key] == first["environment"][key], "merge",
-                    f"shard {sh['name']}: {key} {sh['environment'][key]} vs {first['environment'][key]}")
-        require(sh["environment"]["git"]["head"] == first["environment"]["git"]["head"], "merge",
-                f"shard {sh['name']}: git head differs from shard {first['name']}'s")
+        for key in SHARED_ENVIRONMENT:
+            require(sh["environment"][key] == env[key], "merge",
+                    f"shard {sh['name']}: {key} {sh['environment'][key]!r}, shard {first['name']} "
+                    f"(model 000's checks) {env[key]!r}")
+        for key in ("head", "dirty"):
+            require(sh["environment"]["git"][key] == env["git"][key], "merge",
+                    f"shard {sh['name']}: git {key} {sh['environment']['git'][key]!r}, shard {first['name']} "
+                    f"(model 000's checks) {env['git'][key]!r}")
         require(sorted(sh["arrays"]) == sorted(first["arrays"]), "merge", f"shard {sh['name']}: array names differ")
 
-    checks, batch4 = {}, {}
+    checks, batch4, links = {}, {}, {}
     for p in PRECISIONS:
         sh = owner[(p, "000")]
         c = sh["checks"].get(p)
-        require(c is not None and all(c.get(k) == "passed" for k in CHECKS_PASSED), "merge",
+        require(c is not None and all(c.get(k) == "passed" for k in CHECKS_PASSED) and "link" in c, "merge",
                 f"model 000's checks at {p} did not pass in shard {sh['name']}: {c}")
         require(p in sh["batch4"], "merge", f"shard {sh['name']}: no batch-4 finding at {p}")
-        checks[p] = {**c, "shard": sh["name"]}
+        checks[p] = {**{k: v for k, v in c.items() if k != "link"}, "shard": sh["name"]}
+        links[p] = c["link"]
         batch4[p] = sh["batch4"][p]
 
     # The arrays, stacked in model order, each in its computed dtype.
@@ -882,20 +994,28 @@ def merge(shards):
     sha = {name: hashlib_sha256(data) for name, data in files.items()}
     manifest = build_manifest(first["cell_types"], tables["flashes"], tables["edges"], inp["frames"].shape[0],
                               blocks, arrays, sha, models=EXPORT_MODELS, tuning_types=first["tuning_types"])
-    env = first["environment"]
     provenance = {
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "merged_on": {"host": os.uname().nodename, "machine": os.uname().machine, "git": er.git_state()},
-        "flyvis": env["flyvis"], "torch": env["torch"], "numpy": env["numpy"], "uv_lock_sha256": env["uv_lock_sha256"],
-        "batch_size": 1,
+        "host": env["host"], "machine": env["machine"],
+        "flyvis": env["flyvis"], "torch": env["torch"], "numpy": env["numpy"],
+        "uv_lock_sha256": env["uv_lock_sha256"], "git": env["git"],
+        "threads": env["threads"], "batch_size": 1,
+        "seconds": round(sum(sh["environment"]["seconds"] for sh in shards), 1),
+        "per_model_seconds": {k: v for sh in shards for k, v in sh["timing"].items()},
+        "f32_f64_gap": gaps,
+        "f32_f64_gap_models": F64_MODELS,
+        "batch4_vs_batch1_max_gap": {p: (b if "error" in b else {k: r.get("max_abs_gap") for k, r in b.items()})
+                                     for p, b in batch4.items()},
+        "batch4_vs_batch1": batch4,
+        "link_to_fixtures2": links,
+        "models_sha256": {mid: h for sh in shards for mid, h in sh["environment"]["models_sha256"].items()},
         "models": EXPORT_MODELS,
         "checks": checks,
-        "f32_f64_gap": {"models": F64_MODELS, "max_abs": gaps},
-        "batch4_vs_batch1": batch4,
         "edge_nan_lag_frames": first["edge_nan_lag"],
-        "shards": {sh["name"]: {"models": sh["models"], **{k: v for k, v in sh["environment"].items()
-                                                         if k not in ("flyvis", "torch", "numpy", "uv_lock_sha256")},
-                                "per_model_seconds": sh["timing"], "check_seconds": sh["check_seconds"]}
+        "merged_on": {"host": os.uname().nodename, "machine": os.uname().machine, "git": merged_git},
+        "shards": {sh["name"]: {"models": sh["models"], "seconds": sh["environment"]["seconds"],
+                                "per_model_seconds": sh["timing"], "check_seconds": sh["check_seconds"],
+                                "dataset_seconds": sh.get("dataset_seconds", {})}
                    for sh in shards},
     }
     return files, manifest, provenance
@@ -928,7 +1048,7 @@ def main(argv):
         require(a.threads is None and a.models is None and a.precisions is None, "usage",
                 "--threads, --models and --precisions belong to the shards, not the merge")
         refuse_data_dir(a.out)
-        files, manifest, provenance = merge([load_shard(d) for d in a.merge])
+        files, manifest, provenance = merge([load_shard(d) for d in a.merge], er.git_state())
         write_set(a.out, files, manifest, provenance, a.force)
         print(f"wrote {a.out}: {len(files)} files, {manifest['frames']['rows']} distinct frames; "
               f"f32 x {len(MODELS)}, f64 x {len(F64_MODELS)}")

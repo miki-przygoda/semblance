@@ -198,7 +198,9 @@ def refuses(fn, fragment):
         raise AssertionError(f"accepted; expected a refusal mentioning {fragment!r}")
 
 
-PASSED = {"windows": "passed", "link_to_fixtures2": "passed", "thread_invariance": "passed"}
+PASSED = {"windows": "passed", "link_to_fixtures2": "passed", "thread_invariance": "passed",
+          "link": {"arrays": {"settled": {"max_abs_diff": 0.0, "bound": 1e-10, "ratio": 0.0}}}}
+MERGED_GIT = {"head": "abc", "dirty": False}      # merge() is given git; no checkout needed
 
 
 def fake_shard(name, models, grey=0.5, checks=True):
@@ -218,12 +220,13 @@ def fake_shard(name, models, grey=0.5, checks=True):
         "tables": {"flashes": [ei.flash_entry(0, 0.5, 1, 6, 401)], "edges": [ei.edge_entry(0, 0, 1, 25.0, 80, 300)]},
         "edge_nan_lag": {f"T{i}": i % 4 for i in range(65)},
         "inputs": [np.full((401, 721), grey), np.vstack([np.full((100, 721), 0.5), np.ones((200, 721))])],
-        "timing": {f"{m}.{p}": 1.0 for p, ids in models.items() for m in ids}, "check_seconds": {},
+        "timing": {f"{m}.{p}": 1.0 for p, ids in models.items() for m in ids}, "check_seconds": {}, "dataset_seconds": {},
         "checks": {p: dict(PASSED) for p in ran_000},
         "batch4": {p: {"fri": {"bit_equal": True, "max_abs_gap": 0.0, "nonfinite_mismatches": 0}} for p in ran_000},
         "environment": {"host": "h", "machine": "m", "flyvis": "1.2.0", "torch": "t", "numpy": np.__version__,
                         "uv_lock_sha256": "0" * 64, "git": {"head": "abc", "dirty": False}, "threads": 1,
-                        "batch_size": 1, "models_sha256": {}, "seconds": 0.0},
+                        "batch_size": 1, "models_sha256": {m: {"original_sha256": "0" * 64} for ids in models.values() for m in ids},
+                        "seconds": 0.0},
     }
 
 
@@ -238,7 +241,7 @@ def merge_from_disk(d, shards):
     for sh in shards:
         ei.save_shard(pathlib.Path(d) / sh["name"], sh)
         dirs.append(pathlib.Path(d) / sh["name"])
-    return ei.merge([ei.load_shard(x) for x in dirs])
+    return ei.merge([ei.load_shard(x) for x in dirs], MERGED_GIT)
 
 
 def test_merge_writes_a_complete_set_in_model_order():
@@ -255,7 +258,7 @@ def test_merge_writes_a_complete_set_in_model_order():
         fri = np.fromfile(out / "fri.f32.bin", dtype="<f4").reshape(50, 65)
         assert fri[37, 0] == np.float32(0.37) and fri[49, 0] == np.float32(0.49)
         assert m["frames"]["rows"] == 2           # grey and white
-        assert prov["checks"]["f64"]["shard"] == "c" and prov["f32_f64_gap"]["models"] == ["000", "049"]
+        assert prov["checks"]["f64"]["shard"] == "c" and prov["f32_f64_gap_models"] == ["000", "049"]
 
 
 def test_merge_refuses_a_missing_model():
@@ -284,6 +287,107 @@ def test_merge_refuses_a_missing_model_000_check():
     shards[2] = fake_shard("c", {"f64": ["000", "049"]}, checks=False)
     with tempfile.TemporaryDirectory() as d:
         refuses(lambda: merge_from_disk(d, shards), "model 000's checks at f64")
+
+
+def merge_refuses_a_different(field, value, fragment):
+    shards = complete_shards()
+    if field in ("head", "dirty"):
+        shards[1]["environment"]["git"][field] = value
+    else:
+        shards[1]["environment"][field] = value
+    with tempfile.TemporaryDirectory() as d:
+        refuses(lambda: merge_from_disk(d, shards), fragment)
+
+
+def test_merge_refuses_a_shard_from_another_host():
+    merge_refuses_a_different("host", "other", "host 'other'")
+
+
+def test_merge_refuses_a_shard_from_another_machine():
+    merge_refuses_a_different("machine", "arm64", "machine 'arm64'")
+
+
+def test_merge_refuses_a_shard_with_another_torch():
+    merge_refuses_a_different("torch", "2.13.0", "torch '2.13.0'")
+
+
+def test_merge_refuses_a_shard_with_another_flyvis():
+    merge_refuses_a_different("flyvis", "1.1.0", "flyvis '1.1.0'")
+
+
+def test_merge_refuses_a_shard_with_another_numpy():
+    merge_refuses_a_different("numpy", "1.0.0", "numpy '1.0.0'")
+
+
+def test_merge_refuses_a_shard_at_another_thread_count():
+    merge_refuses_a_different("threads", 8, "threads 8")
+
+
+def test_merge_refuses_a_shard_at_another_git_head():
+    merge_refuses_a_different("head", "def", "git head 'def'")
+
+
+def test_merge_refuses_a_shard_from_a_dirty_tree():
+    merge_refuses_a_different("dirty", True, "git dirty True")
+
+
+def test_merge_records_the_link_and_the_brief_s_provenance_keys():
+    with tempfile.TemporaryDirectory() as d:
+        _, _, prov = merge_from_disk(d, complete_shards())
+    for k in ("host", "machine", "flyvis", "torch", "numpy", "uv_lock_sha256", "git", "threads", "batch_size",
+              "seconds", "per_model_seconds", "f32_f64_gap", "batch4_vs_batch1_max_gap", "models_sha256",
+              "link_to_fixtures2"):
+        assert k in prov, k
+    assert sorted(prov["f32_f64_gap"]) == ["dsi_to_known", "fri"] and prov["link_to_fixtures2"]["f64"]["arrays"]
+    assert prov["batch4_vs_batch1_max_gap"]["f32"] == {"fri": 0.0} and len(prov["per_model_seconds"]) == 52
+
+
+def test_load_shard_refuses_an_unlisted_file():
+    with tempfile.TemporaryDirectory() as d:
+        out = pathlib.Path(d) / "s"
+        ei.save_shard(out, fake_shard("s", {"f32": ["000"]}))
+        ei.load_shard(out)
+        (out / "arrays" / "fri.f32.001.npy").write_bytes(b"")
+        refuses(lambda: ei.load_shard(out), "unlisted files ['fri.f32.001.npy']")
+        (out / "arrays" / "fri.f32.001.npy").unlink()
+        (out / "notes.txt").write_text("x")
+        refuses(lambda: ei.load_shard(out), "unexpected entries ['notes.txt']")
+
+
+def good_indices(dtype=np.float32):
+    return {k: np.zeros(shape, dtype=np.float64 if k in ("dsi", "pd", "tuning_r") or k.endswith("_to_known") else dtype)
+            for k, shape in ei.INDEX_SHAPES.items()}
+
+
+def test_check_index_arrays_refuses_nan_shape_dtype_and_drift():
+    first = {}
+    ei.check_index_arrays(good_indices(), first, "000", "f32")
+    assert first["fri"] == np.float32 and first["dsi"] == np.float64
+    nan = good_indices()
+    nan["edge_peaks"][3, 4] = np.nan
+    shape = good_indices()
+    shape["fri"] = np.zeros(64, dtype=np.float32)
+    ints = good_indices()
+    ints["pd_to_known"] = np.zeros(8, dtype=np.int64)
+    drift = good_indices(np.float64)
+    for x, fragment in [(nan, "edge_peaks has 1 non-finite"), (shape, "fri has shape (64,)"),
+                        (ints, "pd_to_known is int64"), (drift, "the first model's float32")]:
+        refuses(lambda: ei.check_index_arrays(x, dict(first), "007", "f32"), fragment)
+
+
+def test_check_nan_lags_pins_the_photoreceptors_and_the_depth():
+    lags = {**{t: 0 for t in ei.PHOTORECEPTORS}, "L1": 1, "T5a": 3}
+    ei.check_nan_lags(lags)
+    refuses(lambda: ei.check_nan_lags({**lags, "R3": 1}), "photoreceptor R3 has NaN lag 1")
+    refuses(lambda: ei.check_nan_lags({**lags, "T5a": 11}), "at most 10")
+
+
+def test_link_record_bounds_f32_by_twice_flyvis_gap_and_f64_by_1e_10():
+    r = ei.link_record(4e-7, 3e-7, "f32")
+    assert r["bound"] == 6e-7 and abs(r["ratio"] - 4e-7 / 6e-7) < 1e-15
+    r = ei.link_record(5e-11, 1.0, "f64")
+    assert r["bound"] == 1e-10 and r["ratio"] == 0.5
+    refuses(lambda: ei.link_record(1e-7, 0.0, "f32"), "bound")
 
 
 def test_save_shard_never_overwrites():
