@@ -26,7 +26,7 @@ pub use bounds::{settling_bounds, trace_bounds, Bound};
 pub use checks::{check_settling_gaps, check_trace_gaps};
 pub use fingerprint::{libm_fingerprint, LibmFingerprint};
 pub use inputs::{how_to_get, required_files, Fixtures, TraceData, TraceInputs};
-pub use respond::central_nodes;
+pub use respond::{central_nodes, respond, respond_model, Battery, ReferenceBattery};
 pub use run::{diff, play, run, settle, Counts, Diff, RunResult, SequenceResult, SettlingResult, Start};
 pub use validate::{validate, Controls, Coverage, Job, Options, Report};
 
