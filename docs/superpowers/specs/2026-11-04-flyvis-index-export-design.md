@@ -25,6 +25,14 @@ flyvis's own f32/f64 gap. That needs, once, offline:
   within the geometry gate's tolerance (epic decision 4);
 - each index's f32/f64 gap, for the bounds.
 
+**Revised 2026-11-04, after the plan's smoke run** (owner's decision): the
+export is about 25× slower than estimated here (about 55 min per model for
+both precisions on 8 cores), so it exports **all 50 models at f32 and models
+000 and 049 at f64**, as parallel shards merged at the end. Every gate's use
+is covered: gate A's f64 rows and the f32/f64 gaps come from 000 and 049;
+the all-50 gate A and gate B's cross-check run at f32. Where the sections
+below say "50 × 2", read this. Details: the plan's amendment.
+
 ## Goal
 
 1. `tools/export_indices.py`: flyvis 1.2.0's own index pipeline for all 50

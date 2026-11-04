@@ -33,6 +33,69 @@ From flyvis 1.2.0's source in `tools/.venv/lib/python3.12/site-packages/flyvis/`
 - `flash_response_index`'s shifted peaks and `correlation_to_known_tuning_curves`' per-speed r are local; the script replicates those few lines (`flash_responses.py:55-78`, `moving_bar_responses.py:442-480`) and asserts its replica's final values equal flyvis's function's output bit for bit, so the captured intermediates are provably flyvis's.
 - `export_reference.py` imports safely (numpy only at top level; `main` is guarded). Generic helpers used here: `require`, `ExportError`, `parse_pretrained`, `read_ensemble`, `load_checkpoint`, `bits_equal`, `reference_params`, `check_checkpoints`, `copy_models`, `read_validation_losses`, `check_param_dtypes`, `sha256_file`, `json_bytes`, `_write_synced`, `_fsync_dir`, `git_state`, `to_np`, `max_abs_gap`, `acquire_lock`. The helpers hard-wired to `flyvis-reference` (`preflight`, `write_outputs`, the `SCRATCH`/`LOCK` constants, `run_one`, `thread_check`) are **not** used; this script has its own small equivalents, so `export_reference.py` is not modified at all. (The spec allowed parameterising them instead; not touching them is the smaller change.)
 
+## Amendment, 2026-11-04 (owner's decision after Task 2's smoke run)
+
+Task 2's smoke run measured about 32 min per model at f32 and 38 min at f64
+on 8 cores (each including 9–11 min of one-off MovingEdge rendering, cached in
+the scratch root), with 7.8G peak memory: about 25× the spec's estimate. The
+owner chose: **all 50 models at f32; f64 only for models 000 and 049; run as
+parallel shards.** Every gate's use is covered: gate A's f64 rows and the
+f32/f64 gaps come from 000 and 049; the record step's all-50 gate A and gate
+B's cross-check run at f32. This amendment overrides Tasks 3, 4 and 5 where
+they differ.
+
+**Shapes.** Every f32 array keeps its leading model axis of 50. Every f64
+array has a leading axis of 2 (models 000, 049). The manifest's `"models"`
+becomes `{"f32": ["000", …, "049"], "f64": ["000", "049"]}`. Each array entry
+already carries its own dtype; flyvis returns float64 for `dsi`, `pd`,
+`tuning_r` and the three `*_to_known` values even in the f32 run, and those
+are stored as float64 (`<f8`) in the `.f32.bin` files, recorded per array.
+The f32/f64 gaps in `PROVENANCE.json` are over models 000 and 049.
+
+**Shards (Task 3).** `main` gains:
+- `--models IDS` (comma-separated; default all 50) and `--precisions P`
+  (comma-separated subset of `f32,f64`; default `f32`);
+- `--shard-out DIR`: instead of `write_set`, write this shard's raw results
+  (per (array, precision) one `.npy` per model, the inputs once as
+  `inputs.npz`, the stimulus tables, cell types, tuning types, per-model
+  timing, and, if it ran them, the model-000 checks' results and the batch-4
+  finding) into `DIR`, which must not exist;
+- `--merge SHARD_DIR [SHARD_DIR …] --out DIR`: loads every shard, requires
+  that the union of models is exactly all 50 at f32 and exactly 000 and 049
+  at f64, each once; that every shard's inputs, stimulus tables, cell types
+  and tuning types are bit-identical; that the model-000 checks ran and
+  passed at both precisions; then stacks the arrays in model order, computes
+  the gaps over 000 and 049, and calls `write_set`.
+- The once-per-export checks (`check_windows`, `link_to_fixtures2`,
+  `thread_invariance`, `batch4_finding`) run in whichever shard runs model
+  000 at a given precision, and that shard records that they passed.
+- **Each shard uses its own scratch root and lock**: `SCRATCH` and `LOCK`
+  get the suffix `-<shard name>` (the basename of `--shard-out`), so
+  parallel shards never share or wipe each other's flyvis root. The scratch
+  root is not wiped between models within a shard (the rendering cache must
+  survive).
+- `main` asserts `torch.get_default_dtype()` and calls `check_param_dtypes`
+  after `.double()` (review minor of Task 2).
+Self-tests for the merge's refusals (a missing model, a duplicate model,
+mismatched inputs, a missing model-000 check) go in
+`test_export_indices.py`, using small fake shard directories.
+
+**Running (Task 4).** Four jobs, each `--cores 4 --mem 14G --timeout 12h`,
+`--threads 4`:
+- shard `s0`: `--models 000,001,…,012 --precisions f32` plus `--models 000,049 --precisions f64` as a second job `s4` (so the f64 work runs in parallel);
+- shards `s1`, `s2`, `s3`: models 013–024, 025–036, 037–049 at f32;
+so five jobs in all (`s0`…`s4`); start at most four at once if `jobq machine`
+shows the budget mostly taken, otherwise all five. Each writes
+`--shard-out /srv/bulk/Projects/semblance/staging/fixtures-3/shards/<name>`.
+Then one merge job (`--cores 1 --mem 16G --timeout 1h`) writes
+`--out /srv/bulk/Projects/semblance/staging/fixtures-3/flyvis-indices`.
+Expected wall time about 6–8 h.
+
+**Rust reader (Task 5).** `IndexFixture::models(precision)` replaces
+`models()`; `array(name, precision)` returns the leading axis it has (50 or
+2). The real-fixture test checks `fri` is `[50, 65]` at f32 and `[2, 65]` at
+f64, and so on.
+
 ## Review Focus
 
 1. A rerun with a populated `--out`: refuse unless `--force`, and never leave a half-written directory (write to a sibling temp dir, rename at the end). Pinned in Task 1.
