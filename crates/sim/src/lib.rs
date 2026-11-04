@@ -11,6 +11,8 @@
 //! - a [`Behaviour`] recording that fidelity metrics compare
 //! - [`graded`]: flyvis's graded (non-spiking) dynamics, in f32 and f64,
 //!   beside the spiking path and touching none of its traits
+//! - [`response`]: one network's central responses to a battery of
+//!   stimuli, the input to every 0.4.0 response index
 //!
 //! What is YOURS to fill in later — this is where "make it act like an ant" lives:
 //! - the sensory encoding ([`Stimulus`]): how a world state becomes input current,
@@ -19,6 +21,7 @@
 //! - richer dynamics if you outgrow LIF (adaptation, conductance-based, etc.).
 
 pub mod graded;
+pub mod response;
 
 use semblance_connectome::{Connectome, Csr, NeuronId};
 
