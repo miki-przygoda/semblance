@@ -96,6 +96,28 @@ Expected wall time about 6–8 h.
 2). The real-fixture test checks `fri` is `[50, 65]` at f32 and `[2, 65]` at
 f64, and so on.
 
+## Amendment 2, 2026-11-04 (owner's decision after Task 3's verification run)
+
+Beast's torch does not reproduce fixtures-2 (f32 settled max 4.8e-7 from
+settling step 1; f64 9.4e-16 from step 0). The owner chose to export on beast
+anyway, with the exact link bounded. This overrides Task 3's and Task 4's text:
+
+- `link_to_fixtures2` compares model 000's settled state and central traces
+  with fixtures-2 within **1e-10 at f64** and, at f32, within **twice
+  flyvis's own f32/f64 gap**, computed per array from fixtures-2's f32 and
+  f64 `settled`/`centre` files (the trace gates' rule). It prints and returns
+  the max difference and its ratio to the bound per array, and `PROVENANCE.json`
+  records them under `link_to_fixtures2`. Exceeding a bound still writes
+  nothing.
+- `PROVENANCE.json`'s per-index f32/f64 gaps also cover `fri_peaks` and
+  `edge_peaks`, for gate A's now-bounded rows.
+- **Shards fit jobq's 6h ceiling:** eight f32 shards, `s0`…`s7`, models
+  000–006, 007–013, 014–019, 020–025, 026–031, 032–037, 038–043, 044–049,
+  plus `s8` at f64 (000, 049); each `--cores 4 --mem 14G --timeout 6h
+  --threads 4`. If the verification run's per-model time at 4 threads says
+  seven models will not fit in 6h, split further. Expected wall time about
+  12–15 h with 16 cores.
+
 ## Review Focus
 
 1. A rerun with a populated `--out`: refuse unless `--force`, and never leave a half-written directory (write to a sibling temp dir, rename at the end). Pinned in Task 1.

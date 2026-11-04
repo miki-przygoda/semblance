@@ -139,6 +139,14 @@ For a model and precision: `respond_model` over task 2's flash and edge
 | Value | Rule |
 |---|---|
 | FRI peaks, FRI, edge peaks | `==` on every value, at f32 and f64, with the trace gates' signed-zero refusal |
+
+**Revised 2026-11-04** (owner's decision, after task 2's export ran on beast,
+whose torch differs from the Mac's in the last bits): fixtures-3 is not
+bit-equal to the torch Rust reproduces, so the first row is bounded like the
+second: f64 within `F64_BOUND`, f32 within twice flyvis's own f32/f64 gap for
+that value, from `PROVENANCE.json`. The record states this as a finding.
+Rust's exactness against flyvis is still proved by 0.3.0's gates on
+fixtures-2.
 | DSI, preferred direction, tuning r, the three helpers | f64: within `F64_BOUND` (1e-10). f32: within twice flyvis's own f32/f64 gap for that index, from `PROVENANCE.json` |
 
 These bounds are fixed here, before the gate runs, by 0.3.0's rule. The
