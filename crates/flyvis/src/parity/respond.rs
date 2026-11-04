@@ -51,13 +51,16 @@ pub trait Battery {
 
     /// Writes the next stimulus's frames into `out` (cleared first; rows of
     /// 721 hexal values in `hex_coords` order) and returns its label, or
-    /// `None` when the battery is done.
+    /// `None` when the battery is done. The frames must have been rendered at
+    /// the `dt` passed to `respond`; nothing checks it.
     fn next_stimulus(&mut self, out: &mut Vec<f64>) -> Result<Option<String>, ParityError>;
 }
 
 /// Settles `params` on the fixtures' network at `dt` and `precision`, as the
 /// 0.3.0 gates settle, then plays every stimulus of `battery` from the
 /// settled state and records each cell type's central value at every frame.
+/// The battery's frames must have been rendered at this `dt`; nothing checks
+/// it.
 pub fn respond(
     f: &Fixtures,
     params: &ModelParams,
@@ -85,6 +88,9 @@ pub fn respond_model(
     respond(f, p, dt, precision, counts, battery)
 }
 
+/// The most settling steps `respond` will run: the 0.3.0 runs take 200 and 50.
+const MAX_SETTLE_STEPS: f64 = 1e6;
+
 fn respond_as<R: Precision>(
     f: &Fixtures,
     params: &ModelParams,
@@ -94,11 +100,13 @@ fn respond_as<R: Precision>(
 ) -> Result<Responses, ParityError> {
     let t_pre = f.manifest.t_pre;
     let steps = t_pre / dt;
-    if !(dt.is_finite() && dt > 0.0 && steps.is_finite() && steps >= 1.0 && (steps - steps.round()).abs() <= 1e-9) {
-        return Err(ParityError::Usage(format!("dt {dt} does not divide t_pre {t_pre} into whole settling steps")));
+    if !(dt.is_finite() && dt > 0.0 && steps.is_finite()
+            && (1.0..=MAX_SETTLE_STEPS).contains(&steps)
+            && (steps - steps.round()).abs() <= 1e-9) {
+        return Err(ParityError::Usage(format!("dt {dt} does not divide t_pre {t_pre} into 1 to {MAX_SETTLE_STEPS} whole settling steps")));
     }
     let centre = central_nodes(f)?;
-    let (mut g, _) = settle_core::<R>(f, params, dt, steps.round() as usize, counts, &centre, Ctx::Respond)?;
+    let (mut g, _) = settle_core::<R>(f, params, dt, steps.round() as usize, counts, &[], Ctx::Respond)?;
     let settled = g.state().to_vec();
 
     let types: Vec<String> = centre.iter().map(|&k| cell_type(&f.net, k).to_string()).collect();
@@ -113,7 +121,9 @@ fn respond_as<R: Precision>(
     let mut frame = vec![R::ZERO; HEXALS];
     let mut frames = Vec::new();
     let mut s = 0usize;
-    while let Some(label) = battery.next_stimulus(&mut frames)? {
+    loop {
+        frames.clear();
+        let Some(label) = battery.next_stimulus(&mut frames)? else { break };
         if frames.is_empty() || frames.len() % HEXALS != 0 {
             return Err(ParityError::Usage(format!(
                 "stimulus {s} ({label}): {} values is not a whole number of {HEXALS}-hexal frames",
@@ -165,11 +175,28 @@ impl Battery for ReferenceBattery<'_> {
     fn next_stimulus(&mut self, out: &mut Vec<f64>) -> Result<Option<String>, ParityError> {
         let Some(q) = self.t.sequences.get(self.next) else { return Ok(None) };
         self.next += 1;
+        if q.index as usize != self.next - 1 {
+            return Err(mismatch(format!(
+                "manifest sequences must be listed in index order: entry {} is sequence {}",
+                self.next - 1,
+                q.index
+            )));
+        }
+        let n = q
+            .frames(&self.dt)
+            .ok_or_else(|| mismatch(format!("sequence {} has no frames at dt {}", q.index, self.dt)))?
+            .n_frames;
         let key = BlockKey { run: None, dt: &self.dt, sequence: Some(q.index) };
         let x = file(self.f, "input.f64.bin")?.read_f64(self.t.input, &key).map_err(|e| ParityError::Malformed {
             rel: "flyvis-reference/input.f64.bin".into(),
             detail: e.to_string(),
         })?;
+        if x.shape != [n, HEXALS] {
+            return Err(mismatch(format!(
+                "input shape, sequence {}: expected [{n}, {HEXALS}], found {:?}",
+                q.index, x.shape
+            )));
+        }
         out.clear();
         out.extend_from_slice(&x.data);
         Ok(Some(format!("{} {}", q.index, q.family)))
@@ -222,11 +249,22 @@ mod tests {
     #[test]
     fn a_dt_that_does_not_divide_t_pre_is_a_usage_error() {
         let Some(f) = fixture() else { return };
-        for dt in [0.003, 0.0, -0.005, f64::NAN] {
+        for dt in [0.003, 0.0, -0.005, f64::NAN, 1e-12] {
             let mut b = Fixed { stimuli: vec![grey(2)], claimed: 1, next: 0 };
             let e = respond_model(f, "000", dt, Dtype::F32, Counts::Torch, &mut b).unwrap_err();
             assert!(matches!(e, ParityError::Usage(_)), "dt {dt}: {e}");
         }
+    }
+
+    #[test]
+    fn a_reference_battery_over_reordered_sequences_is_a_mismatch() {
+        let Some(f) = fixture() else { return };
+        let Some((mut sequences, input, centre)) = reference("f32") else { return };
+        sequences.swap(0, 1);
+        let t = TraceInputs { precision: Dtype::F32, sequences: &sequences, input, centre: &centre, snapshots: &[] };
+        let mut b = ReferenceBattery::new(f, &t, "1/200");
+        let e = b.next_stimulus(&mut Vec::new()).unwrap_err();
+        assert!(matches!(e, ParityError::Mismatch(ref m) if m.contains("index order")), "{e}");
     }
 
     #[test]

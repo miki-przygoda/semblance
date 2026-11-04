@@ -1,7 +1,8 @@
 //! Settling, trace playback and comparison: piece 1's and piece 2's gate
 //! machinery, moved here without changing what it computes.
 //!
-//! One core (spec R20): `settle_state` builds and settles the integrator,
+//! One core (spec R20): `settle_core` builds and settles the integrator for
+//! any parameters and `settle_state` is it for a registered run,
 //! `compare_settling` compares the settled state, and `play_from` plays
 //! sequences from a settled state. `settle`, `play` and `run` are thin over
 //! them, so the gates exercise exactly the code `validate` runs. Each entry
