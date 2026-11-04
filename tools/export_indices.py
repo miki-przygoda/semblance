@@ -400,13 +400,42 @@ def indices(flash, edge):
 # -- the checks -------------------------------------------------------------------
 
 def check_valid_frames(resp, valid, battery):
-    """resp [sample, frame, ...]: finite through each stimulus's valid
-    frames and NaN after them (flyvis pads moving edges with NaN)."""
+    """x [sample, frame, ...]: finite through each stimulus's valid frames
+    and NaN after them. Holds for the input: flyvis pads moving edges with
+    NaN (datasets/moving_bar.py:337-346). Responses lag it; see
+    response_nan_lags."""
     require(len(valid) == resp.shape[0], "valid frames", f"{battery}: {len(valid)} lengths for {resp.shape[0]} stimuli")
     for s, n in enumerate(valid):
         require(0 < n <= resp.shape[1], "valid frames", f"{battery} stimulus {s}: {n} valid of {resp.shape[1]} frames")
         require(np.isfinite(resp[s, :n]).all(), "valid frames", f"{battery} stimulus {s}: non-finite before frame {n}")
         require(np.isnan(resp[s, n:]).all(), "valid frames", f"{battery} stimulus {s}: not NaN after frame {n}")
+
+
+def response_nan_lags(resp, valid, battery):
+    """resp [sample, frame, neuron]: finite through each stimulus's valid
+    frames; after them each neuron stays finite for a fixed number of frames
+    (the steps the NaN input takes to reach it through the network: 0 for
+    the photoreceptors, 3 for T5 in model 000), then is NaN to the last
+    frame. That lag must be the same for every padded stimulus. Returns it
+    per neuron, or None when no stimulus is padded. flyvis's own filter_post
+    (datasets/moving_bar.py:720-726) allows for the same propagation."""
+    lags = None
+    for s, n in enumerate(valid):
+        require(0 < n <= resp.shape[1], "valid frames", f"{battery} stimulus {s}: {n} valid of {resp.shape[1]} frames")
+        require(np.isfinite(resp[s, :n]).all(), "valid frames", f"{battery} stimulus {s}: non-finite before frame {n}")
+        tail = resp[s, n:]
+        if tail.shape[0] == 0:
+            continue
+        nan = np.isnan(tail)
+        require(nan[-1].all(), "valid frames", f"{battery} stimulus {s}: a neuron is not NaN at the last frame")
+        first = nan.argmax(axis=0)
+        after = np.arange(tail.shape[0])[:, None] >= first[None, :]
+        require(bool((nan == after).all()) and bool(np.isfinite(tail[~after]).all()), "valid frames",
+                f"{battery} stimulus {s}: after frame {n} a neuron is not finite-then-NaN")
+        require(lags is None or np.array_equal(first, lags), "valid frames",
+                f"{battery} stimulus {s}: NaN reaches the neurons at lags {first.tolist()}, not {lags if lags is None else lags.tolist()}")
+        lags = first
+    return None if lags is None else [int(x) for x in lags]
 
 
 def check_windows(flash, edge):
@@ -605,7 +634,7 @@ def run_models(ids, precisions, threads, name):
           f"models {','.join(ids)} at {','.join(precisions)}; checkpoints equal ensemble.csv", flush=True)
 
     shard = {"name": name, "models": {p: list(ids) for p in precisions}, "arrays": {},
-             "cell_types": None, "tuning_types": None, "tables": None, "inputs": None,
+             "cell_types": None, "tuning_types": None, "tables": None, "inputs": None, "edge_nan_lag": None,
              "timing": {}, "check_seconds": {}, "checks": {}, "batch4": {}}
     for precision in precisions:
         want = torch.float32 if precision == "f32" else torch.float64
@@ -632,8 +661,16 @@ def run_models(ids, precisions, threads, name):
             flash = responses(network, flash_ds, flash_cfg)
             edge = responses(network, edge_ds, edge_cfg)
             valid = [EDGE_VALID_FRAMES[float(sp)] for sp in edge.speed.values]
-            check_valid_frames(flash["responses"].values[0], [FLASH_FRAMES] * len(flash_ds), "flashes")
-            check_valid_frames(edge["responses"].values[0], valid, "edges")
+            check_valid_frames(flash["stimulus"].values, [FLASH_FRAMES] * len(flash_ds), "flash input")
+            check_valid_frames(edge["stimulus"].values, valid, "edge input")
+            require(response_nan_lags(flash["responses"].values[0], [FLASH_FRAMES] * len(flash_ds), "flashes") is None,
+                    "valid frames", "a flash is padded")
+            lags = response_nan_lags(edge["responses"].values[0], valid, "edges")
+            require(lags is not None, "valid frames", "no edge is padded")
+            lags = dict(zip([str(t) for t in edge.cell_type.values], lags))
+            require(shard["edge_nan_lag"] in (None, lags), "valid frames",
+                    f"model {mid} {precision}: NaN lags {lags}, the first model's {shard['edge_nan_lag']}")
+            shard["edge_nan_lag"] = lags
             ix, types8 = indices(flash, edge)
             shard["timing"][f"{mid}.{precision}"] = round(time.monotonic() - t0, 1)
 
@@ -730,7 +767,7 @@ def save_shard(directory, shard):
     buf = io.BytesIO()
     np.savez(buf, frames=frames, index=np.concatenate(index), counts=np.array([len(i) for i in index], dtype=np.int64))
     er._write_synced(tmp / "inputs.npz", buf.getvalue())
-    meta = {k: shard[k] for k in ("name", "models", "cell_types", "tuning_types", "tables", "timing",
+    meta = {k: shard[k] for k in ("name", "models", "cell_types", "tuning_types", "tables", "edge_nan_lag", "timing",
                                    "check_seconds", "checks", "batch4", "environment")}
     meta = {"format": 1, **meta, "arrays": layout}
     er._write_synced(tmp / "shard.json", er.json_bytes(meta))     # last: a shard.json means a whole shard
@@ -788,7 +825,7 @@ def merge(shards):
 
     first = shards[0]
     for sh in shards[1:]:
-        for key in ("cell_types", "tuning_types", "tables"):
+        for key in ("cell_types", "tuning_types", "tables", "edge_nan_lag"):
             require(sh[key] == first[key], "merge", f"shard {sh['name']}: {key} differ from shard {first['name']}'s")
         for key in ("frames", "index", "counts"):
             require(er.bits_equal(sh["inputs"][key], first["inputs"][key]), "merge",
@@ -855,6 +892,7 @@ def merge(shards):
         "checks": checks,
         "f32_f64_gap": {"models": F64_MODELS, "max_abs": gaps},
         "batch4_vs_batch1": batch4,
+        "edge_nan_lag_frames": first["edge_nan_lag"],
         "shards": {sh["name"]: {"models": sh["models"], **{k: v for k, v in sh["environment"].items()
                                                          if k not in ("flyvis", "torch", "numpy", "uv_lock_sha256")},
                                 "per_model_seconds": sh["timing"], "check_seconds": sh["check_seconds"]}

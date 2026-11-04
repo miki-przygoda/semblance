@@ -165,6 +165,28 @@ def test_check_valid_frames_finds_nan_inside_and_values_after():
         raise AssertionError(f"accepted {n}")
 
 
+def test_response_nan_lags_allow_a_fixed_lag_and_nothing_else():
+    r = np.zeros((3, 12, 2))
+    r[0, 7:, 0] = np.nan      # stimulus 0 valid through 6: neuron 0 lags 1, neuron 1 lags 3
+    r[0, 9:, 1] = np.nan
+    r[1, 5:, 0] = np.nan      # stimulus 1 valid through 4: the same lags
+    r[1, 7:, 1] = np.nan
+    assert ei.response_nan_lags(r, [6, 4, 12], "edges") == [1, 3]
+    assert ei.response_nan_lags(r[2:], [12], "edges") is None
+    other = r.copy()
+    other[1, 7, 1] = 0.0      # neuron 1 lags 4 on stimulus 1
+    late = r.copy()
+    late[0, 11, 1] = 1.0      # finite again after NaN
+    early = r.copy()
+    early[0, 5, 0] = np.nan   # NaN inside the valid frames
+    for x, n in [(other, [6, 4, 12]), (late, [6, 4, 12]), (early, [6, 4, 12]), (r, [6, 4, 11])]:
+        try:
+            ei.response_nan_lags(x, n, "edges")
+        except ei.ExportError:
+            continue
+        raise AssertionError(f"accepted {n}")
+
+
 # -- shards and the merge -----------------------------------------------------------
 
 def refuses(fn, fragment):
@@ -194,6 +216,7 @@ def fake_shard(name, models, grey=0.5, checks=True):
         "name": name, "models": models, "arrays": arrays,
         "cell_types": [f"T{i}" for i in range(65)], "tuning_types": list(ei.PD_TO_KNOWN_TYPES),
         "tables": {"flashes": [ei.flash_entry(0, 0.5, 1, 6, 401)], "edges": [ei.edge_entry(0, 0, 1, 25.0, 80, 300)]},
+        "edge_nan_lag": {f"T{i}": i % 4 for i in range(65)},
         "inputs": [np.full((401, 721), grey), np.vstack([np.full((100, 721), 0.5), np.ones((200, 721))])],
         "timing": {f"{m}.{p}": 1.0 for p, ids in models.items() for m in ids}, "check_seconds": {},
         "checks": {p: dict(PASSED) for p in ran_000},
