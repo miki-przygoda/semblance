@@ -46,7 +46,7 @@ line there, and from measurement on 2026-11-04.
 |---|---|
 | Flash battery: radius −1 and 6, intensities 0 and 1, on grey 0.5, `t_pre` = `t_stim` = 1 s: 4 samples of 600 frames. Only radius 6 feeds the FRI | task 0, FRI |
 | FRI window frames 200..=400 (the `-0.005` query's float rounding drops 199); shift by `abs(min)` over window and both intensities; raw peaks; `(on-off)/(on+off+1e-16)` stored f32 | task 0, FRI |
-| Edge battery: 12 angles × ON/OFF × 6 speeds, height 80: 144 stimuli of 1078 frames. Windows per speed end at 878 / 539 / 367 / 325 / 285 / 265 | task 0, DSI |
+| Edge battery: 12 angles × ON/OFF × 6 speeds, height 80: 144 stimuli, padded with NaN to 1078 frames; valid lengths 1078 / 739 / 567 / 525 / 485 / 465 by speed (found while planning; the export stores valid frames only). Windows per speed end at 878 / 539 / 367 / 325 / 285 / 265 | task 0, DSI |
 | DSI's denominator is shared by intensity and the DSI is averaged over speeds; preferred direction is the angle of the un-normalised vector sum over speeds; tuning r is per speed, best kept | task 0, DSI and tuning |
 | The index pipeline initialises exactly as 0.3.0's reference does (`steady_state`, 1 s of 0.5, `t_fade_in = 0`) | task 0, FRI |
 | A speed-13 moving edge in `flyvis-reference/input.f64.bin` has 22 distinct frames of 525; a flash 2 of 600. The edge values are not all f32-representable; the flash values are | measured on `fixtures-2`, 2026-11-04 |
