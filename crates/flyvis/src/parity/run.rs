@@ -163,7 +163,7 @@ pub(crate) const fn dtype_name(p: Dtype) -> &'static str {
     }
 }
 
-fn mismatch(m: String) -> ParityError {
+pub(super) fn mismatch(m: String) -> ParityError {
     ParityError::Mismatch(m)
 }
 
