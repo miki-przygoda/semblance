@@ -5,8 +5,8 @@ holds Rust's index code to flyvis's own values, so this script runs flyvis
 1.2.0's own index functions -- flash_response_index (radius 6), the
 moving-edge peaks, direction_selectivity_index, preferred_direction,
 the tuning correlations, and the three *_to_known helpers -- for all 50
-models at float32 and float64, dt 1/200, and stores them with the input
-flyvis fed. Before it writes anything it proves, in memory:
+models at float32 and for models 000 and 049 at float64, dt 1/200, and
+stores them with the input flyvis fed. Before it writes anything it proves:
 
   - every model's parameters are the ones Rust holds (ensemble.csv);
   - the input flyvis fed each stimulus is the input stored here;
@@ -22,21 +22,33 @@ float64 call could return a cached float32 result. The response loop
 below mirrors flyvis's compute_responses without it, one stimulus per
 batch, as 0.3.0's reference was made.
 
-Outputs, under --out (a staging directory; never data/ directly):
-  frames.f64.bin, frame_index.u32.bin, the index arrays (*.f32.bin,
-  *.f64.bin), manifest.json (deterministic) and PROVENANCE.json.
+It runs in shards (the plan's amendment of 2026-11-04): each shard computes
+some models at some precisions and writes its raw results to --shard-out;
+--merge then checks the shards against each other and writes the set.
+Model 000's once-per-export checks run in whichever shard computes model 000
+at a given precision.
+
+Outputs of --merge, under --out (a staging directory; never data/ directly):
+  frames.f64.bin, frame_index.u32.bin, the index arrays (*.f32.bin with a
+  leading axis of 50 models, *.f64.bin with one of 2: 000 and 049),
+  manifest.json (deterministic) and PROVENANCE.json.
 
 Spec: docs/superpowers/specs/2026-11-04-flyvis-index-export-design.md
 
-Run by hand (on beast, as a jobq job):
-  uv run --project tools tools/export_indices.py --out DIR [--force] [--threads N]
+Run by hand (on beast, as jobq jobs):
+  uv run --project tools tools/export_indices.py --threads N [--models IDS] [--precisions P] --shard-out DIR
+  uv run --project tools tools/export_indices.py --threads N --smoke MODEL [--precisions P]   (writes nothing)
+  uv run --project tools tools/export_indices.py --merge SHARD_DIR [SHARD_DIR ...] --out DIR [--force]
 """
 
 import argparse
 import datetime
+import hashlib
+import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
 import time
@@ -53,10 +65,16 @@ ENSEMBLE_CSV = DATA / "flyvis-pretrained" / "ensemble.csv"
 PRETRAINED_RS = ROOT / "crates" / "flyvis" / "src" / "pretrained.rs"
 REFERENCE = DATA / "flyvis-reference"
 UV_LOCK = ROOT / "tools" / "uv.lock"
+# Each shard gets its own, suffixed with "-<shard name>": parallel shards never
+# share or wipe each other's flyvis root. See scratch_root and lock_path.
 SCRATCH = ROOT / "target" / "flyvis-indices-root"
 LOCK = ROOT / "target" / "flyvis-indices.lock"
+# Never written to, whichever way --out or --shard-out is spelled.
+FORBIDDEN_OUT = (DATA, pathlib.Path("/srv/bulk/Projects/semblance/data"))
 
 MODELS = [f"{i:03d}" for i in range(50)]
+F64_MODELS = ["000", "049"]
+EXPORT_MODELS = {"f32": MODELS, "f64": F64_MODELS}
 PRECISIONS = ("f32", "f64")
 DT = 1 / 200
 HEXALS = 721
@@ -67,8 +85,9 @@ SPEEDS = (2.4, 4.8, 9.7, 13, 19, 25)
 EDGE_CFG_BASE = {"offsets": (-10, 11), "intensities": [0, 1], "speeds": SPEEDS, "height": 80,
                  "post_pad_mode": "continue", "dt": DT, "t_pre": 1.0, "t_post": 1.0}
 # EDGE_CFG adds "device" at run time, when flyvis is imported:
-# {**EDGE_CFG_BASE, "device": flyvis.device}. Until then it is the base.
-EDGE_CFG = EDGE_CFG_BASE
+# {**EDGE_CFG_BASE, "device": flyvis.device}. Until then it is a copy of the base.
+EDGE_CFG = dict(EDGE_CFG_BASE)
+PD_TO_KNOWN_TYPES = ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]
 
 # Frames at dt 1/200, from flyvis's own time axis (task 0; re-asserted from
 # flyvis's masks in check_windows).
@@ -124,16 +143,19 @@ def index_block(battery, stimulus, offset, count):
     return {"battery": battery, "stimulus": stimulus, "offset": offset, "count": count}
 
 
-def build_manifest(cell_types, flashes, edges, n_frames_rows, frame_index_blocks, arrays, sha256):
+def build_manifest(cell_types, flashes, edges, n_frames_rows, frame_index_blocks, arrays, sha256,
+                   models=None, tuning_types=None):
     return {
         "format": 1,
         "flyvis_version": "1.2.0",
         "dt": DT,
         "t_pre": 1.0,
         "pre_stim_value": 0.5,
-        "models": MODELS,
+        "models": {p: list(ids) for p, ids in (models or EXPORT_MODELS).items()},
         "cell_types": list(cell_types),
         "speeds": list(SPEEDS),
+        "tuning_types": list(tuning_types or PD_TO_KNOWN_TYPES),
+        "pd_to_known_types": list(PD_TO_KNOWN_TYPES),
         "batteries": {"flashes": flashes, "edges": edges},
         "frames": {"file": "frames.f64.bin", "dtype": "<f8", "rows": n_frames_rows, "hexals": HEXALS,
                    "bytes": n_frames_rows * HEXALS * 8},
@@ -149,19 +171,53 @@ def manifest_bytes(m):
 
 def validate_manifest(m):
     require(m["format"] == 1, "manifest", f"format {m['format']}")
+    require(sorted(m["models"]) == sorted(PRECISIONS), "manifest", f"models keyed by {sorted(m['models'])}")
     for a in m["arrays"]:
         want = int(np.prod(a["shape"])) * DTYPE_BYTES[a["dtype"]]
         require(a["bytes"] == want, "manifest", f"array {a['name']}.{a['precision']}: {a['bytes']} bytes, shape gives {want}")
+        require(a["file"] == f"{a['name']}.{a['precision']}.bin", "manifest", f"array {a['name']}.{a['precision']}: file {a['file']}")
+        n = len(m["models"][a["precision"]])
+        require(a["shape"][:1] == [n], "manifest",
+                f"array {a['name']}.{a['precision']}: leading axis {a['shape'][:1]}, {n} models at {a['precision']}")
+    names = {p: sorted(a["name"] for a in m["arrays"] if a["precision"] == p) for p in PRECISIONS}
+    require(names["f32"] == names["f64"], "manifest", f"arrays differ between precisions: {names}")
+    require(len({(a["name"], a["precision"]) for a in m["arrays"]}) == len(m["arrays"]), "manifest", "an array is listed twice")
     for battery in ("flashes", "edges"):
         for k, s in enumerate(m["batteries"][battery]):
             require(s["index"] == k, "manifest", f"{battery}[{k}] has index {s['index']}")
             require(0 <= s["window"][0] <= s["window"][1] < s["n_frames"], "manifest", f"{battery}[{k}] window {s['window']}")
+    # frame_index: one block per stimulus, in battery order, contiguous.
+    want_order = [(battery, k) for battery in ("flashes", "edges") for k in range(len(m["batteries"][battery]))]
+    got_order = [(b["battery"], b["stimulus"]) for b in m["frame_index"]["blocks"]]
+    require(got_order == want_order, "manifest", "frame_index blocks do not cover every stimulus once, in order")
     offset = 0
     for b in m["frame_index"]["blocks"]:
         require(b["offset"] == offset, "manifest", f"frame_index block {b}: offset, expected {offset}")
         n = m["batteries"][b["battery"]][b["stimulus"]]["n_frames"]
         require(b["count"] == n, "manifest", f"frame_index block {b}: count, the stimulus has {n} frames")
         offset += b["count"]
+    # sha256: exactly the written data files, each a sha256.
+    files = {m["frames"]["file"], m["frame_index"]["file"]} | {a["file"] for a in m["arrays"]}
+    require(set(m["sha256"]) == files, "manifest",
+            f"sha256 covers {sorted(set(m['sha256']) ^ files)} wrongly (missing or extra)")
+    for name, h in m["sha256"].items():
+        require(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) is not None, "manifest", f"sha256 of {name}: {h!r}")
+
+
+def validate_files(m, files):
+    """The data files against their manifest: the same set as the sha256 map,
+    each with its hash and length, and every frame index inside frames."""
+    require(set(files) == set(m["sha256"]), "files", f"files {sorted(files)} vs sha256 {sorted(m['sha256'])}")
+    for name, data in files.items():
+        require(hashlib_sha256(data) == m["sha256"][name], "files", f"{name}: sha256 differs from the manifest")
+    require(len(files[m["frames"]["file"]]) == m["frames"]["bytes"], "files", "frames: length differs from the manifest")
+    for a in m["arrays"]:
+        require(len(files[a["file"]]) == a["bytes"], "files", f"{a['file']}: length differs from the manifest")
+    total = sum(b["count"] for b in m["frame_index"]["blocks"])
+    ix = np.frombuffer(files[m["frame_index"]["file"]], dtype="<u4")
+    require(ix.size == total, "files", f"frame_index holds {ix.size} entries, its blocks {total}")
+    require(ix.size == 0 or int(ix.max()) < m["frames"]["rows"], "files",
+            f"frame_index reaches row {int(ix.max()) if ix.size else None}; frames has {m['frames']['rows']}")
 
 
 # -- writing the set --------------------------------------------------------------
@@ -170,11 +226,14 @@ def write_set(out, files, manifest, provenance, force):
     """Writes every file into a sibling temp dir, then swaps it in for
     `out`, so `out` is never half-written."""
     out = pathlib.Path(out)
+    refuse_data_dir(out)
     if out.exists() and any(out.iterdir()) and not force:
         raise ExportError(f"--out {out} is not empty; pass --force to replace it")
     validate_manifest(manifest)
+    validate_files(manifest, files)
     tmp = out.with_name(out.name + ".tmp")
     if tmp.exists():
+        print(f"removing a stale {tmp} left by an earlier run", flush=True)
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
     for name, data in files.items():
@@ -188,16 +247,29 @@ def write_set(out, files, manifest, provenance, force):
     er._fsync_dir(out.parent)
 
 
+def refuse_data_dir(path):
+    """No output of this script lands under data/: the set is staged and
+    published by hand."""
+    real = pathlib.Path(path).resolve()
+    for d in FORBIDDEN_OUT:
+        d = d.resolve()
+        require(real != d and d not in real.parents, "output", f"{path} is inside {d}; write to a staging directory")
+
+
+def hashlib_sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
 # -- flyvis (imported only inside these functions) ---------------------------------
 
-def responses(network, dataset, cfg):
+def responses(network, dataset, cfg, batch_size=1):
     """flyvis's compute_responses (analysis/stimulus_responses.py:34-108) and
     generic_responses' coordinates (:204-254), without the cache, one
-    stimulus per batch."""
+    stimulus per batch (batch_size=4 only for the batch-4 finding)."""
     import xarray as xr
     ci = network.connectome.central_cells_index[:]
     stims, resps = [], []
-    for stim, resp in network.stimulus_response(dataset, dataset.dt, t_pre=1.0, t_fade_in=0.0, batch_size=1):
+    for stim, resp in network.stimulus_response(dataset, dataset.dt, t_pre=1.0, t_fade_in=0.0, batch_size=batch_size):
         stims.append(stim)
         resps.append(np.take(resp, ci, axis=-1))
     s = np.concatenate(stims, 0)
@@ -323,67 +395,537 @@ def indices(flash, edge):
     }, tuning_types
 
 
-# -- temporary smoke run (Task 3 replaces this with main) --------------------------
 
-def _smoke(mid, precisions=PRECISIONS):
-    """Loads one model as export_reference.py does, runs both batteries at
-    both precisions, and prints each array's shape and dtype. Writes nothing
-    outside target/."""
-    require("FLYVIS_ROOT_DIR" not in os.environ, "setup", "FLYVIS_ROOT_DIR is set in the environment; unset it")
-    mplconfig = ROOT / "target" / "flyvis-indices-mplconfig"
-    for d in (SCRATCH, mplconfig):
+
+# -- the checks -------------------------------------------------------------------
+
+def check_valid_frames(resp, valid, battery):
+    """resp [sample, frame, ...]: finite through each stimulus's valid
+    frames and NaN after them (flyvis pads moving edges with NaN)."""
+    require(len(valid) == resp.shape[0], "valid frames", f"{battery}: {len(valid)} lengths for {resp.shape[0]} stimuli")
+    for s, n in enumerate(valid):
+        require(0 < n <= resp.shape[1], "valid frames", f"{battery} stimulus {s}: {n} valid of {resp.shape[1]} frames")
+        require(np.isfinite(resp[s, :n]).all(), "valid frames", f"{battery} stimulus {s}: non-finite before frame {n}")
+        require(np.isnan(resp[s, n:]).all(), "valid frames", f"{battery} stimulus {s}: not NaN after frame {n}")
+
+
+def check_windows(flash, edge):
+    """FRI_WINDOW and EDGE_WINDOW_END, read from flyvis's own time axis and
+    masks rather than trusted: every frame of each window, not just its ends."""
+    from flyvis.analysis import moving_bar_responses as mb
+    cfg = flash.attrs["config"]
+    # flash_response_index's own query (flash_responses.py:67).
+    frames = flash["responses"].query(frame=f"{-cfg['dt']} <= time <= {cfg['t_stim']}").frame.values
+    require(frames.tolist() == list(range(FRI_WINDOW[0], FRI_WINDOW[1] + 1)), "windows",
+            f"FRI frames {frames[:1].tolist()}..={frames[-1:].tolist()} ({len(frames)} frames)")
+    # peak_responses' defaults (moving_bar_responses.py:59-66), computed as it computes them.
+    ecfg = edge.attrs["config"]
+    from_degree = ecfg["offsets"][0] * 2.25
+    to_degree = (ecfg["offsets"][1] - 1) * 2.25
+    masks = mb.get_time_masks(edge, from_column=from_degree / 5.8, to_column=to_degree / 5.8)
+    for s, speed in enumerate(edge.speed.values):
+        on = np.flatnonzero(np.asarray(masks.isel(sample=s)))
+        want = list(range(FRI_WINDOW[0], EDGE_WINDOW_END[float(speed)] + 1))
+        require(on.tolist() == want, "windows",
+                f"edge sample {s} (speed {speed}): frames {on[:1].tolist()}..={on[-1:].tolist()} ({len(on)} frames)")
+
+
+_REFERENCE = {}
+
+
+def reference_manifest():
+    """data/flyvis-reference's manifest, validated by export_reference.py's
+    own validator, with every file's length and sha256 verified once."""
+    if "m" not in _REFERENCE:
+        m = json.loads((REFERENCE / "manifest.json").read_text())
+        er.validate_manifest(m)
+        er.verify_files(m["files"], REFERENCE)
+        _REFERENCE["m"] = m
+    return _REFERENCE["m"]
+
+
+def read_block(m, name, run, dt, sequence):
+    """One block of a flyvis-reference file, by the manifest's
+    files[].blocks[] entry keyed (run, dt, sequence), in the file's dtype and
+    the block's shape."""
+    entries = [f for f in m["files"] if f["name"] == name]
+    require(len(entries) == 1, "link", f"{len(entries)} manifest entries for {name}")
+    f = entries[0]
+    blocks = [b for b in f["blocks"] if (b["run"], b["dt"], b["sequence"]) == (run, dt, sequence)]
+    require(len(blocks) == 1, "link", f"{name}: {len(blocks)} blocks for run {run}, dt {dt}, sequence {sequence}")
+    b = blocks[0]
+    with open(REFERENCE / name, "rb") as fh:
+        fh.seek(b["offset"])
+        data = fh.read(b["bytes"])
+    require(len(data) == b["bytes"], "link", f"{name}: short read at {b['offset']}")
+    return np.frombuffer(data, dtype=f["dtype"]).astype(er.NUMPY_DTYPE[f["dtype"]]).reshape(b["shape"])
+
+
+def link_to_fixtures2(network, flash, edge, precision):
+    """Model 000's settled state and central traces equal fixtures-2's
+    reference (model 000, dt 1/200, this precision), bit for bit, and the
+    input fed equals the reference's input.f64.bin."""
+    m = reference_manifest()
+    runs = [r["index"] for r in m["runs"] if (r["model"], r["dt"], r["precision"]) == ("000", "1/200", precision)]
+    require(len(runs) == 1, "link", f"{len(runs)} reference runs for model 000, dt 1/200, {precision}")
+    run = runs[0]
+    np_dtype = np.float32 if precision == "f32" else np.float64
+    centre_types = [c["cell_type"] for c in m["centre_nodes"]]
+    require(centre_types == [str(t) for t in flash.cell_type.values], "link",
+            "the reference's centre cell types differ from the responses' neuron order")
+
+    settled = er.to_np(network.steady_state(1.0, DT, 1, 0.5, return_last=True).nodes.activity).ravel()
+    ref = read_block(m, f"settled.{precision}.bin", run, "1/200", None)
+    require(er.bits_equal(settled, ref), "link", f"{precision}: settled state differs from fixtures-2")
+
+    for q in m["sequences"]:
+        fam, args = q["family"], q["args"]
+        if fam == "flashes":
+            ds = flash
+            sel = (ds.baseline == args["baseline"]) & (ds.intensity == args["intensity"]) & (ds.radius == args["radius"])
+            stim_dtype, n_valid = np_dtype, lambda s: FLASH_FRAMES
+        else:
+            require(fam == "moving_edge", "link", f"sequence {q['index']}: family {fam}")
+            ds = edge
+            sel = ((ds.angle == args["angle"]) & (ds.intensity == args["intensity"])
+                   & (ds.speed == args["speed"]) & (ds.width == args["width"]))
+            stim_dtype, n_valid = np.float64, lambda s: EDGE_VALID_FRAMES[float(ds.speed.values[s])]
+        hits = np.flatnonzero(np.asarray(sel))
+        require(len(hits) == 1, "link", f"sequence {q['index']} ({fam} {args}) matches {len(hits)} stimuli")
+        s = int(hits[0])
+        ref = read_block(m, f"centre.{precision}.bin", run, "1/200", q["index"])
+        n = ref.shape[0]
+        require(n == n_valid(s), "link", f"sequence {q['index']}: {n} reference frames, {n_valid(s)} valid here")
+        got = ds["responses"].values[0, s, :n]
+        require(er.bits_equal(got, ref), "link", f"{precision}: sequence {q['index']} ({fam}) differs from fixtures-2")
+        inp = read_block(m, "input.f64.bin", None, "1/200", q["index"])
+        x = ds["stimulus"].values[s, :n, 0]
+        require(x.dtype == stim_dtype, "link", f"sequence {q['index']}: input is {x.dtype}, expected {np.dtype(stim_dtype)}")
+        require(er.bits_equal(x.astype(np.float64), inp), "link",
+                f"sequence {q['index']}: input differs from fixtures-2's input.f64.bin")
+    return {"run": run, "sequences": len(m["sequences"])}
+
+
+def thread_invariance(ours, model_fn, threads):
+    """Model 000's indices at 1 thread equal `ours`, computed at `threads`,
+    bit for bit."""
+    import torch
+    torch.set_num_threads(1)
+    try:
+        theirs = model_fn()
+    finally:
+        torch.set_num_threads(threads)
+    require(sorted(ours) == sorted(theirs), "threads", f"keys {sorted(ours)} vs {sorted(theirs)}")
+    for k in ours:
+        a, b = np.asarray(ours[k]), np.asarray(theirs[k])
+        require(a.shape == b.shape and er.bits_equal(a.ravel(), b.ravel()), "threads",
+                f"{k} at 1 thread differs from {k} at {threads} threads")
+
+
+def gap_record(a, b):
+    """How two index arrays differ: bit-equal or not, the max |difference|
+    over the entries finite in both, and how many entries are NaN in only one."""
+    a, b = np.asarray(a), np.asarray(b)
+    if a.shape != b.shape:
+        return {"bit_equal": False, "shapes": [list(a.shape), list(b.shape)]}
+    x, y = a.astype(np.float64), b.astype(np.float64)
+    both = np.isfinite(x) & np.isfinite(y)
+    d = np.abs(x - y)[both]
+    return {"bit_equal": a.dtype == b.dtype and er.bits_equal(a.ravel(), b.ravel()),
+            "max_abs_gap": float(d.max()) if d.size else 0.0,
+            "nonfinite_mismatches": int((np.isfinite(x) != np.isfinite(y)).sum())}
+
+
+def batch4_finding(network, flash_ds, edge_ds, flash_cfg, edge_cfg, ours):
+    """flyvis's stock batch_size=4 against ours (1): recorded, not required.
+    A failure of flyvis's batch-4 path is recorded as the finding."""
+    try:
+        theirs = indices(responses(network, flash_ds, flash_cfg, batch_size=4),
+                         responses(network, edge_ds, edge_cfg, batch_size=4))[0]
+    except Exception as e:      # the finding, whatever it is; never the export's failure
+        return {"error": f"{type(e).__name__}: {e}"}
+    return {k: gap_record(ours[k], theirs[k]) for k in ours}
+
+
+def stimulus_tables(flash, edge, valid):
+    fl = [flash_entry(s, float(flash.baseline.values[s]), int(flash.intensity.values[s]), int(flash.radius.values[s]),
+                      FLASH_FRAMES) for s in range(flash.sizes["sample"])]
+    ed = [edge_entry(s, int(edge.angle.values[s]), int(edge.intensity.values[s]), float(edge.speed.values[s]),
+                     int(edge.width.values[s]), valid[s]) for s in range(edge.sizes["sample"])]
+    require(len(fl) == 4 and len(ed) == 144, "stimuli", f"{len(fl)} flashes, {len(ed)} edges")
+    return {"flashes": fl, "edges": ed}
+
+
+# -- one shard: run the models ------------------------------------------------------
+
+SHARD_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def scratch_root(name):
+    return SCRATCH.with_name(f"{SCRATCH.name}-{name}")
+
+
+def lock_path(name):
+    return LOCK.with_name(f"{LOCK.stem}-{name}{LOCK.suffix}")
+
+
+def run_models(ids, precisions, threads, name):
+    """Computes every index of `ids` at `precisions`, with every check, and
+    returns the shard (see save_shard). Writes only under target/."""
+    git = er.git_state()                 # asked first: a broken git fails in seconds
+    started = time.monotonic()
+    scratch = scratch_root(name)
+    mplconfig = ROOT / "target" / f"flyvis-indices-mplconfig-{name}"
+    models_dir = scratch / "results" / "flow" / "0000"
+    for d in (scratch, mplconfig):
         shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True)
-    os.environ["FLYVIS_ROOT_DIR"] = str(SCRATCH)
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    os.environ["MPLCONFIGDIR"] = str(mplconfig)
-    er.copy_models(RESULTS, SCRATCH / "results" / "flow" / "0000", [mid])
-    import torch
+    models_dir.mkdir(parents=True)
+    os.environ.update(FLYVIS_ROOT_DIR=str(scratch), CUDA_VISIBLE_DEVICES="", MPLCONFIGDIR=str(mplconfig))
+    copies = er.copy_models(RESULTS, models_dir, ids)
 
-    torch.load(SCRATCH / "results" / "flow" / "0000" / mid / er.CHECKPOINT, map_location="cpu", weights_only=True)
+    import torch
+    torch.set_num_threads(threads)
+    pre = er.parse_pretrained(PRETRAINED_RS.read_text())
+    ensemble = er.read_ensemble(ENSEMBLE_CSV.read_text())
+    ckpts = {m: er.load_checkpoint(models_dir / m / er.CHECKPOINT) for m in ids}   # weights_only=True
+    er.check_checkpoints(ckpts, ensemble, pre)
+    refs = {m: er.reference_params(m, pre, ensemble) for m in ids}
+    cells = list(pre["CELL_TYPES"])
+    conns = [tuple(c) for c in pre["CONN_TYPES"]]
+    del ckpts
+
     import flyvis
     from flyvis.datasets.flashes import Flashes
     from flyvis.datasets.moving_bar import MovingEdge
     from flyvis.network import NetworkView
-
     require(flyvis.device.type == "cpu", "setup", f"flyvis device is {flyvis.device}")
-    require(pathlib.Path(flyvis.root_dir).resolve() == SCRATCH.resolve(), "setup", f"flyvis root is {flyvis.root_dir}")
-    edge_cfg = {**EDGE_CFG_BASE, "device": flyvis.device}
-    print(f"smoke: flyvis {flyvis.__version__}, model {mid}, torch threads {torch.get_num_threads()}", flush=True)
+    require(pathlib.Path(flyvis.root_dir).resolve() == scratch.resolve(), "setup", f"flyvis root is {flyvis.root_dir}")
+    print(f"{name}: flyvis {flyvis.__version__}, torch {torch.__version__}, {torch.get_num_threads()} threads, "
+          f"models {','.join(ids)} at {','.join(precisions)}; checkpoints equal ensemble.csv", flush=True)
 
-    for prec in precisions:
-        want = torch.float32 if prec == "f32" else torch.float64
+    shard = {"name": name, "models": {p: list(ids) for p in precisions}, "arrays": {},
+             "cell_types": None, "tuning_types": None, "tables": None, "inputs": None,
+             "timing": {}, "check_seconds": {}, "checks": {}, "batch4": {}}
+    for precision in precisions:
+        want = torch.float32 if precision == "f32" else torch.float64
+        np_dtype = np.float32 if precision == "f32" else np.float64
         torch.set_default_dtype(want)
-        t0 = time.monotonic()
-        nv = NetworkView(f"flow/0000/{mid}")
-        best = pathlib.Path(nv.get_checkpoint("best")).resolve()
-        require(best == (SCRATCH / "results" / "flow" / "0000" / mid / er.CHECKPOINT).resolve(), "setup",
-                f"best checkpoint is {best}")
-        network = nv.init_network("best")
-        if prec == "f64":
-            network.double()
         flash_cfg = dict(FLASH_CFG)
-        flash = responses(network, Flashes(**flash_cfg), flash_cfg)
-        t1 = time.monotonic()
-        edge = responses(network, MovingEdge(**edge_cfg), edge_cfg)
-        t2 = time.monotonic()
-        out, tuning_types = indices(flash, edge)
-        t3 = time.monotonic()
-        print(f"{prec}: flash stimulus {flash['stimulus'].shape} {flash['stimulus'].dtype}, "
-              f"responses {flash['responses'].shape} {flash['responses'].dtype}", flush=True)
-        print(f"{prec}: edge stimulus {edge['stimulus'].shape} {edge['stimulus'].dtype}, "
-              f"responses {edge['responses'].shape} {edge['responses'].dtype}", flush=True)
-        for name, a in out.items():
-            print(f"{prec}: {name:13s} {list(a.shape)} {a.dtype}", flush=True)
-        print(f"{prec}: tuning types {tuning_types}", flush=True)
-        print(f"{prec}: replicas exact; wall flashes {t1 - t0:.1f}s, edges {t2 - t1:.1f}s, "
-              f"indices {t3 - t2:.1f}s, model total {t3 - t0:.1f}s", flush=True)
-        del network, nv, flash, edge
+        edge_cfg = {**EDGE_CFG_BASE, "device": flyvis.device}
+        flash_ds = Flashes(**flash_cfg)
+        edge_ds = MovingEdge(**edge_cfg)
+        for mid in ids:
+            t0 = time.monotonic()
+            require(torch.get_default_dtype() == want, "A2", f"default dtype is {torch.get_default_dtype()}", mid)
+            nv = NetworkView(f"flow/0000/{mid}")
+            best = pathlib.Path(nv.get_checkpoint("best")).resolve()
+            require(best == (models_dir / mid / er.CHECKPOINT).resolve(), "checkpoint",
+                    f"model {mid}: best checkpoint is {best}")
+            network = nv.init_network("best")
+            er.check_network_params(network, refs[mid], cells, conns, "loaded", mid)
+            if precision == "f64":
+                network.double()
+                er.check_network_params(network, refs[mid], cells, conns, "widened", mid)
+            er.check_param_dtypes(network, want, mid)
+
+            flash = responses(network, flash_ds, flash_cfg)
+            edge = responses(network, edge_ds, edge_cfg)
+            valid = [EDGE_VALID_FRAMES[float(sp)] for sp in edge.speed.values]
+            check_valid_frames(flash["responses"].values[0], [FLASH_FRAMES] * len(flash_ds), "flashes")
+            check_valid_frames(edge["responses"].values[0], valid, "edges")
+            ix, types8 = indices(flash, edge)
+            shard["timing"][f"{mid}.{precision}"] = round(time.monotonic() - t0, 1)
+
+            if mid == "000":
+                t1 = time.monotonic()
+                check_windows(flash, edge)
+                print(f"{name}: 000 {precision}: windows hold", flush=True)
+                link = link_to_fixtures2(network, flash, edge, precision)
+                print(f"{name}: 000 {precision}: settled state and {link['sequences']} central traces equal "
+                      f"fixtures-2 run {link['run']}, bit for bit", flush=True)
+                thread_invariance(ix, lambda: indices(responses(network, flash_ds, flash_cfg),
+                                                      responses(network, edge_ds, edge_cfg))[0], threads)
+                print(f"{name}: 000 {precision}: indices at 1 thread equal those at {threads}", flush=True)
+                shard["batch4"][precision] = b4 = batch4_finding(network, flash_ds, edge_ds, flash_cfg, edge_cfg, ix)
+                print(f"{name}: 000 {precision}: batch-4 finding {json.dumps(b4)}", flush=True)
+                shard["checks"][precision] = {"windows": "passed", "link_to_fixtures2": "passed",
+                                              "link_run": link["run"], "thread_invariance": "passed",
+                                              "threads_compared": [1, threads]}
+                shard["check_seconds"][precision] = round(time.monotonic() - t1, 1)
+
+            er.check_network_params(network, refs[mid], cells, conns, "after_runs", mid)
+            er.check_param_dtypes(network, want, mid)
+            require(shard["tuning_types"] in (None, types8), "tuning", f"model {mid}: tuning types {types8}")
+            shard["tuning_types"] = types8
+            cell_types = [str(t) for t in flash.cell_type.values]
+            require(shard["cell_types"] in (None, cell_types), "cell types", f"model {mid} {precision}: neuron order differs")
+            shard["cell_types"] = cell_types
+            tables = stimulus_tables(flash, edge, valid)
+            require(shard["tables"] in (None, tables), "stimuli", f"model {mid} {precision}: stimulus table differs")
+            shard["tables"] = tables
+            fx = flash["stimulus"].values
+            ex = edge["stimulus"].values
+            require(fx.dtype == np_dtype and ex.dtype == np.float64, "input",
+                    f"model {mid} {precision}: stimulus dtypes {fx.dtype}, {ex.dtype}")
+            stim = [fx[s, :, 0].astype(np.float64) for s in range(fx.shape[0])] + \
+                   [ex[s, :n, 0].astype(np.float64) for s, n in enumerate(valid)]
+            if shard["inputs"] is None:
+                shard["inputs"] = stim
+            else:
+                for k, (x, y) in enumerate(zip(shard["inputs"], stim, strict=True)):
+                    require(er.bits_equal(x, y), "input", f"model {mid} {precision}: stimulus {k} differs from the first model's")
+            for k, v in ix.items():
+                shard["arrays"].setdefault(k, {}).setdefault(precision, {})[mid] = np.asarray(v)
+            print(f"{name}: {mid} {precision}: {shard['timing'][f'{mid}.{precision}']} s", flush=True)
+            del network, nv, flash, edge, fx, ex, stim
+        del flash_ds, edge_ds
     torch.set_default_dtype(torch.float32)
-    return 0
+    shard["environment"] = {
+        "host": os.uname().nodename, "machine": os.uname().machine,
+        "flyvis": flyvis.__version__, "torch": torch.__version__, "numpy": np.__version__,
+        "uv_lock_sha256": er.sha256_file(UV_LOCK), "git": git,
+        "threads": threads, "batch_size": 1, "models_sha256": copies,
+        "seconds": round(time.monotonic() - started, 1),
+    }
+    return shard
+
+
+# -- shards on disk -----------------------------------------------------------------
+
+def _npy_bytes(a):
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(a), allow_pickle=False)     # not ascontiguousarray: it makes a 0-d array 1-d
+    return buf.getvalue()
+
+
+def _npy_load(path):
+    return np.load(path, allow_pickle=False)
+
+
+def save_shard(directory, shard):
+    """A shard's raw results, written into a sibling .partial directory and
+    renamed into place, so `directory` is either absent or whole:
+      shard.json                      everything but the arrays and inputs
+      arrays/<name>.<prec>.<id>.npy   one per index array, precision and model
+      inputs.npz                      the stimuli, deduplicated: frames, index
+    """
+    directory = pathlib.Path(directory)
+    refuse_data_dir(directory)
+    require(not directory.exists(), "shard", f"{directory} exists; a shard is never overwritten")
+    frames, index = dedup_frames(shard["inputs"])
+    for x, ix in zip(shard["inputs"], index):
+        require(er.bits_equal(frames[ix], x), "input", "dedup does not rebuild the input")
+    tmp = directory.with_name(directory.name + ".partial")
+    if tmp.exists():
+        print(f"removing a stale {tmp} left by an earlier run", flush=True)
+        shutil.rmtree(tmp)
+    (tmp / "arrays").mkdir(parents=True)
+    layout = {}
+    for name, by_p in sorted(shard["arrays"].items()):
+        for p, by_m in sorted(by_p.items()):
+            for mid, a in sorted(by_m.items()):
+                er._write_synced(tmp / "arrays" / f"{name}.{p}.{mid}.npy", _npy_bytes(a))
+                layout.setdefault(name, {}).setdefault(p, {})[mid] = {"dtype": a.dtype.str, "shape": list(a.shape)}
+    buf = io.BytesIO()
+    np.savez(buf, frames=frames, index=np.concatenate(index), counts=np.array([len(i) for i in index], dtype=np.int64))
+    er._write_synced(tmp / "inputs.npz", buf.getvalue())
+    meta = {k: shard[k] for k in ("name", "models", "cell_types", "tuning_types", "tables", "timing",
+                                   "check_seconds", "checks", "batch4", "environment")}
+    meta = {"format": 1, **meta, "arrays": layout}
+    er._write_synced(tmp / "shard.json", er.json_bytes(meta))     # last: a shard.json means a whole shard
+    er._fsync_dir(tmp / "arrays")
+    er._fsync_dir(tmp)
+    require(not directory.exists(), "shard", f"{directory} appeared while this shard ran")
+    tmp.rename(directory)
+    er._fsync_dir(directory.parent)
+
+
+def load_shard(directory):
+    """save_shard's inverse, checking every listed array against its record."""
+    directory = pathlib.Path(directory)
+    require((directory / "shard.json").is_file(), "merge", f"{directory} holds no shard.json")
+    meta = json.loads((directory / "shard.json").read_text())
+    require(meta.get("format") == 1, "merge", f"{directory}: shard format {meta.get('format')}")
+    arrays = {}
+    for name, by_p in meta["arrays"].items():
+        for p, by_m in by_p.items():
+            require(sorted(by_m) == sorted(meta["models"].get(p, [])), "merge",
+                    f"{directory}: {name}.{p} holds models {sorted(by_m)}, the shard ran {meta['models'].get(p)}")
+            for mid, rec in by_m.items():
+                a = _npy_load(directory / "arrays" / f"{name}.{p}.{mid}.npy")
+                require(a.dtype.str == rec["dtype"] and list(a.shape) == rec["shape"], "merge",
+                        f"{directory}: {name}.{p}.{mid} is {a.dtype.str} {list(a.shape)}, recorded {rec}")
+                arrays.setdefault(name, {}).setdefault(p, {})[mid] = a
+    with np.load(directory / "inputs.npz", allow_pickle=False) as z:
+        inputs = {k: z[k] for k in ("frames", "index", "counts")}
+    return {**meta, "arrays": arrays, "inputs": inputs, "directory": str(directory)}
+
+
+# -- the merge ----------------------------------------------------------------------
+
+CHECKS_PASSED = ("windows", "link_to_fixtures2", "thread_invariance")
+
+
+def merge(shards):
+    """Checks the shards against each other and the export's model set, and
+    returns (files, manifest, provenance) for write_set."""
+    require(len(shards) >= 1, "merge", "no shards")
+    names = [sh["name"] for sh in shards]
+    require(len(set(names)) == len(names), "merge", f"shard names repeat: {names}")
+    owner = {}
+    for sh in shards:
+        require(set(sh["models"]) <= set(PRECISIONS), "merge", f"shard {sh['name']}: precisions {sorted(sh['models'])}")
+        for p, ids in sh["models"].items():
+            for mid in ids:
+                require((p, mid) not in owner, "merge",
+                        f"model {mid} at {p} is in shard {owner.get((p, mid))} and shard {sh['name']}")
+                owner[(p, mid)] = sh
+    for p in PRECISIONS:
+        got = {mid for q, mid in owner if q == p}
+        missing, extra = sorted(set(EXPORT_MODELS[p]) - got), sorted(got - set(EXPORT_MODELS[p]))
+        require(not missing and not extra, "merge", f"{p}: models missing {missing}, unexpected {extra}")
+
+    first = shards[0]
+    for sh in shards[1:]:
+        for key in ("cell_types", "tuning_types", "tables"):
+            require(sh[key] == first[key], "merge", f"shard {sh['name']}: {key} differ from shard {first['name']}'s")
+        for key in ("frames", "index", "counts"):
+            require(er.bits_equal(sh["inputs"][key], first["inputs"][key]), "merge",
+                    f"shard {sh['name']}: inputs ({key}) differ from shard {first['name']}'s")
+        for key in ("flyvis", "torch", "numpy", "uv_lock_sha256"):
+            require(sh["environment"][key] == first["environment"][key], "merge",
+                    f"shard {sh['name']}: {key} {sh['environment'][key]} vs {first['environment'][key]}")
+        require(sh["environment"]["git"]["head"] == first["environment"]["git"]["head"], "merge",
+                f"shard {sh['name']}: git head differs from shard {first['name']}'s")
+        require(sorted(sh["arrays"]) == sorted(first["arrays"]), "merge", f"shard {sh['name']}: array names differ")
+
+    checks, batch4 = {}, {}
+    for p in PRECISIONS:
+        sh = owner[(p, "000")]
+        c = sh["checks"].get(p)
+        require(c is not None and all(c.get(k) == "passed" for k in CHECKS_PASSED), "merge",
+                f"model 000's checks at {p} did not pass in shard {sh['name']}: {c}")
+        require(p in sh["batch4"], "merge", f"shard {sh['name']}: no batch-4 finding at {p}")
+        checks[p] = {**c, "shard": sh["name"]}
+        batch4[p] = sh["batch4"][p]
+
+    # The arrays, stacked in model order, each in its computed dtype.
+    files, arrays, gaps, stacked = {}, [], {}, {}
+    for name in sorted(first["arrays"]):
+        for p in PRECISIONS:
+            parts = [owner[(p, mid)]["arrays"][name][p][mid] for mid in EXPORT_MODELS[p]]
+            dt, shape = parts[0].dtype, parts[0].shape
+            require(all(x.dtype == dt and x.shape == shape for x in parts), "merge",
+                    f"{name}.{p}: dtype or shape differs between models")
+            dtype = {np.dtype("float32"): "<f4", np.dtype("float64"): "<f8"}.get(dt)
+            require(dtype is not None, "merge", f"{name}.{p} is {dt}")
+            x = np.stack(parts)
+            stacked[(name, p)] = x
+            arrays.append(array_entry(name, p, dtype, list(x.shape)))
+            files[f"{name}.{p}.bin"] = x.astype(dtype).tobytes()
+        a = np.stack([stacked[(name, "f32")][MODELS.index(mid)] for mid in F64_MODELS]).astype(np.float64)
+        b = stacked[(name, "f64")].astype(np.float64)
+        require(np.isfinite(a).all() and np.isfinite(b).all(), "gap", f"{name}: non-finite values in models {F64_MODELS}")
+        gaps[name] = er.max_abs_gap(a, b)
+
+    # The input, deduplicated, and its index blocks.
+    inp = first["inputs"]
+    tables = first["tables"]
+    entries = [("flashes", e) for e in tables["flashes"]] + [("edges", e) for e in tables["edges"]]
+    require(inp["counts"].tolist() == [e["n_frames"] for _, e in entries], "merge", "input lengths differ from the stimulus table")
+    require(inp["frames"].dtype == np.float64 and inp["frames"].ndim == 2 and inp["frames"].shape[1] == HEXALS, "merge",
+            f"frames {inp['frames'].dtype} {inp['frames'].shape}")
+    blocks, offset = [], 0
+    for battery, e in entries:
+        blocks.append(index_block(battery, e["index"], offset, e["n_frames"]))
+        offset += e["n_frames"]
+    files["frames.f64.bin"] = inp["frames"].astype("<f8").tobytes()
+    files["frame_index.u32.bin"] = inp["index"].astype("<u4").tobytes()
+    sha = {name: hashlib_sha256(data) for name, data in files.items()}
+    manifest = build_manifest(first["cell_types"], tables["flashes"], tables["edges"], inp["frames"].shape[0],
+                              blocks, arrays, sha, models=EXPORT_MODELS, tuning_types=first["tuning_types"])
+    env = first["environment"]
+    provenance = {
+        "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "merged_on": {"host": os.uname().nodename, "machine": os.uname().machine, "git": er.git_state()},
+        "flyvis": env["flyvis"], "torch": env["torch"], "numpy": env["numpy"], "uv_lock_sha256": env["uv_lock_sha256"],
+        "batch_size": 1,
+        "models": EXPORT_MODELS,
+        "checks": checks,
+        "f32_f64_gap": {"models": F64_MODELS, "max_abs": gaps},
+        "batch4_vs_batch1": batch4,
+        "shards": {sh["name"]: {"models": sh["models"], **{k: v for k, v in sh["environment"].items()
+                                                         if k not in ("flyvis", "torch", "numpy", "uv_lock_sha256")},
+                                "per_model_seconds": sh["timing"], "check_seconds": sh["check_seconds"]}
+                   for sh in shards},
+    }
+    return files, manifest, provenance
+
+
+# -- main ---------------------------------------------------------------------------
+
+def parse_list(text, allowed, what):
+    items = [t for t in text.split(",") if t]
+    require(items and len(set(items)) == len(items) and set(items) <= set(allowed), "usage", f"{what} {text!r}")
+    return [x for x in allowed if x in items]          # canonical order: f32 before f64, models ascending
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="export_indices.py")
+    p.add_argument("--threads", type=int)
+    p.add_argument("--models")
+    p.add_argument("--precisions")
+    p.add_argument("--shard-out", type=pathlib.Path)
+    p.add_argument("--smoke")
+    p.add_argument("--merge", nargs="+", type=pathlib.Path)
+    p.add_argument("--out", type=pathlib.Path)
+    p.add_argument("--force", action="store_true")
+    a = p.parse_args(argv[1:])
+    modes = [m for m in ("smoke", "shard_out", "merge") if getattr(a, m) is not None]
+    require(len(modes) == 1, "usage", "give exactly one of --smoke, --shard-out, --merge")
+
+    if a.merge:
+        require(a.out is not None, "usage", "--merge needs --out")
+        require(a.threads is None and a.models is None and a.precisions is None, "usage",
+                "--threads, --models and --precisions belong to the shards, not the merge")
+        refuse_data_dir(a.out)
+        files, manifest, provenance = merge([load_shard(d) for d in a.merge])
+        write_set(a.out, files, manifest, provenance, a.force)
+        print(f"wrote {a.out}: {len(files)} files, {manifest['frames']['rows']} distinct frames; "
+              f"f32 x {len(MODELS)}, f64 x {len(F64_MODELS)}")
+        return 0
+
+    require(a.out is None and not a.force, "usage", "--out and --force belong to --merge")
+    require(a.threads is not None and a.threads >= 1, "usage", "--threads N is required to compute")
+    require("FLYVIS_ROOT_DIR" not in os.environ, "environment", "an inherited FLYVIS_ROOT_DIR is refused")
+    precisions = parse_list(a.precisions or "f32", PRECISIONS, "--precisions")
+    if a.smoke:
+        require(a.models is None, "usage", "--smoke takes one model; --models is for shards")
+        ids, name = parse_list(a.smoke, MODELS, "--smoke"), "smoke"
+    else:
+        ids, name = parse_list(a.models or ",".join(MODELS), MODELS, "--models"), a.shard_out.name
+        require(SHARD_NAME.fullmatch(name) is not None, "usage", f"shard name {name!r}")
+        refuse_data_dir(a.shard_out)
+        require(not a.shard_out.exists(), "shard", f"{a.shard_out} exists; a shard is never overwritten")
+    lock = er.acquire_lock(lock_path(name))       # held until exit
+    try:
+        shard = run_models(ids, precisions, a.threads, name)
+        if a.smoke:
+            print("smoke: every check passed; nothing written")
+            return 0
+        save_shard(a.shard_out, shard)
+        print(f"wrote shard {a.shard_out}: models {','.join(ids)} at {','.join(precisions)}, "
+              f"{shard['environment']['seconds']} s")
+        return 0
+    finally:
+        lock.close()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) in (3, 4) and sys.argv[1] == "--smoke" and set(sys.argv[3:]) <= set(PRECISIONS):
-        sys.exit(_smoke(sys.argv[2], tuple(sys.argv[3:]) or PRECISIONS))
-    sys.exit("usage: export_indices.py --smoke MODEL [f32|f64]  (main arrives in Task 3)")
+    sys.stdout.reconfigure(line_buffering=True)
+    try:
+        sys.exit(main(sys.argv))
+    except ExportError as e:
+        print(f"export_indices: {e}", file=sys.stderr)
+        sys.exit(1)
