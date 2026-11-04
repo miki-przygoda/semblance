@@ -94,6 +94,10 @@ pub enum ParityError {
     Mismatch(String),
     /// The integrator's state went NaN or infinite: a gate failure.
     NonFinite { run: u32, node: usize, cell_type: String, after: After },
+    /// `respond`'s settling went NaN or infinite: a gate failure.
+    NonFiniteSettle { node: usize, cell_type: String, step: usize },
+    /// `respond`'s playback went NaN or infinite: a gate failure.
+    NonFiniteResponse { stimulus: usize, label: String, frame: usize, node: usize, cell_type: String },
     /// A bad `Options` value, or a question with no answer (an unregistered
     /// run, a bound for a control).
     Usage(String),
@@ -112,7 +116,10 @@ impl ParityError {
     /// Whether this error is a gate failure (exit 1) rather than
     /// verification not completing (exit 2). Only a non-finite state is.
     pub fn is_gate_failure(&self) -> bool {
-        matches!(self, ParityError::NonFinite { .. })
+        matches!(
+            self,
+            ParityError::NonFinite { .. } | ParityError::NonFiniteSettle { .. } | ParityError::NonFiniteResponse { .. }
+        )
     }
 }
 
@@ -128,6 +135,12 @@ impl std::fmt::Display for ParityError {
             }
             ParityError::NonFinite { run, node, cell_type, after: After::Frame { frame, sequence } } => {
                 write!(f, "run {run}: node {node} ({cell_type}) is not finite after frame {frame} of sequence {sequence}")
+            }
+            ParityError::NonFiniteSettle { node, cell_type, step } => {
+                write!(f, "settling: node {node} ({cell_type}) is not finite after settle step {step}")
+            }
+            ParityError::NonFiniteResponse { stimulus, label, frame, node, cell_type } => {
+                write!(f, "stimulus {stimulus} ({label}): node {node} ({cell_type}) is not finite after frame {frame}")
             }
         }
     }
@@ -163,6 +176,22 @@ mod tests {
         for e in [ParityError::Mismatch("m".into()), ParityError::Usage("u".into())] {
             assert!(!e.is_gate_failure());
         }
+    }
+
+    #[test]
+    fn respond_errors_display_as_registered() {
+        let e = ParityError::NonFiniteResponse {
+            stimulus: 3,
+            label: "3 moving_edge".into(),
+            frame: 40,
+            node: 7,
+            cell_type: "T4a".into(),
+        };
+        assert_eq!(e.to_string(), "stimulus 3 (3 moving_edge): node 7 (T4a) is not finite after frame 40");
+        assert!(e.is_gate_failure());
+        let e = ParityError::NonFiniteSettle { node: 2, cell_type: "Mi4".into(), step: 11 };
+        assert_eq!(e.to_string(), "settling: node 2 (Mi4) is not finite after settle step 11");
+        assert!(e.is_gate_failure());
     }
 
     /// The registry is the manifest's eight runs, in index order.
