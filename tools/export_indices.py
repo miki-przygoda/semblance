@@ -186,3 +186,204 @@ def write_set(out, files, manifest, provenance, force):
         shutil.rmtree(out)
     tmp.rename(out)
     er._fsync_dir(out.parent)
+
+
+# -- flyvis (imported only inside these functions) ---------------------------------
+
+def responses(network, dataset, cfg):
+    """flyvis's compute_responses (analysis/stimulus_responses.py:34-108) and
+    generic_responses' coordinates (:204-254), without the cache, one
+    stimulus per batch."""
+    import xarray as xr
+    ci = network.connectome.central_cells_index[:]
+    stims, resps = [], []
+    for stim, resp in network.stimulus_response(dataset, dataset.dt, t_pre=1.0, t_fade_in=0.0, batch_size=1):
+        stims.append(stim)
+        resps.append(np.take(resp, ci, axis=-1))
+    s = np.concatenate(stims, 0)
+    r = np.concatenate(resps, 0)[None]
+    ds = xr.Dataset(
+        {"stimulus": (["sample", "frame", "channel", "hex_pixel"], s),
+         "responses": (["network_id", "sample", "frame", "neuron"], r)},
+        coords={"sample": np.arange(len(dataset)),
+                **{c: ("sample", dataset.arg_df[c].values) for c in dataset.arg_df.columns}},
+    )
+    nodes = network.connectome.nodes
+    types = nodes.type[:].astype(str)
+    u_all, v_all = nodes.u[:], nodes.v[:]
+    u_in, v_in = np.array([(u_all[i], v_all[i]) for i, t in enumerate(types) if t == "R1"]).T
+    ds = ds.assign_coords(
+        frame=np.arange(s.shape[1]),
+        channel=np.arange(s.shape[2]),
+        hex_pixel=np.arange(s.shape[3]),
+        neuron=np.arange(r.shape[3]),
+        time=("frame", np.arange(s.shape[1]).astype(float) * cfg["dt"] - cfg["t_pre"]),
+        cell_type=("neuron", types[ci]),
+        u=("neuron", u_all[ci]),
+        v=("neuron", v_all[ci]),
+        u_in=("hex_pixel", u_in),
+        v_in=("hex_pixel", v_in),
+        network_id=("network_id", [0]),
+    )
+    ds.attrs["config"] = cfg
+    return ds
+
+
+def fri_peaks(flash, radius=6):
+    """flyvis's flash_response_index (analysis/flash_responses.py:50-78),
+    transcribed line for line, stopping before the index so the shifted
+    peaks are kept. `indices` proves the replica exact."""
+    assert tuple(flash.attrs["config"]["alternations"]) == (0, 1, 0)
+    responses = flash["responses"]
+    time_query = f"{-flash.attrs['config']['dt']} <= time <= {flash.attrs['config']['t_stim']}"
+    stim_response = responses.query(frame=time_query)
+    stim_response = stim_response.query(sample=f"radius=={radius}")
+    minimum = stim_response.min(dim=["frame", "sample"])
+    stim_response += np.abs(minimum)
+    r_on = stim_response.query(sample=f"intensity=={1.0}")
+    r_off = stim_response.query(sample=f"intensity=={0.0}")
+    on_peak = r_on.max(dim="frame").drop("sample")
+    off_peak = r_off.max(dim="frame").drop("sample")
+    return on_peak, off_peak
+
+
+def fri_from_peaks(on_peak, off_peak):
+    """flash_responses.py:81-82, in place as flyvis does it, so an f32 run
+    stays f32."""
+    fri = on_peak - off_peak
+    fri /= on_peak + off_peak + np.array([1e-16])
+    return fri
+
+
+def tuning_per_speed(edge):
+    """flyvis's correlation_to_known_tuning_curves
+    (analysis/moving_bar_responses.py:455-473), transcribed line for line,
+    stopping before the argmax over (speed, width): r per type, intensity and
+    speed. `indices` proves its maximum equals flyvis's result."""
+    from flyvis.analysis import moving_bar_responses as mb
+    types = ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]
+    tuning = mb.peak_responses(edge)
+    gt_tuning = mb.get_known_tuning_curves(types, np.arange(0, 360, 30))
+    tuning = (
+        tuning.set_index(sample=["angle", "intensity", "width", "speed"])
+        .unstack("sample")
+        .fillna(0.0)
+        .custom.where(cell_type=types)
+    )
+    cell_types = [str(t) for t in tuning.cell_type.values]
+    tuning["neuron"] = np.arange(tuning.coords["neuron"].size)
+    correlation = xr_corr(tuning, gt_tuning)
+    correlation = correlation.fillna(0.0)
+    require(correlation.sizes["width"] == 1, "tuning", f"{correlation.sizes['width']} widths")
+    return correlation.isel(width=0), cell_types
+
+
+def xr_corr(a, b):
+    import xarray as xr
+    return xr.corr(a, b, dim="angle")
+
+
+def indices(flash, edge):
+    """Every index array for one model at one precision, in flyvis's
+    computed dtypes, and the tuning types' order (flyvis's custom.where)."""
+    from flyvis.analysis import flash_responses as fr
+    from flyvis.analysis import moving_bar_responses as mb
+
+    on, off = fri_peaks(flash)
+    fri = fr.flash_response_index(flash, radius=6)
+    replica = fri_from_peaks(on, off).dropna(dim="sample", how="any")
+    require(replica.dims == fri.dims, "fri replica", f"dims {replica.dims} vs {fri.dims}")
+    require(er.bits_equal(np.asarray(replica).ravel(), np.asarray(fri).ravel()), "fri replica",
+            "the replicated shifted peaks do not reproduce flash_response_index")
+
+    peaks = mb.peak_responses(edge)                                   # (network_id, sample, neuron)
+    dsi = mb.direction_selectivity_index(edge)                        # (neuron, intensity) after squeeze
+    pd = mb.preferred_direction(edge)                                 # (network_id, neuron, intensity)
+    best = mb.correlation_to_known_tuning_curves(edge)                # (network_id, neuron[8], intensity)
+    per_speed, tuning_types = tuning_per_speed(edge)                  # (network_id, neuron[8], intensity, speed)
+    per_speed_max = per_speed.max("speed")
+    require(per_speed_max.dims == best.dims, "tuning replica", f"dims {per_speed_max.dims} vs {best.dims}")
+    require(er.bits_equal(np.asarray(per_speed_max).ravel(), np.asarray(best).ravel()),
+            "tuning replica", "the per-speed r do not reproduce correlation_to_known_tuning_curves")
+    require([float(s) for s in per_speed.speed.values] == [float(s) for s in SPEEDS], "tuning",
+            f"speed order {per_speed.speed.values.tolist()}")
+    for name, a in (("dsi", dsi), ("pd", pd), ("tuning", per_speed)):
+        require(a.intensity.values.tolist() == [0, 1], name, f"intensity order {a.intensity.values.tolist()}")
+
+    return {
+        "fri_peaks": np.stack([np.asarray(off).squeeze(), np.asarray(on).squeeze()], axis=-1),       # [65, 2] (off, on)
+        "fri": np.asarray(fri).squeeze(),                                                           # [65]
+        "edge_peaks": np.asarray(peaks).squeeze(0),                                                 # [144, 65]
+        "dsi": np.asarray(dsi.transpose("intensity", "neuron")),                                    # [2, 65]
+        "pd": np.asarray(pd.squeeze("network_id").transpose("intensity", "neuron")),                # [2, 65]
+        "tuning_r": np.asarray(per_speed.squeeze("network_id").transpose("neuron", "intensity", "speed")),  # [8, 2, 6]
+        "fri_to_known": np.asarray(fr.fri_correlation_to_known(fri)).squeeze(),                     # []
+        "dsi_to_known": np.asarray(mb.dsi_correlation_to_known(dsi.expand_dims(network_id=[0]))).squeeze(),
+        "pd_to_known": np.asarray(mb.angular_distance_to_known(pd)).squeeze(),                     # [8]
+    }, tuning_types
+
+
+# -- temporary smoke run (Task 3 replaces this with main) --------------------------
+
+def _smoke(mid, precisions=PRECISIONS):
+    """Loads one model as export_reference.py does, runs both batteries at
+    both precisions, and prints each array's shape and dtype. Writes nothing
+    outside target/."""
+    require("FLYVIS_ROOT_DIR" not in os.environ, "setup", "FLYVIS_ROOT_DIR is set in the environment; unset it")
+    mplconfig = ROOT / "target" / "flyvis-indices-mplconfig"
+    for d in (SCRATCH, mplconfig):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+    os.environ["FLYVIS_ROOT_DIR"] = str(SCRATCH)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["MPLCONFIGDIR"] = str(mplconfig)
+    er.copy_models(RESULTS, SCRATCH / "results" / "flow" / "0000", [mid])
+    import torch
+
+    torch.load(SCRATCH / "results" / "flow" / "0000" / mid / er.CHECKPOINT, map_location="cpu", weights_only=True)
+    import flyvis
+    from flyvis.datasets.flashes import Flashes
+    from flyvis.datasets.moving_bar import MovingEdge
+    from flyvis.network import NetworkView
+
+    require(flyvis.device.type == "cpu", "setup", f"flyvis device is {flyvis.device}")
+    require(pathlib.Path(flyvis.root_dir).resolve() == SCRATCH.resolve(), "setup", f"flyvis root is {flyvis.root_dir}")
+    edge_cfg = {**EDGE_CFG_BASE, "device": flyvis.device}
+    print(f"smoke: flyvis {flyvis.__version__}, model {mid}, torch threads {torch.get_num_threads()}", flush=True)
+
+    for prec in precisions:
+        want = torch.float32 if prec == "f32" else torch.float64
+        torch.set_default_dtype(want)
+        t0 = time.monotonic()
+        nv = NetworkView(f"flow/0000/{mid}")
+        best = pathlib.Path(nv.get_checkpoint("best")).resolve()
+        require(best == (SCRATCH / "results" / "flow" / "0000" / mid / er.CHECKPOINT).resolve(), "setup",
+                f"best checkpoint is {best}")
+        network = nv.init_network("best")
+        if prec == "f64":
+            network.double()
+        flash_cfg = dict(FLASH_CFG)
+        flash = responses(network, Flashes(**flash_cfg), flash_cfg)
+        t1 = time.monotonic()
+        edge = responses(network, MovingEdge(**edge_cfg), edge_cfg)
+        t2 = time.monotonic()
+        out, tuning_types = indices(flash, edge)
+        t3 = time.monotonic()
+        print(f"{prec}: flash stimulus {flash['stimulus'].shape} {flash['stimulus'].dtype}, "
+              f"responses {flash['responses'].shape} {flash['responses'].dtype}", flush=True)
+        print(f"{prec}: edge stimulus {edge['stimulus'].shape} {edge['stimulus'].dtype}, "
+              f"responses {edge['responses'].shape} {edge['responses'].dtype}", flush=True)
+        for name, a in out.items():
+            print(f"{prec}: {name:13s} {list(a.shape)} {a.dtype}", flush=True)
+        print(f"{prec}: tuning types {tuning_types}", flush=True)
+        print(f"{prec}: replicas exact; wall flashes {t1 - t0:.1f}s, edges {t2 - t1:.1f}s, "
+              f"indices {t3 - t2:.1f}s, model total {t3 - t0:.1f}s", flush=True)
+        del network, nv, flash, edge
+    torch.set_default_dtype(torch.float32)
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) in (3, 4) and sys.argv[1] == "--smoke" and set(sys.argv[3:]) <= set(PRECISIONS):
+        sys.exit(_smoke(sys.argv[2], tuple(sys.argv[3:]) or PRECISIONS))
+    sys.exit("usage: export_indices.py --smoke MODEL [f32|f64]  (main arrives in Task 3)")
