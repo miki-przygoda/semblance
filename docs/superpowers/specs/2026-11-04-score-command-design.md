@@ -1,8 +1,8 @@
 # `semblance score`: score any network on both axes (gate F)
 
 **Date:** 2026-11-04
-**Status:** design approved by the owner in chat 2026-11-04; spec awaiting
-the owner's review.
+**Status:** design approved by the owner in chat 2026-11-04; spec approved
+2026-11-04.
 **Epic:** 0.4.0 fidelity against recordings, task 5 —
 `docs/project-outline/0.4.0-fidelity-against-recordings/` (not in git):
 gate F; decision 4 and Q7 as revised 2026-11-04; decisions 3, 6 and 7.
