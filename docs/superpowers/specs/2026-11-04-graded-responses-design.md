@@ -1,8 +1,8 @@
 # Graded responses: what a network does over a stimulus battery
 
 **Date:** 2026-11-04
-**Status:** design approved by the owner in chat 2026-11-04; spec awaiting
-the owner's review.
+**Status:** design approved by the owner in chat 2026-11-04; spec approved
+2026-11-04.
 **Epic:** 0.4.0 fidelity against recordings, task 1a —
 `docs/project-outline/0.4.0-fidelity-against-recordings/` (not in git), and
 its `task-1-trait-migration.md`, "1a — additive".
