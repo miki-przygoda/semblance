@@ -16,6 +16,7 @@
 
 mod bounds;
 mod checks;
+pub mod controls;
 mod fingerprint;
 mod inputs;
 mod respond;
