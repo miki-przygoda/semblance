@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use semblance_sim::response::Responses;
+use semblance_sim::response::{Precision, Responses, StimulusResponse};
 
 /// flyvis's `t_pre` for the flash and moving-edge batteries, in seconds.
 pub const T_PRE: f64 = 1.0;
@@ -252,6 +252,145 @@ fn mask_window(dt: f64, t_pre: f64, t_last: f64, keep: impl Fn(f64) -> bool) -> 
     }
 }
 
+/// Per cell type, in `Responses` order, the FRI's two shifted window peaks
+/// `[off, on]`, with the precision `fri` emulates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FriPeaks {
+    cell_types: Vec<String>,
+    precision: Precision,
+    peaks: Vec<[f64; 2]>,
+}
+
+impl FriPeaks {
+    /// Refuses no peaks, a count that is not one pair per cell type, a
+    /// non-finite peak, and (for an f32 run) a peak that is not an f32.
+    pub fn new(cell_types: Vec<String>, precision: Precision, peaks: Vec<[f64; 2]>) -> Result<Self, IndexError> {
+        if peaks.is_empty() {
+            return Err(IndexError::Empty("FRI peaks"));
+        }
+        if peaks.len() != cell_types.len() {
+            return Err(IndexError::Length { what: "FRI peaks", expected: cell_types.len(), found: peaks.len() });
+        }
+        for (t, pair) in peaks.iter().enumerate() {
+            for &v in pair {
+                if !v.is_finite() {
+                    return Err(IndexError::NonFinite(format!("the FRI peak of {}", cell_types[t])));
+                }
+                if precision == Precision::F32 && v as f32 as f64 != v {
+                    return Err(IndexError::NotF32(format!("the FRI peak {v} of {}", cell_types[t])));
+                }
+            }
+        }
+        Ok(FriPeaks { cell_types, precision, peaks })
+    }
+
+    pub fn cell_types(&self) -> &[String] {
+        &self.cell_types
+    }
+
+    pub fn precision(&self) -> Precision {
+        self.precision
+    }
+
+    /// `[off, on]` per cell type.
+    pub fn peaks(&self) -> &[[f64; 2]] {
+        &self.peaks
+    }
+}
+
+/// flyvis's FRI peaks (`flash_responses.py`): over the radius-6 flashes'
+/// shared window, each cell type's minimum over the window and both
+/// intensities, `+= abs(minimum)`, then each intensity's maximum. An f32
+/// run does it in f32, an f64 run in f64. An f32 run's window value that is
+/// not an f32 is refused (`NotF32`).
+pub fn fri_peaks(r: &Responses, b: &BatteryLayout) -> Result<FriPeaks, IndexError> {
+    b.check(r)?;
+    let (off, on, w) = fri_pair(b)?;
+    let missing = || IndexError::CountMismatch { layout: b.len(), responses: r.len() };
+    let (s_off, s_on) = (r.stimulus(off).ok_or_else(missing)?, r.stimulus(on).ok_or_else(missing)?);
+    let mut peaks = Vec::with_capacity(r.cell_types().len());
+    let f32_run = r.precision() == Precision::F32;
+    for t in 0..r.cell_types().len() {
+        let (x, y) = (window_trace(s_off, t, w), window_trace(s_on, t, w));
+        // Responses does not check an f32 run's values: refuse one that is
+        // not an f32 rather than round it silently.
+        if let Some(&v) = x.iter().chain(&y).find(|&&v| f32_run && v as f32 as f64 != v) {
+            return Err(IndexError::NotF32(format!("{}'s value {v} in the FRI window", r.cell_types()[t])));
+        }
+        peaks.push(match r.precision() {
+            Precision::F32 => shifted_peaks_f32(&x, &y),
+            Precision::F64 => shifted_peaks_f64(&x, &y),
+        });
+    }
+    FriPeaks::new(r.cell_types().to_vec(), r.precision(), peaks)
+}
+
+/// The flash response index per cell type, `(on - off) / (on + off + 1e-16)`,
+/// in numpy's dtypes: for an f32 run an f32 numerator and sum, the f64
+/// epsilon add and divide, stored f32; for an f64 run all f64.
+pub fn fri(p: &FriPeaks) -> Result<Vec<f64>, IndexError> {
+    let mut out = Vec::with_capacity(p.peaks.len());
+    for (t, &[off, on]) in p.peaks.iter().enumerate() {
+        let v = match p.precision {
+            Precision::F32 => {
+                let (on, off) = (on as f32, off as f32);
+                let num = on - off;
+                let den = (on + off) as f64 + 1e-16;
+                ((num as f64) / den) as f32 as f64
+            }
+            Precision::F64 => (on - off) / (on + off + 1e-16),
+        };
+        if !v.is_finite() {
+            return Err(IndexError::NonFinite(format!("the FRI of {}", p.cell_types[t])));
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// The OFF and ON radius-6 flashes' positions and their shared window.
+fn fri_pair(b: &BatteryLayout) -> Result<(usize, usize, Window), IndexError> {
+    let mut found: [Option<(usize, Window)>; 2] = [None, None];
+    for (s, (_, stimulus, w)) in b.stimuli().iter().enumerate() {
+        if let Stimulus::Flash { radius: FRI_RADIUS, intensity } = *stimulus {
+            let slot = found.get_mut(intensity as usize).ok_or_else(|| {
+                IndexError::BatteryShape(format!("stimulus {s}: a radius-{FRI_RADIUS} flash of intensity {intensity}, not 0 or 1"))
+            })?;
+            if slot.is_some() {
+                return Err(IndexError::BatteryShape(format!(
+                    "stimulus {s}: a second radius-{FRI_RADIUS} flash of intensity {intensity}"
+                )));
+            }
+            *slot = Some((s, *w));
+        }
+    }
+    match found {
+        [Some((off, a)), Some((on, b))] if a == b => Ok((off, on, a)),
+        [Some(_), Some(_)] => Err(IndexError::BatteryShape(format!("the radius-{FRI_RADIUS} flashes have different windows"))),
+        _ => Err(IndexError::BatteryShape(format!(
+            "the FRI needs one radius-{FRI_RADIUS} flash of intensity 0 and one of intensity 1"
+        ))),
+    }
+}
+
+/// Cell type `t`'s values over window `w` (checked against the stimulus by
+/// `BatteryLayout::check`).
+fn window_trace(s: &StimulusResponse, t: usize, w: Window) -> Vec<f64> {
+    s.trace(t).map(|tr| tr.skip(w.first()).take(w.n_frames()).collect()).unwrap_or_default()
+}
+
+fn shifted_peaks_f32(off: &[f64], on: &[f64]) -> [f64; 2] {
+    let shift = off.iter().chain(on).map(|&v| v as f32).fold(f32::INFINITY, f32::min).abs();
+    let peak = |vals: &[f64]| vals.iter().map(|&v| v as f32 + shift).fold(f32::NEG_INFINITY, f32::max) as f64;
+    [peak(off), peak(on)]
+}
+
+fn shifted_peaks_f64(off: &[f64], on: &[f64]) -> [f64; 2] {
+    let shift = off.iter().chain(on).copied().fold(f64::INFINITY, f64::min).abs();
+    let peak = |vals: &[f64]| vals.iter().map(|&v| v + shift).fold(f64::NEG_INFINITY, f64::max);
+    [peak(off), peak(on)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +530,150 @@ mod tests {
         }
         let e = IndexError::BadStimulus { stimulus: 7, reason: "edge angle 360 is not below 360".into() };
         assert_eq!(e.to_string(), "stimulus 7: edge angle 360 is not below 360");
+    }
+
+    /// The FRI battery used below: radius -1 and radius 6 flashes, both
+    /// intensities, 5 frames each, the window frames 1..=3.
+    fn fri_layout() -> BatteryLayout {
+        let flash = |radius, intensity| Stimulus::Flash { radius, intensity };
+        BatteryLayout::new(vec![
+            entry("full off", flash(-1, 0), window(1, 3)),
+            entry("off", flash(6, 0), window(1, 3)),
+            entry("on", flash(6, 1), window(1, 3)),
+            entry("full on", flash(-1, 1), window(1, 3)),
+        ])
+        .unwrap()
+    }
+
+    const FRI_STIMULI: [(&str, usize); 4] = [("full off", 5), ("off", 5), ("on", 5), ("full on", 5)];
+
+    #[test]
+    fn fri_peaks_shift_by_the_minimum_over_both_intensities() {
+        // A: OFF window -2, 1, 0 and ON window -1, 3, 2, so min -2, shift +2.
+        // B: OFF window 1, 2, 3 and ON window 2, 4, 1, so min 1, shift +1:
+        // flyvis adds |min|, it does not subtract min.
+        let a = [[9.0, -2.0, 1.0, 0.0, 9.0], [9.0, -1.0, 3.0, 2.0, 9.0]];
+        let b = [[0.0, 1.0, 2.0, 3.0, 0.0], [0.0, 2.0, 4.0, 1.0, 0.0]];
+        let r = responses(&["A", "B"], Precision::F64, &FRI_STIMULI, |s, f, t| match s {
+            1 | 2 => [a, b][t][s - 1][f],
+            _ => -100.0, // the radius -1 flashes never feed the FRI
+        });
+        let p = fri_peaks(&r, &fri_layout()).unwrap();
+        assert_eq!(p.peaks(), &[[3.0, 5.0], [4.0, 5.0]]);
+        assert_eq!((p.precision(), p.cell_types()), (Precision::F64, &["A".to_string(), "B".to_string()][..]));
+        let fri = fri(&p).unwrap();
+        assert_eq!(fri, vec![(5.0 - 3.0) / (5.0 + 3.0 + 1e-16), (5.0 - 4.0) / (5.0 + 4.0 + 1e-16)]);
+    }
+
+    #[test]
+    fn an_f32_runs_fri_follows_numpys_dtypes_step_by_step() {
+        // OFF peak v = 1e-8 (an f32), ON peak 1. In f32, 1 - v and 1 + v are
+        // both 1.0, and 1.0 / (1.0 + 1e-16) is 1.0; in f64 they are not.
+        let v = 1e-8f32 as f64;
+        let fill = |s: usize, f: usize, _t: usize| match (s, f) {
+            (1, 2) => v,
+            (2, 2) => 1.0,
+            _ => 0.0,
+        };
+        let f32_run = responses(&["A"], Precision::F32, &FRI_STIMULI, fill);
+        let f64_run = responses(&["A"], Precision::F64, &FRI_STIMULI, fill);
+        let x = fri(&fri_peaks(&f32_run, &fri_layout()).unwrap()).unwrap();
+        let y = fri(&fri_peaks(&f64_run, &fri_layout()).unwrap()).unwrap();
+        assert_eq!(x, vec![1.0]);
+        assert!(y[0] < 1.0, "{}", y[0]);
+        assert_eq!(y, vec![(1.0 - v) / (1.0 + v + 1e-16)]);
+        // every stored f32-run FRI is an f32
+        assert_eq!(x[0] as f32 as f64, x[0]);
+    }
+
+    #[test]
+    fn an_f32_runs_epsilon_is_added_in_f64_and_the_shift_in_f32() {
+        // Peaks [off 0, on 2^-54]: only numpy's promotion gives this value.
+        // An f32 epsilon gives 0.3569593131542206, no epsilon 1.0, and all
+        // f64 without the final f32 rounding 0.35695929707772656 (the f64
+        // run's value).
+        let tiny = 2f64.powi(-54);
+        let p = FriPeaks::new(vec!["A".into()], Precision::F32, vec![[0.0, tiny]]).unwrap();
+        assert_eq!(fri(&p).unwrap(), vec![0.3569592833518982]);
+        let p = FriPeaks::new(vec!["A".into()], Precision::F64, vec![[0.0, tiny]]).unwrap();
+        assert_eq!(fri(&p).unwrap(), vec![0.35695929707772656]);
+        // A nonzero shift: OFF window -1, 0.25, 0 and ON window 0, 0.5, 0, so
+        // min -1, shift +1 in f32: peaks [1.25, 1.5].
+        let fill = |s: usize, f: usize, _t: usize| match (s, f) {
+            (1, 1) => -1.0,
+            (1, 2) => 0.25,
+            (2, 2) => 0.5,
+            _ => 0.0,
+        };
+        let r = responses(&["A"], Precision::F32, &FRI_STIMULI, fill);
+        let p = fri_peaks(&r, &fri_layout()).unwrap();
+        assert_eq!(p.peaks(), &[[1.25, 1.5]]);
+        assert_eq!(fri(&p).unwrap(), vec![((0.25f32 as f64) / (2.75f32 as f64 + 1e-16)) as f32 as f64]);
+    }
+
+    #[test]
+    fn fri_peaks_refuse_an_f32_run_holding_non_f32_values() {
+        // Responses does not check an f32 run's values; fri_peaks must not
+        // round them silently.
+        let r = responses(&["A"], Precision::F32, &FRI_STIMULI, |_, _, _| 0.1);
+        assert!(matches!(fri_peaks(&r, &fri_layout()), Err(IndexError::NotF32(_))));
+    }
+
+    #[test]
+    fn the_fri_needs_exactly_one_radius_6_flash_per_intensity_in_one_window() {
+        let r = responses(&["A"], Precision::F64, &FRI_STIMULI, |_, _, _| 0.5);
+        let flash = |radius, intensity| Stimulus::Flash { radius, intensity };
+        let with = |second: Stimulus, w: Window| {
+            BatteryLayout::new(vec![
+                entry("full off", flash(-1, 0), window(1, 3)),
+                entry("off", flash(6, 0), window(1, 3)),
+                entry("on", second, w),
+                entry("full on", flash(-1, 1), window(1, 3)),
+            ])
+            .unwrap()
+        };
+        for (second, w) in [
+            (flash(-1, 1), window(1, 3)), // no ON radius-6 flash
+            (flash(6, 0), window(1, 3)),  // two OFF ones
+            (flash(6, 2), window(1, 3)),  // an intensity that is neither
+            (flash(6, 1), window(1, 2)),  // two windows
+        ] {
+            let e = fri_peaks(&r, &with(second, w));
+            assert!(matches!(e, Err(IndexError::BatteryShape(_))), "{second:?} {w:?}: {e:?}");
+        }
+    }
+
+    #[test]
+    fn fri_peaks_refuse_responses_the_layout_does_not_describe() {
+        // chore defect 2's analogue on the new path
+        let r = responses(&["A"], Precision::F64, &FRI_STIMULI[..3], |_, _, _| 0.5);
+        assert_eq!(fri_peaks(&r, &fri_layout()), Err(IndexError::CountMismatch { layout: 4, responses: 3 }));
+    }
+
+    #[test]
+    fn fri_peaks_built_by_hand_are_checked() {
+        let names = || vec!["A".to_string(), "B".to_string()];
+        assert_eq!(FriPeaks::new(vec![], Precision::F64, vec![]), Err(IndexError::Empty("FRI peaks")));
+        assert_eq!(
+            FriPeaks::new(names(), Precision::F64, vec![[0.0, 1.0]]),
+            Err(IndexError::Length { what: "FRI peaks", expected: 2, found: 1 })
+        );
+        assert!(matches!(
+            FriPeaks::new(names(), Precision::F64, vec![[0.0, 1.0], [f64::NAN, 1.0]]),
+            Err(IndexError::NonFinite(_))
+        ));
+        assert!(matches!(
+            FriPeaks::new(names(), Precision::F32, vec![[0.0, 1.0], [0.1, 1.0]]),
+            Err(IndexError::NotF32(_))
+        ));
+        assert!(FriPeaks::new(names(), Precision::F32, vec![[0.0, 1.0], [0.5, 1.0]]).is_ok());
+    }
+
+    #[test]
+    fn an_fri_that_is_not_finite_is_refused() {
+        // off = -1e-16, on = 0: the numerator is 1e-16
+        let p = FriPeaks::new(vec!["A".into()], Precision::F64, vec![[-1e-16, 0.0]]).unwrap();
+        // on + off + 1e-16 is 0, so the quotient is not finite
+        assert!(matches!(fri(&p), Err(IndexError::NonFinite(_))), "{:?}", fri(&p));
     }
 }
