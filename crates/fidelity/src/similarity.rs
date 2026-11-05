@@ -2,6 +2,8 @@
 //! as debiased linear CKA over each cell type's central response time
 //! course, plus Zhou & Hasler's own variant, computed exactly and reported.
 //!
+//! Zhou & Hasler's variant ([`peak_vectors`], [`cosine_rdm`], [`spearman`], [`kendall_tau_a`], [`cka_biased`]) is reimplemented from their paper's description (their code has no licence) and is reported, never gated.
+//!
 //! Pure, over task 1a's [`Responses`]. Every malformed input is a
 //! [`SimilarityError`], never a score.
 //!
@@ -284,6 +286,264 @@ fn frobenius_sq_symmetric(m: &[f64], p: usize) -> f64 {
     s
 }
 
+/// The cell types in Zhou & Hasler's peak vectors: flyvis's 65.
+pub const ZH_TYPES: usize = 65;
+
+/// A representational dissimilarity matrix over `n` conditions, row-major.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rdm {
+    n: usize,
+    d: Vec<f64>,
+}
+
+impl Rdm {
+    /// Refuses fewer than 2 conditions, a length other than n * n, a
+    /// non-finite entry, and an asymmetric matrix.
+    pub fn new(n: usize, d: Vec<f64>) -> Result<Rdm, SimilarityError> {
+        if n < 2 {
+            return Err(SimilarityError::TooFew { what: "conditions", need: 2, found: n });
+        }
+        if d.len() != n * n {
+            return Err(SimilarityError::Length { what: "RDM entries", expected: n * n, found: d.len() });
+        }
+        if let Some(k) = d.iter().position(|v| !v.is_finite()) {
+            return Err(SimilarityError::NonFinite(format!("RDM entry ({}, {})", k / n, k % n)));
+        }
+        for i in 0..n {
+            for j in i + 1..n {
+                if d[i * n + j] != d[j * n + i] {
+                    return Err(SimilarityError::NotSymmetric { i, j });
+                }
+            }
+        }
+        Ok(Rdm { n, d })
+    }
+
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    pub fn get(&self, i: usize, j: usize) -> Option<f64> {
+        if i < self.n && j < self.n { Some(self.d[i * self.n + j]) } else { None }
+    }
+
+    /// The entries above the diagonal, row by row.
+    pub fn upper(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.n * (self.n - 1) / 2);
+        for i in 0..self.n {
+            out.extend_from_slice(&self.d[i * self.n + i + 1..(i + 1) * self.n]);
+        }
+        out
+    }
+
+    /// The elementwise mean of RDMs over the same conditions, summed in order.
+    pub fn mean(rdms: &[Rdm]) -> Result<Rdm, SimilarityError> {
+        let first = rdms.first().ok_or(SimilarityError::TooFew { what: "RDMs", need: 1, found: 0 })?;
+        let mut sum = vec![0.0f64; first.d.len()];
+        for r in rdms {
+            if r.n != first.n {
+                return Err(SimilarityError::Length { what: "RDM conditions", expected: first.n, found: r.n });
+            }
+            for (s, &v) in sum.iter_mut().zip(&r.d) {
+                *s += v;
+            }
+        }
+        let k = rdms.len() as f64;
+        Rdm::new(first.n, sum.into_iter().map(|s| s / k).collect())
+    }
+}
+
+/// Zhou & Hasler's response: per condition (stimulus), each cell type's
+/// peak raw central voltage over the whole trace. No rectification, no
+/// baseline, no time bins.
+pub fn peak_vectors(r: &Responses) -> Result<Vec<[f64; ZH_TYPES]>, SimilarityError> {
+    if r.cell_types().len() != ZH_TYPES {
+        return Err(SimilarityError::Length { what: "cell types", expected: ZH_TYPES, found: r.cell_types().len() });
+    }
+    let mut out = Vec::with_capacity(r.len());
+    for s in 0..r.len() {
+        let st = r.stimulus(s).ok_or(SimilarityError::TooFew { what: "stimuli", need: s + 1, found: r.len() })?;
+        let mut v = [f64::NEG_INFINITY; ZH_TYPES];
+        for f in 0..st.n_frames() {
+            if let Some(row) = st.frame(f) {
+                for (peak, &x) in v.iter_mut().zip(row) {
+                    if x > *peak {
+                        *peak = x;
+                    }
+                }
+            }
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// The elementwise mean over models of their peak vectors: the ensemble
+/// means Zhou & Hasler's biased CKA is computed on.
+pub fn mean_peaks(per_model: &[Vec<[f64; ZH_TYPES]>]) -> Result<Vec<[f64; ZH_TYPES]>, SimilarityError> {
+    let first = per_model.first().ok_or(SimilarityError::TooFew { what: "models", need: 1, found: 0 })?;
+    let mut sum = vec![[0.0f64; ZH_TYPES]; first.len()];
+    for m in per_model {
+        if m.len() != first.len() {
+            return Err(SimilarityError::Length { what: "a model's conditions", expected: first.len(), found: m.len() });
+        }
+        for (s, v) in sum.iter_mut().zip(m) {
+            for (a, &b) in s.iter_mut().zip(v) {
+                *a += b;
+            }
+        }
+    }
+    let k = per_model.len() as f64;
+    Ok(sum.into_iter().map(|s| s.map(|a| a / k)).collect())
+}
+
+/// Zhou & Hasler's cosine RDM: `1 - (a.b) / (|a| |b| + 1e-10)` for every
+/// pair of conditions; the diagonal is 0 (only the upper triangle is read).
+pub fn cosine_rdm(v: &[[f64; ZH_TYPES]]) -> Result<Rdm, SimilarityError> {
+    let n = v.len();
+    if n < 2 {
+        return Err(SimilarityError::TooFew { what: "conditions", need: 2, found: n });
+    }
+    if let Some(k) = v.iter().position(|x| x.iter().any(|y| !y.is_finite())) {
+        return Err(SimilarityError::NonFinite(format!("condition {k}'s peak vector")));
+    }
+    let norms: Vec<f64> = v.iter().map(|x| dot(x, x).sqrt()).collect();
+    let mut d = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in i + 1..n {
+            let x = 1.0 - dot(&v[i], &v[j]) / (norms[i] * norms[j] + 1e-10);
+            d[i * n + j] = x;
+            d[j * n + i] = x;
+        }
+    }
+    Rdm::new(n, d)
+}
+
+/// Spearman's rho over the two RDMs' upper triangles: the Pearson r of their
+/// ranks, ties taking their average rank.
+pub fn spearman(a: &Rdm, b: &Rdm) -> Result<f64, SimilarityError> {
+    let (ua, ub) = upper_pair(a, b)?;
+    let r = pearson_population(&ranks(&ua), &ranks(&ub));
+    if r.is_finite() { Ok(r) } else { Err(SimilarityError::Degenerate("an RDM's upper triangle is constant".into())) }
+}
+
+/// Kendall's tau-a over the two RDMs' upper triangles: (concordant -
+/// discordant) / (m (m - 1) / 2); a pair tied in either counts as neither.
+pub fn kendall_tau_a(a: &Rdm, b: &Rdm) -> Result<f64, SimilarityError> {
+    let (ua, ub) = upper_pair(a, b)?;
+    let m = ua.len();
+    let (mut concordant, mut discordant) = (0i64, 0i64);
+    for i in 0..m {
+        for j in i + 1..m {
+            let sa = (ua[i] > ua[j]) as i64 - (ua[i] < ua[j]) as i64;
+            let sb = (ub[i] > ub[j]) as i64 - (ub[i] < ub[j]) as i64;
+            match sa * sb {
+                1 => concordant += 1,
+                -1 => discordant += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok((concordant - discordant) as f64 / (m * (m - 1) / 2) as f64)
+}
+
+/// Zhou & Hasler's linear, biased CKA, on (ensemble-mean) peak matrices:
+/// columns centred, then `|Xc'Yc|_F^2 / sqrt(|Xc'Xc|_F^2 |Yc'Yc|_F^2)`.
+pub fn cka_biased(x: &[[f64; ZH_TYPES]], y: &[[f64; ZH_TYPES]]) -> Result<f64, SimilarityError> {
+    if x.len() != y.len() {
+        return Err(SimilarityError::RowMismatch { x: x.len(), y: y.len() });
+    }
+    if x.len() < 2 {
+        return Err(SimilarityError::TooFew { what: "conditions", need: 2, found: x.len() });
+    }
+    if x.iter().chain(y).any(|r| r.iter().any(|v| !v.is_finite())) {
+        return Err(SimilarityError::NonFinite("a peak matrix".into()));
+    }
+    let (xc, yc) = (centred(x), centred(y));
+    let (xy, xx, yy) = (cross(&xc, &yc), cross(&xc, &xc), cross(&yc, &yc));
+    let den = (frobenius_sq_symmetric(&xx, ZH_TYPES) * frobenius_sq_symmetric(&yy, ZH_TYPES)).sqrt();
+    if !(den.is_finite() && den > 0.0) {
+        return Err(SimilarityError::Degenerate("a peak matrix has no variance across conditions".into()));
+    }
+    let c = frobenius_sq_symmetric(&xy, ZH_TYPES) / den;
+    if c.is_finite() { Ok(c) } else { Err(SimilarityError::NonFinite("biased CKA".into())) }
+}
+
+fn upper_pair(a: &Rdm, b: &Rdm) -> Result<(Vec<f64>, Vec<f64>), SimilarityError> {
+    if a.n != b.n {
+        return Err(SimilarityError::Length { what: "RDM conditions", expected: a.n, found: b.n });
+    }
+    let (ua, ub) = (a.upper(), b.upper());
+    if ua.len() < 2 {
+        return Err(SimilarityError::TooFew { what: "upper-triangle entries", need: 2, found: ua.len() });
+    }
+    Ok((ua, ub))
+}
+
+/// 1-based ranks, ties averaged.
+fn ranks(v: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..v.len()).collect();
+    order.sort_by(|&i, &j| v[i].total_cmp(&v[j]));
+    let mut out = vec![0.0; v.len()];
+    let mut start = 0;
+    while start < order.len() {
+        let mut end = start + 1;
+        while end < order.len() && v[order[end]] == v[order[start]] {
+            end += 1;
+        }
+        let rank = (start + 1 + end) as f64 / 2.0;
+        for &k in &order[start..end] {
+            out[k] = rank;
+        }
+        start = end;
+    }
+    out
+}
+
+/// Pearson's r with population moments, sums in order; NaN when an input
+/// is constant.
+fn pearson_population(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+    let (mut cov, mut va, mut vb) = (0.0f64, 0.0f64, 0.0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        let (dx, dy) = (x - ma, y - mb);
+        cov += dx * dy;
+        va += dx * dx;
+        vb += dy * dy;
+    }
+    (cov / n) / ((va / n).sqrt() * (vb / n).sqrt())
+}
+
+/// Each column minus its mean (summed in order, over the rows).
+fn centred(m: &[[f64; ZH_TYPES]]) -> Vec<[f64; ZH_TYPES]> {
+    let mut mean = [0.0f64; ZH_TYPES];
+    for row in m {
+        for (s, &v) in mean.iter_mut().zip(row) {
+            *s += v;
+        }
+    }
+    let n = m.len() as f64;
+    for s in mean.iter_mut() {
+        *s /= n;
+    }
+    m.iter().map(|row| std::array::from_fn(|t| row[t] - mean[t])).collect()
+}
+
+/// `A'B` for row-major condition-by-type matrices, as a ZH_TYPES x ZH_TYPES
+/// row-major vector, each entry summed over the rows in order.
+fn cross(a: &[[f64; ZH_TYPES]], b: &[[f64; ZH_TYPES]]) -> Vec<f64> {
+    let mut m = vec![0.0f64; ZH_TYPES * ZH_TYPES];
+    for (ra, rb) in a.iter().zip(b) {
+        for (row, &x) in m.chunks_exact_mut(ZH_TYPES).zip(ra) {
+            for (cell, &y) in row.iter_mut().zip(rb) {
+                *cell += x * y;
+            }
+        }
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +724,96 @@ mod tests {
         for (e, want) in cases {
             assert_eq!(e.to_string(), want);
         }
+    }
+
+    /// A 65-wide vector with `first` in its leading columns, zeros elsewhere.
+    fn wide(first: &[f64]) -> [f64; ZH_TYPES] {
+        let mut v = [0.0; ZH_TYPES];
+        v[..first.len()].copy_from_slice(first);
+        v
+    }
+
+    fn rdm3(upper: [f64; 3]) -> Rdm {
+        let [a, b, c] = upper;
+        Rdm::new(3, vec![0.0, a, b, a, 0.0, c, b, c, 0.0]).unwrap()
+    }
+
+    #[test]
+    fn peak_vectors_are_each_conditions_raw_maximum() {
+        let mut r = Responses::new(names(ZH_TYPES), 0.005, Precision::F64).unwrap();
+        let frames = |k: f64| (0..3).flat_map(|f| (0..ZH_TYPES).map(move |t| -(t as f64) + f as f64 * k)).collect::<Vec<f64>>();
+        r.push("a".into(), 3, frames(1.0)).unwrap();
+        r.push("b".into(), 3, frames(-1.0)).unwrap();
+        let r = r.finish().unwrap();
+        let v = peak_vectors(&r).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0][0], v[0][64]), (2.0, -62.0), "the last frame's, raw");
+        assert_eq!((v[1][0], v[1][64]), (0.0, -64.0), "the first frame's, not rectified");
+        let few = Responses::new(names(3), 0.005, Precision::F64).unwrap();
+        let mut few = few;
+        few.push("a".into(), 1, vec![0.0; 3]).unwrap();
+        assert_eq!(peak_vectors(&few.finish().unwrap()), Err(SimilarityError::Length { what: "cell types", expected: 65, found: 3 }));
+    }
+
+    #[test]
+    fn the_cosine_rdm_adds_their_epsilon_to_the_norms() {
+        let v = [wide(&[1.0, 0.0]), wide(&[0.0, 1.0]), wide(&[1.0, 1.0])];
+        let d = cosine_rdm(&v).unwrap();
+        assert_eq!(d.n(), 3);
+        assert_eq!(d.get(0, 1), Some(1.0));
+        assert_eq!(d.get(0, 2), Some(1.0 - 1.0 / (2f64.sqrt() + 1e-10)));
+        assert_eq!(d.get(2, 0), d.get(0, 2));
+        assert_eq!(d.get(1, 1), Some(0.0));
+        assert_eq!(d.get(3, 0), None);
+        assert_eq!(d.upper(), vec![1.0, 1.0 - 1.0 / (2f64.sqrt() + 1e-10), 1.0 - 1.0 / (2f64.sqrt() + 1e-10)]);
+        assert_eq!(cosine_rdm(&v[..1]), Err(SimilarityError::TooFew { what: "conditions", need: 2, found: 1 }));
+        assert!(matches!(cosine_rdm(&[wide(&[f64::NAN]), wide(&[1.0])]), Err(SimilarityError::NonFinite(_))));
+    }
+
+    #[test]
+    fn spearman_and_kendall_tau_a_handle_ties_by_hand() {
+        let (a, b) = (rdm3([1.0, 2.0, 2.0]), rdm3([1.0, 2.0, 3.0]));
+        assert!((spearman(&a, &b).unwrap() - 0.8660254037844386).abs() <= 1e-15);
+        assert_eq!(kendall_tau_a(&a, &b), Ok(2.0 / 3.0));
+        assert_eq!(kendall_tau_a(&b, &b), Ok(1.0));
+        assert_eq!(kendall_tau_a(&b, &rdm3([3.0, 2.0, 1.0])), Ok(-1.0));
+        assert!(matches!(spearman(&rdm3([1.0, 1.0, 1.0]), &b), Err(SimilarityError::Degenerate(_))));
+        let two = Rdm::new(2, vec![0.0, 1.0, 1.0, 0.0]).unwrap();
+        assert_eq!(kendall_tau_a(&two, &two), Err(SimilarityError::TooFew { what: "upper-triangle entries", need: 2, found: 1 }));
+        let four = Rdm::new(4, vec![0.0; 16]).unwrap();
+        assert_eq!(spearman(&b, &four), Err(SimilarityError::Length { what: "RDM conditions", expected: 3, found: 4 }));
+    }
+
+    #[test]
+    fn an_rdm_is_square_symmetric_and_finite() {
+        assert_eq!(Rdm::new(2, vec![0.0; 3]), Err(SimilarityError::Length { what: "RDM entries", expected: 4, found: 3 }));
+        assert_eq!(Rdm::new(3, vec![0.0, 1.0, 2.0, 1.0, 0.0, 3.0, 2.5, 3.0, 0.0]), Err(SimilarityError::NotSymmetric { i: 0, j: 2 }));
+        assert!(matches!(Rdm::new(2, vec![0.0, f64::NAN, f64::NAN, 0.0]), Err(SimilarityError::NonFinite(_))));
+        let m = Rdm::mean(&[rdm3([1.0, 2.0, 3.0]), rdm3([3.0, 2.0, 1.0])]).unwrap();
+        assert_eq!(m.upper(), vec![2.0, 2.0, 2.0]);
+        assert_eq!(Rdm::mean(&[]), Err(SimilarityError::TooFew { what: "RDMs", need: 1, found: 0 }));
+    }
+
+    #[test]
+    fn biased_cka_matches_a_hand_computation_and_is_1_on_itself() {
+        let x = [wide(&[1.0, 0.0]), wide(&[0.0, 1.0]), wide(&[-1.0, -1.0])];
+        let y = [wide(&[1.0, 0.0]), wide(&[0.0, 2.0]), wide(&[-1.0, -2.0])];
+        assert!((cka_biased(&x, &y).unwrap() - 0.9068453126375146).abs() <= 1e-15);
+        assert_eq!(cka_biased(&x, &x), Ok(1.0));
+        assert_eq!(cka_biased(&x, &y[..2]), Err(SimilarityError::RowMismatch { x: 3, y: 2 }));
+        assert_eq!(cka_biased(&x[..1], &y[..1]), Err(SimilarityError::TooFew { what: "conditions", need: 2, found: 1 }));
+        assert!(matches!(cka_biased(&[wide(&[f64::NAN]), wide(&[1.0])], &y[..2]), Err(SimilarityError::NonFinite(_))));
+        let flat = [wide(&[1.0]), wide(&[1.0]), wide(&[1.0])];
+        assert!(matches!(cka_biased(&flat, &y), Err(SimilarityError::Degenerate(_))));
+    }
+
+    #[test]
+    fn mean_peaks_average_the_models_elementwise() {
+        let a = vec![wide(&[1.0, 2.0]), wide(&[3.0])];
+        let b = vec![wide(&[3.0, 4.0]), wide(&[5.0])];
+        let m = mean_peaks(&[a.clone(), b]).unwrap();
+        assert_eq!((m[0][0], m[0][1], m[1][0]), (2.0, 3.0, 4.0));
+        assert_eq!(mean_peaks(&[]), Err(SimilarityError::TooFew { what: "models", need: 1, found: 0 }));
+        assert_eq!(mean_peaks(&[a, vec![wide(&[0.0])]]), Err(SimilarityError::Length { what: "a model's conditions", expected: 2, found: 1 }));
     }
 }
