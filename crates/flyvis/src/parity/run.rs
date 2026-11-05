@@ -331,14 +331,20 @@ fn settle_state<R: Precision>(
     centre: &[usize],
 ) -> Result<(Graded<R>, Vec<f64>), ParityError> {
     let p = f.ensemble.model(model).ok_or_else(|| mismatch(format!("model {model} is not in the ensemble")))?;
-    settle_core::<R>(f, p, dt.dt, dt.n_settle, counts, centre, Ctx::Run(run))
+    settle_core::<R>(f, &f.net, &f.groups, p, dt.dt, dt.n_settle, counts, centre, Ctx::Run(run))
 }
 
-/// `settle_state` for any parameters: builds the integrator for `p` at `dt`
-/// and settles it for `n_settle` steps of `pre_stim_value` on every input
-/// node, recording the centre values after every step.
+/// `settle_state` for any parameters on any network over the fixtures'
+/// nodes: builds the integrator for `p` on `net` at `dt`, with `groups[e]`
+/// naming edge `e`'s synapse-count group, and settles it for `n_settle`
+/// steps of `pre_stim_value` on every input node, recording the centre
+/// values after every step. `groups` must have one entry per edge of `net`,
+/// each below 2355; `respond_network` checks that before calling.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn settle_core<R: Precision>(
     f: &Fixtures,
+    net: &TypedNetwork,
+    groups: &[u32],
     p: &ModelParams,
     dt: f64,
     n_settle: usize,
@@ -346,20 +352,19 @@ pub(super) fn settle_core<R: Precision>(
     centre: &[usize],
     ctx: Ctx,
 ) -> Result<(Graded<R>, Vec<f64>), ParityError> {
-    let count: Vec<R> = f
-        .groups
+    let count: Vec<R> = groups
         .iter()
         .enumerate()
         .map(|(e, &g)| match counts {
             Counts::Torch => R::torch_count(g as usize),
             Counts::Libm => R::libm_count(g as usize),
-            Counts::IntegerNSyn => R::from_f32(f.net.edge_n_syn()[e]),
+            Counts::IntegerNSyn => R::from_f32(net.edge_n_syn()[e]),
         })
         .collect();
     let params = GradedParams { bias: &p.bias, time_const: &p.time_const, syn_strength: &p.syn_strength, edge_syn_count: &count };
-    let mut g = Graded::<R>::new(&f.net, &params, dt).map_err(|e| ctx.graded(e))?;
+    let mut g = Graded::<R>::new(net, &params, dt).map_err(|e| ctx.graded(e))?;
 
-    let mut input = vec![R::ZERO; f.net.num_nodes()];
+    let mut input = vec![R::ZERO; net.num_nodes()];
     for &i in f.input_nodes.iter().flatten() {
         input[i as usize] = R::from_f64(f.manifest.pre_stim_value);
     }
@@ -367,7 +372,7 @@ pub(super) fn settle_core<R: Precision>(
     for step in 0..n_settle {
         g.step(&input).map_err(|e| ctx.graded(e))?;
         if let Some(i) = g.state().iter().position(|v| !v.is_finite()) {
-            return Err(ctx.settle_non_finite(i, cell_type(&f.net, i).to_string(), step));
+            return Err(ctx.settle_non_finite(i, cell_type(net, i).to_string(), step));
         }
         // settle step `step` is the state after step + 1 Euler steps
         rust_centre.extend(centre.iter().map(|&i| g.state()[i].to_f64()));
