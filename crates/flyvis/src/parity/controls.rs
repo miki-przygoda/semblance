@@ -6,12 +6,15 @@
 //! next seed in its sequence ([`draw_stable`]), as Zhou & Hasler
 //! rejection-sample. Running the draws through a battery and scoring them is
 //! gate C, in `validate --ensemble`.
+//! The rewired control ([`rewire`]) is ours, not Zhou & Hasler's.
 //!
 //! Spec: docs/superpowers/specs/2026-11-04-representational-axis-design.md,
 //! section 2.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use semblance_connectome::{TypedNetwork, TypedNetworkParts};
 use semblance_rng::Rng;
 
 use super::ParityError;
@@ -227,6 +230,101 @@ pub fn draw_stable<T>(
     Err(DrawError::Unstable { control, model, redraws })
 }
 
+/// The most draws one connection type gets for an unused (source, target)
+/// pair before `rewire` gives up.
+pub const MAX_SOURCE_TRIES: usize = 1000;
+
+/// The rewired control's network. Our addition, not Zhou & Hasler's (they
+/// do not rewire; owner's answer Q5): it tests the topology, where their
+/// shuffles test the strengths.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rewired {
+    /// The same cell types and nodes, the connection types with new
+    /// sources, the surviving edges in their original order.
+    pub net: TypedNetwork,
+    /// Per surviving edge, its original edge's synapse-count group.
+    pub groups: Vec<u32>,
+    /// Per surviving edge, the index of the original edge it was rebuilt from.
+    pub kept: Vec<u32>,
+    /// Per connection type, its new source cell type.
+    pub sources: Vec<u16>,
+    /// Edges dropped because the new source type has no node in their
+    /// source column; the caller prints it.
+    pub dropped: usize,
+}
+
+/// The rewired control: each connection type, in index order, draws a new
+/// presynaptic cell type uniformly from all of them (`rng.below`),
+/// redrawing while an earlier connection type already holds that (source,
+/// target) pair, at most [`MAX_SOURCE_TRIES`] times. Each edge is rebuilt
+/// from the new type's node in its old source's column `(u, v)`, keeping its
+/// target, connection type (so its sign and strength), synapse count and
+/// synapse-count group; an edge whose column the new type lacks is dropped.
+/// Refused (`Usage`): `groups` not one per edge, a connection type that
+/// finds no unused pair, a result `TypedNetwork::new` refuses.
+pub fn rewire(net: &TypedNetwork, groups: &[u32], rng: &mut Rng) -> Result<Rewired, ParityError> {
+    if groups.len() != net.num_edges() {
+        return Err(ParityError::Usage(format!("rewire: {} synapse-count groups for {} edges", groups.len(), net.num_edges())));
+    }
+    let n_types = net.cell_types().len();
+    if n_types == 0 && !net.conn_types().is_empty() {
+        return Err(ParityError::Usage("rewire: connection types but no cell types".into()));
+    }
+    let mut taken: HashSet<(u16, u16)> = HashSet::new();
+    let mut sources = Vec::with_capacity(net.conn_types().len());
+    for (c, &(_, target)) in net.conn_types().iter().enumerate() {
+        let mut found = None;
+        for _ in 0..MAX_SOURCE_TRIES {
+            let s = rng.below(n_types) as u16;
+            if taken.insert((s, target)) {
+                found = Some(s);
+                break;
+            }
+        }
+        let s = found.ok_or_else(|| {
+            ParityError::Usage(format!("rewire: connection type {c} found no unused source type in {MAX_SOURCE_TRIES} draws"))
+        })?;
+        sources.push(s);
+    }
+
+    let mut at: HashMap<(u16, i16, i16), u32> = HashMap::with_capacity(net.num_nodes());
+    for (node, ((&t, &u), &v)) in net.node_cell_type().iter().zip(net.node_u()).zip(net.node_v()).enumerate() {
+        at.insert((t, u, v), node as u32);
+    }
+    let (mut edge_source, mut edge_target, mut edge_conn_type, mut edge_n_syn) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut kept_groups, mut kept) = (Vec::new(), Vec::new());
+    let mut dropped = 0usize;
+    for (e, &g) in groups.iter().enumerate() {
+        let c = net.edge_conn_type()[e];
+        let old = net.edge_source()[e] as usize;
+        match at.get(&(sources[c as usize], net.node_u()[old], net.node_v()[old])) {
+            Some(&new) => {
+                edge_source.push(new);
+                edge_target.push(net.edge_target()[e]);
+                edge_conn_type.push(c);
+                edge_n_syn.push(net.edge_n_syn()[e]);
+                kept_groups.push(g);
+                kept.push(e as u32);
+            }
+            None => dropped += 1,
+        }
+    }
+    let parts = TypedNetworkParts {
+        cell_types: net.cell_types().to_vec(),
+        node_cell_type: net.node_cell_type().to_vec(),
+        node_u: net.node_u().to_vec(),
+        node_v: net.node_v().to_vec(),
+        conn_types: sources.iter().zip(net.conn_types()).map(|(&s, &(_, t))| (s, t)).collect(),
+        conn_sign: net.conn_sign().to_vec(),
+        edge_source,
+        edge_target,
+        edge_conn_type,
+        edge_n_syn,
+    };
+    let rewired = TypedNetwork::new(parts).map_err(|e| ParityError::Usage(format!("rewire: {e}")))?;
+    Ok(Rewired { net: rewired, groups: kept_groups, kept, sources, dropped })
+}
+
 /// The 734 parameters in row order: biases, time constants, strengths.
 fn slots(p: &ModelParams) -> impl Iterator<Item = &f32> + '_ {
     p.bias.iter().chain(&p.time_const).chain(&p.syn_strength)
@@ -240,6 +338,9 @@ fn slots_mut(p: &mut ModelParams) -> impl Iterator<Item = &mut f32> + '_ {
 mod tests {
     use super::*;
     use crate::gate_support::fixture;
+    use crate::parity::{respond_network, Battery, Counts};
+    use crate::reference::Dtype;
+    use semblance_connectome::TypedNetworkParts;
 
     /// Model 000 scaled by `1 + k / 100` everywhere: a synthetic ensemble member.
     fn scaled(k: u32) -> ModelParams {
@@ -427,6 +528,145 @@ mod tests {
         f.net.weights_into(&q.syn_strength, &mut w).unwrap();
         for (e, (&x, &ct)) in w.iter().zip(f.net.edge_conn_type()).enumerate() {
             assert!(x == 0.0 || x.signum() == f.net.conn_sign()[ct as usize], "edge {e}");
+        }
+    }
+
+    /// Three cell types on two columns: A and B at (0, 0) and (1, 0), C at
+    /// (0, 0) only. Connection types A>B, B>C, C>A, C>B (types 0 and 3 share
+    /// target B, so their draws can collide); five edges, groups 10..14.
+    fn small() -> (TypedNetwork, Vec<u32>) {
+        let net = TypedNetwork::new(TypedNetworkParts {
+            cell_types: vec!["A".into(), "B".into(), "C".into()],
+            node_cell_type: vec![0, 0, 1, 1, 2],
+            node_u: vec![0, 1, 0, 1, 0],
+            node_v: vec![0, 0, 0, 0, 0],
+            conn_types: vec![(0, 1), (1, 2), (2, 0), (2, 1)],
+            conn_sign: vec![1.0, -1.0, 1.0, 1.0],
+            edge_source: vec![0, 1, 3, 4, 4],
+            edge_target: vec![2, 2, 4, 1, 2],
+            edge_conn_type: vec![0, 0, 1, 2, 3],
+            edge_n_syn: vec![2.0, 3.0, 1.0, 4.0, 5.0],
+        })
+        .unwrap();
+        (net, vec![10, 11, 12, 13, 14])
+    }
+
+    /// What every rewired network keeps, checked edge by edge.
+    fn assert_rewired(net: &TypedNetwork, groups: &[u32], r: &Rewired) {
+        assert_eq!(r.kept.len() + r.dropped, net.num_edges());
+        assert_eq!((r.net.num_edges(), r.groups.len()), (r.kept.len(), r.kept.len()));
+        assert_eq!(r.net.conn_sign(), net.conn_sign());
+        assert_eq!(r.net.cell_types(), net.cell_types());
+        assert_eq!((r.net.node_cell_type(), r.net.node_u(), r.net.node_v()), (net.node_cell_type(), net.node_u(), net.node_v()));
+        let mut pairs = std::collections::HashSet::new();
+        for (c, (&(s, t), &(_, t0))) in r.net.conn_types().iter().zip(net.conn_types()).enumerate() {
+            assert_eq!(t, t0, "connection type {c} keeps its target");
+            assert_eq!(s, r.sources[c]);
+            assert!(pairs.insert((s, t)), "connection type {c} repeats a (source, target) pair");
+        }
+        for (k, &e) in r.kept.iter().enumerate() {
+            let e = e as usize;
+            let (old, new) = (net.edge_source()[e] as usize, r.net.edge_source()[k] as usize);
+            assert_eq!(r.net.edge_target()[k], net.edge_target()[e]);
+            assert_eq!(r.net.edge_conn_type()[k], net.edge_conn_type()[e]);
+            assert_eq!(r.net.edge_n_syn()[k].to_bits(), net.edge_n_syn()[e].to_bits());
+            assert_eq!(r.groups[k], groups[e]);
+            assert_eq!((r.net.node_u()[new], r.net.node_v()[new]), (net.node_u()[old], net.node_v()[old]), "edge {e} keeps its source column");
+            assert_eq!(r.net.node_cell_type()[new], r.sources[net.edge_conn_type()[e] as usize]);
+        }
+        assert!(r.kept.windows(2).all(|w| w[0] < w[1]), "kept edges stay in order");
+    }
+
+    #[test]
+    fn rewiring_keeps_targets_columns_counts_and_signs_and_passes_validation() {
+        let (net, groups) = small();
+        let (mut dropped, mut sources) = (Vec::new(), Vec::new());
+        for model in 0..20 {
+            let seed = control_seed(Control::Rewired, model, 0);
+            let r = rewire(&net, &groups, &mut Rng::seed_from_u64(seed)).unwrap();
+            assert_rewired(&net, &groups, &r);
+            assert_ne!(r.sources[0], r.sources[3], "model {model}: types 0 and 3 share target B");
+            assert_eq!(rewire(&net, &groups, &mut Rng::seed_from_u64(seed)).unwrap(), r, "the same seed, the same draw");
+            dropped.push(r.dropped);
+            sources.push(r.sources.clone());
+        }
+        // Models 0 and 4 collide: type 3's first draw is type 0's source
+        // (2, C), so it is redrawn from the stream (3 redraws for model 0,
+        // 1 for model 4), not skipped forward; types not yet processed do
+        // not block a pair (model 0's type 0 takes C>B, type 3's original).
+        assert_eq!(
+            sources[..6],
+            [vec![2u16, 1, 1, 0], vec![0, 2, 0, 2], vec![2, 1, 0, 1], vec![2, 0, 0, 0], vec![2, 1, 1, 1], vec![2, 2, 2, 1]],
+            "pins rewire's use of the frozen stream"
+        );
+        assert_eq!(dropped[..6], [1, 1, 1, 1, 1, 2], "pins rewire's use of the frozen stream");
+    }
+
+    #[test]
+    fn a_target_with_more_connection_types_than_cell_types_is_refused_not_looped() {
+        let crowded = TypedNetwork::new(TypedNetworkParts {
+            cell_types: vec!["A".into()],
+            node_cell_type: vec![0],
+            node_u: vec![0],
+            node_v: vec![0],
+            conn_types: vec![(0, 0), (0, 0)],
+            conn_sign: vec![1.0, 1.0],
+            edge_source: vec![],
+            edge_target: vec![],
+            edge_conn_type: vec![],
+            edge_n_syn: vec![],
+        })
+        .unwrap();
+        let e = rewire(&crowded, &[], &mut Rng::seed_from_u64(1)).unwrap_err();
+        assert!(matches!(e, ParityError::Usage(ref m) if m.contains("no unused source type")), "{e}");
+    }
+
+    #[test]
+    fn rewiring_refuses_groups_that_are_not_one_per_edge() {
+        let (net, _) = small();
+        let e = rewire(&net, &[0], &mut Rng::seed_from_u64(1)).unwrap_err();
+        assert!(matches!(e, ParityError::Usage(ref m) if m.contains("groups for")), "{e}");
+    }
+
+    /// One grey stimulus of `frames` frames.
+    struct Grey {
+        frames: usize,
+        done: bool,
+    }
+
+    impl Battery for Grey {
+        fn len(&self) -> usize {
+            1
+        }
+        fn next_stimulus(&mut self, out: &mut Vec<f64>) -> Result<Option<String>, ParityError> {
+            if self.done {
+                return Ok(None);
+            }
+            self.done = true;
+            out.clear();
+            out.resize(self.frames * 721, 0.5);
+            Ok(Some("grey".into()))
+        }
+    }
+
+    /// Fixture-gated: the real network rewires validly, and the rewired
+    /// network either responds through `respond_network` or goes non-finite
+    /// (a redraw, for gate C), never another error.
+    #[test]
+    fn the_real_network_rewires_and_responds_or_goes_non_finite() {
+        let Some(f) = fixture() else { return };
+        let seed = control_seed(Control::Rewired, 0, 0);
+        let r = rewire(&f.net, &f.groups, &mut Rng::seed_from_u64(seed)).unwrap_or_else(|e| panic!("{e}"));
+        assert_rewired(&f.net, &f.groups, &r);
+        eprintln!("rewired control, model 000, attempt 0: {} of {} edges dropped", r.dropped, f.net.num_edges());
+        let p = f.ensemble.model("000").unwrap();
+        let mut b = Grey { frames: 2, done: false };
+        match respond_network(f, &r.net, &r.groups, p, 1.0 / 200.0, Dtype::F32, Counts::Torch, &mut b) {
+            Ok(resp) => eprintln!("rewired model 000 responds: {} frames of {} types", resp.stimulus(0).unwrap().n_frames(), resp.cell_types().len()),
+            Err(e) => {
+                assert!(e.is_gate_failure(), "{e}");
+                eprintln!("rewired model 000 went non-finite: {e}");
+            }
         }
     }
 }
