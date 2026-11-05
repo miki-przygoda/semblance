@@ -160,15 +160,15 @@ impl std::fmt::Display for ReferenceError {
 
 impl std::error::Error for ReferenceError {}
 
-fn get<'a>(obj: &'a Json, key: &str, at: &str) -> Result<&'a Json, ReferenceError> {
+pub(crate) fn get<'a>(obj: &'a Json, key: &str, at: &str) -> Result<&'a Json, ReferenceError> {
     obj.get(key).ok_or_else(|| ReferenceError::Missing(format!("{at}.{key}")))
 }
 
-fn string(obj: &Json, key: &str, at: &str) -> Result<String, ReferenceError> {
+pub(crate) fn string(obj: &Json, key: &str, at: &str) -> Result<String, ReferenceError> {
     get(obj, key, at)?.as_str().map(str::to_string).ok_or_else(|| ReferenceError::WrongType(format!("{at}.{key}")))
 }
 
-fn number(obj: &Json, key: &str, at: &str) -> Result<f64, ReferenceError> {
+pub(crate) fn number(obj: &Json, key: &str, at: &str) -> Result<f64, ReferenceError> {
     get(obj, key, at)?.as_f64().ok_or_else(|| ReferenceError::WrongType(format!("{at}.{key}")))
 }
 
@@ -189,7 +189,7 @@ fn optional_index(obj: &Json, key: &str, at: &str) -> Result<Option<u32>, Refere
     if v.is_null() { Ok(None) } else { index(v, &format!("{at}.{key}")).map(Some) }
 }
 
-fn array<'a>(obj: &'a Json, key: &str, at: &str) -> Result<&'a [Json], ReferenceError> {
+pub(crate) fn array<'a>(obj: &'a Json, key: &str, at: &str) -> Result<&'a [Json], ReferenceError> {
     get(obj, key, at)?.as_array().ok_or_else(|| ReferenceError::WrongType(format!("{at}.{key}")))
 }
 

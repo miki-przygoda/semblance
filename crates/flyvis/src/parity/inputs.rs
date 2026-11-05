@@ -69,6 +69,10 @@ pub fn how_to_get(rel: &str) -> &'static str {
         Some("flyvis-reference") => {
             "Run ci/fetch-fixtures.sh, or `uv run --project tools tools/export_reference.py`."
         }
+        Some("flyvis-indices") => {
+            "Run ci/fetch-fixtures.sh, or export it with `uv run --project tools tools/export_indices.py` \
+             (its `--shard-out` shards, then `--merge SHARD_DIR ... --out DIR`) and copy DIR into data/flyvis-indices/."
+        }
         _ => "Run ci/fetch-fixtures.sh.",
     }
 }
@@ -245,6 +249,11 @@ mod tests {
         assert_eq!(
             how_to_get("flyvis-reference/manifest.json"),
             "Run ci/fetch-fixtures.sh, or `uv run --project tools tools/export_reference.py`."
+        );
+        assert_eq!(
+            how_to_get("flyvis-indices/manifest.json"),
+            "Run ci/fetch-fixtures.sh, or export it with `uv run --project tools tools/export_indices.py` \
+             (its `--shard-out` shards, then `--merge SHARD_DIR ... --out DIR`) and copy DIR into data/flyvis-indices/."
         );
         assert_eq!(how_to_get("elsewhere/x"), "Run ci/fetch-fixtures.sh.");
     }

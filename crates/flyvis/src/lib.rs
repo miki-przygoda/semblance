@@ -38,6 +38,7 @@ mod expand_checks;
 #[cfg(test)]
 mod gate_support;
 pub mod hex_eye;
+pub mod indices_ref;
 pub mod moving_edge;
 #[cfg(test)]
 mod moving_edge_checks;
@@ -68,4 +69,5 @@ pub use stimuli::{
     DotParams, Dots, FlashParams, Flashes, Stimulus, StimulusError, FULL_FIELD,
 };
 pub use moving_edge::{MovingEdge, MovingEdgeParams};
+pub use indices_ref::{BatteryKind, IndexArray, IndexBattery, IndexFixture, StimulusEntry};
 pub use wiring::{edge_syn_groups, input_nodes, scatter_hexals, WiringError};
