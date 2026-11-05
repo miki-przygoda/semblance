@@ -391,6 +391,338 @@ fn shifted_peaks_f64(off: &[f64], on: &[f64]) -> [f64; 2] {
     [peak(off), peak(on)]
 }
 
+/// Degrees to radians as numpy's `deg2rad` multiplies: `x * (pi / 180)`.
+const DEG: f64 = std::f64::consts::PI / 180.0;
+
+/// Per edge stimulus (in layout order) and cell type (in `Responses`
+/// order), flyvis's edge peak: `max(0, max over the window of the raw
+/// central voltage)`, with the precision of the run it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgePeaks {
+    cell_types: Vec<String>,
+    precision: Precision,
+    peaks: Vec<Vec<f64>>,
+}
+
+impl EdgePeaks {
+    /// Refuses no rows, a row that is not one value per cell type, a
+    /// non-finite value, and (for an f32 run) a value that is not an f32.
+    pub fn new(cell_types: Vec<String>, precision: Precision, peaks: Vec<Vec<f64>>) -> Result<Self, IndexError> {
+        if peaks.is_empty() {
+            return Err(IndexError::Empty("edge peaks"));
+        }
+        for (e, row) in peaks.iter().enumerate() {
+            if row.len() != cell_types.len() {
+                return Err(IndexError::Length { what: "edge peak row", expected: cell_types.len(), found: row.len() });
+            }
+            for (t, &v) in row.iter().enumerate() {
+                if !v.is_finite() {
+                    return Err(IndexError::NonFinite(format!("edge {e}'s peak of {}", cell_types[t])));
+                }
+                if precision == Precision::F32 && v as f32 as f64 != v {
+                    return Err(IndexError::NotF32(format!("edge {e}'s peak {v} of {}", cell_types[t])));
+                }
+            }
+        }
+        Ok(EdgePeaks { cell_types, precision, peaks })
+    }
+
+    pub fn cell_types(&self) -> &[String] {
+        &self.cell_types
+    }
+
+    pub fn precision(&self) -> Precision {
+        self.precision
+    }
+
+    /// `[edge][cell type]`, the layout's edges in layout order.
+    pub fn peaks(&self) -> &[Vec<f64>] {
+        &self.peaks
+    }
+}
+
+/// flyvis's edge peaks: frames outside each edge's window zeroed, every
+/// value clipped at 0, the maximum taken; no baseline, no norm. A zero peak
+/// is +0.0. An f32 run's window value that is not an f32 is refused.
+pub fn edge_peaks(r: &Responses, b: &BatteryLayout) -> Result<EdgePeaks, IndexError> {
+    b.check(r)?;
+    let n = r.cell_types().len();
+    let f32_run = r.precision() == Precision::F32;
+    let mut rows = Vec::new();
+    for (s, (_, stimulus, w)) in b.stimuli().iter().enumerate() {
+        if !matches!(stimulus, Stimulus::Edge { .. }) {
+            continue;
+        }
+        let sr = r.stimulus(s).ok_or(IndexError::CountMismatch { layout: b.len(), responses: r.len() })?;
+        let mut row = vec![0.0f64; n];
+        for f in w.first()..=w.last() {
+            let frame = sr.frame(f).ok_or(IndexError::WindowPastEnd { stimulus: s, last: w.last(), n_frames: sr.n_frames() })?;
+            for (t, (peak, &v)) in row.iter_mut().zip(frame).enumerate() {
+                // every window value, not only the maximum
+                if f32_run && v as f32 as f64 != v {
+                    return Err(IndexError::NotF32(format!("{}'s value {v} in stimulus {s}'s window", r.cell_types()[t])));
+                }
+                if v > *peak {
+                    *peak = v;
+                }
+            }
+        }
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return Err(IndexError::Empty("edge stimuli"));
+    }
+    EdgePeaks::new(r.cell_types().to_vec(), r.precision(), rows)
+}
+
+/// The edge reductions' view of a layout: for each intensity (0, 1), each
+/// speed (ascending) and each angle (0, 30, ..., 330), the row of
+/// `EdgePeaks` holding it.
+struct EdgeGrid {
+    speeds: [f64; N_SPEEDS],
+    rows: [[[usize; N_ANGLES]; N_SPEEDS]; 2],
+}
+
+fn edge_grid(p: &EdgePeaks, b: &BatteryLayout) -> Result<EdgeGrid, IndexError> {
+    let edges: Vec<(u16, f64, u8)> = b
+        .stimuli()
+        .iter()
+        .filter_map(|(_, s, _)| match *s {
+            Stimulus::Edge { angle_deg, speed, intensity } => Some((angle_deg, speed, intensity)),
+            Stimulus::Flash { .. } => None,
+        })
+        .collect();
+    if edges.is_empty() {
+        return Err(IndexError::Empty("edge stimuli"));
+    }
+    if edges.len() != p.peaks.len() {
+        return Err(IndexError::Length { what: "edge peaks", expected: edges.len(), found: p.peaks.len() });
+    }
+    let mut speeds: Vec<f64> = edges.iter().map(|e| e.1).collect();
+    speeds.sort_by(f64::total_cmp);
+    speeds.dedup();
+    if speeds.len() != N_SPEEDS {
+        return Err(IndexError::BatteryShape(format!("the edge reductions need {N_SPEEDS} speeds, found {}", speeds.len())));
+    }
+    let mut rows = [[[usize::MAX; N_ANGLES]; N_SPEEDS]; 2];
+    for (k, &(angle, speed, intensity)) in edges.iter().enumerate() {
+        if intensity > 1 {
+            return Err(IndexError::BatteryShape(format!("edge {k}: intensity {intensity} is not 0 or 1")));
+        }
+        if angle % 30 != 0 {
+            return Err(IndexError::BatteryShape(format!("edge {k}: angle {angle} is not one of 0, 30, ..., 330")));
+        }
+        let s = speeds
+            .iter()
+            .position(|&v| v == speed)
+            .ok_or_else(|| IndexError::BatteryShape(format!("edge {k}: speed {speed} is not listed")))?;
+        let slot = &mut rows[intensity as usize][s][(angle / 30) as usize];
+        if *slot != usize::MAX {
+            return Err(IndexError::BatteryShape(format!(
+                "edge {k} repeats intensity {intensity}, speed {speed}, angle {angle}"
+            )));
+        }
+        *slot = k;
+    }
+    for (i, by_speed) in rows.iter().enumerate() {
+        for (s, by_angle) in by_speed.iter().enumerate() {
+            if let Some(a) = by_angle.iter().position(|&k| k == usize::MAX) {
+                return Err(IndexError::BatteryShape(format!(
+                    "no edge at intensity {i}, speed {}, angle {}",
+                    speeds[s],
+                    a * 30
+                )));
+            }
+        }
+    }
+    let mut sorted = [0.0; N_SPEEDS];
+    sorted.copy_from_slice(&speeds);
+    Ok(EdgeGrid { speeds: sorted, rows })
+}
+
+/// `peak * e^{i theta}` for angle index `a` (angle `30 a` degrees), as
+/// numpy's complex128 product with a real peak.
+fn polar(peak: f64, a: usize) -> (f64, f64) {
+    let theta = (a * 30) as f64 * DEG;
+    (peak * theta.cos(), peak * theta.sin())
+}
+
+fn mean_in_order(v: &[f64]) -> f64 {
+    let mut s = 0.0;
+    for &x in v {
+        s += x;
+    }
+    s / v.len() as f64
+}
+
+fn finite_pair(what: &str, types: &[String], out: &[Vec<f64>; 2]) -> Result<(), IndexError> {
+    for (i, v) in out.iter().enumerate() {
+        if let Some(t) = v.iter().position(|x| !x.is_finite()) {
+            return Err(IndexError::NonFinite(format!("the {what} of {} at intensity {i}", types[t])));
+        }
+    }
+    Ok(())
+}
+
+/// flyvis's direction selectivity index per intensity: per speed,
+/// `|sum_theta z| / (max over intensity of sum_theta |z| + 1e-15)` with
+/// `z = peak e^{i theta}` (one denominator shared by ON and OFF), then the
+/// mean over the six speeds. Sums over angle ascend in angle, the mean
+/// ascends in speed, whatever the layout's order.
+pub fn dsi(p: &EdgePeaks, b: &BatteryLayout) -> Result<[Vec<f64>; 2], IndexError> {
+    let g = edge_grid(p, b)?;
+    let n = p.cell_types.len();
+    let mut out = [vec![0.0; n], vec![0.0; n]];
+    for t in 0..n {
+        let mut per_speed = [[0.0f64; N_SPEEDS]; 2];
+        for s in 0..N_SPEEDS {
+            let mut length = [0.0f64; 2];
+            let mut total = [0.0f64; 2];
+            for (i, (len, tot)) in length.iter_mut().zip(total.iter_mut()).enumerate() {
+                let (mut re, mut im, mut sum_abs) = (0.0f64, 0.0f64, 0.0f64);
+                for (a, &row) in g.rows[i][s].iter().enumerate() {
+                    let (zr, zi) = polar(p.peaks[row][t], a);
+                    re += zr;
+                    im += zi;
+                    sum_abs += zr.hypot(zi);
+                }
+                *len = re.hypot(im);
+                *tot = sum_abs;
+            }
+            let norm = total[0].max(total[1]);
+            for (ps, &len) in per_speed.iter_mut().zip(&length) {
+                ps[s] = len / (norm + 1e-15);
+            }
+        }
+        for (o, ps) in out.iter_mut().zip(&per_speed) {
+            o[t] = mean_in_order(ps);
+        }
+    }
+    finite_pair("DSI", &p.cell_types, &out)?;
+    Ok(out)
+}
+
+/// flyvis's preferred direction per intensity: the angle (`atan2(im, re)`,
+/// in (-pi, pi]) of the un-normalised sum of `peak e^{i theta}` over every
+/// speed (ascending) and angle (ascending).
+pub fn preferred_direction(p: &EdgePeaks, b: &BatteryLayout) -> Result<[Vec<f64>; 2], IndexError> {
+    let g = edge_grid(p, b)?;
+    let n = p.cell_types.len();
+    let mut out = [vec![0.0; n], vec![0.0; n]];
+    for (i, o) in out.iter_mut().enumerate() {
+        for (t, slot) in o.iter_mut().enumerate() {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for by_angle in &g.rows[i] {
+                for (a, &row) in by_angle.iter().enumerate() {
+                    let (zr, zi) = polar(p.peaks[row][t], a);
+                    re += zr;
+                    im += zi;
+                }
+            }
+            *slot = im.atan2(re);
+        }
+    }
+    finite_pair("preferred direction", &p.cell_types, &out)?;
+    Ok(out)
+}
+
+/// Pearson r per known type, intensity and speed, against Maisak's curves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TuningR {
+    cell_types: Vec<String>,
+    speeds: [f64; N_SPEEDS],
+    r: Vec<[[f64; N_SPEEDS]; 2]>,
+}
+
+impl TuningR {
+    /// The known types, in the order `tuning_r` was given them.
+    pub fn cell_types(&self) -> &[String] {
+        &self.cell_types
+    }
+
+    /// The speeds, ascending: the order of every `[f64; N_SPEEDS]`.
+    pub fn speeds(&self) -> [f64; N_SPEEDS] {
+        self.speeds
+    }
+
+    /// `[intensity][speed]` for one known type.
+    pub fn r(&self, cell_type: &str) -> Option<[[f64; N_SPEEDS]; 2]> {
+        self.cell_types.iter().position(|t| t == cell_type).map(|k| self.r[k])
+    }
+
+    /// Per intensity, the best r over the speeds and its speed index: the
+    /// first on ties, as numpy's argmax.
+    pub fn best(&self, cell_type: &str) -> Option<[(f64, usize); 2]> {
+        let r = self.r(cell_type)?;
+        Some(r.map(|by_speed| {
+            let mut best = (by_speed[0], 0);
+            for (s, &v) in by_speed.iter().enumerate().skip(1) {
+                if v > best.0 {
+                    best = (v, s);
+                }
+            }
+            best
+        }))
+    }
+}
+
+/// flyvis's correlation to Maisak 2013's tuning curves (`absmax=False`):
+/// per known type, intensity and speed, the Pearson r over the 12 angles of
+/// the peaks against the curve, a constant input scoring 0 (`fillna(0)`).
+/// `known` holds f64 curves equal to flyvis's literals (see
+/// [`widen_curves`]). Flyvis demeans an f32 run's peaks in f32; this runs in
+/// f64, as the spec says, and gate A's f32 rows are bounded.
+pub fn tuning_r(p: &EdgePeaks, b: &BatteryLayout, known: &[(&str, [f64; 12])]) -> Result<TuningR, IndexError> {
+    let g = edge_grid(p, b)?;
+    let mut cell_types = Vec::with_capacity(known.len());
+    let mut r = Vec::with_capacity(known.len());
+    for &(name, curve) in known {
+        let t = column(&p.cell_types, name)?;
+        if curve.iter().any(|v| !v.is_finite()) {
+            return Err(IndexError::BadKnown { cell_type: name.to_string(), reason: "the tuning curve is not finite".into() });
+        }
+        let mut by = [[0.0f64; N_SPEEDS]; 2];
+        for (i, by_speed) in by.iter_mut().enumerate() {
+            for (s, slot) in by_speed.iter_mut().enumerate() {
+                let peaks: Vec<f64> = g.rows[i][s].iter().map(|&row| p.peaks[row][t]).collect();
+                let v = pearson(&peaks, &curve);
+                *slot = if v.is_nan() { 0.0 } else { v };
+            }
+        }
+        cell_types.push(name.to_string());
+        r.push(by);
+    }
+    Ok(TuningR { cell_types, speeds: g.speeds, r })
+}
+
+/// Maisak's f32 curves (`groundtruth::TUNING_CURVES`) as flyvis's f64
+/// literals: each f32 through its shortest decimal string, then parsed as
+/// f64 (0.745f32 becomes 0.745, not 0.7450000047683716).
+pub fn widen_curves<'a>(curves: &[(&'a str, [f32; 12])]) -> Vec<(&'a str, [f64; 12])> {
+    curves.iter().map(|&(name, c)| (name, c.map(|x| format!("{x}").parse().unwrap_or(x as f64)))).collect()
+}
+
+/// The position of cell type `name` in `types`.
+fn column(types: &[String], name: &str) -> Result<usize, IndexError> {
+    types.iter().position(|t| t == name).ok_or_else(|| IndexError::MissingCellType(name.to_string()))
+}
+
+/// xarray's `corr` over one dimension: the population covariance over the
+/// product of the population standard deviations, each sum in order. NaN
+/// when either input is constant.
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let (ma, mb) = (mean_in_order(a), mean_in_order(b));
+    let (mut cov, mut va, mut vb) = (0.0f64, 0.0f64, 0.0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        let (dx, dy) = (x - ma, y - mb);
+        cov += dx * dy;
+        va += dx * dx;
+        vb += dy * dy;
+    }
+    (cov / n) / ((va / n).sqrt() * (vb / n).sqrt())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,5 +1007,250 @@ mod tests {
         let p = FriPeaks::new(vec!["A".into()], Precision::F64, vec![[-1e-16, 0.0]]).unwrap();
         // on + off + 1e-16 is 0, so the quotient is not finite
         assert!(matches!(fri(&p), Err(IndexError::NonFinite(_))), "{:?}", fri(&p));
+    }
+
+    const SPEEDS: [f64; 6] = [2.4, 4.8, 9.7, 13.0, 19.0, 25.0];
+
+    /// The real edge battery's shape over `speeds` (in that order): intensity,
+    /// then speed, then angle. Windows are frame 0; the reductions never read
+    /// them.
+    fn edge_layout(speeds: &[f64]) -> BatteryLayout {
+        let angles: Vec<u16> = (0..12u16).map(|a| a * 30).collect();
+        edge_layout_in(&[0, 1], speeds, &angles)
+    }
+
+    /// The edge battery listed intensity by intensity, speed by speed and
+    /// angle by angle, each in the order given.
+    fn edge_layout_in(intensities: &[u8], speeds: &[f64], angles: &[u16]) -> BatteryLayout {
+        let mut v = Vec::new();
+        for &intensity in intensities {
+            for &speed in speeds {
+                for &angle_deg in angles {
+                    let label = format!("edge {intensity} {speed} {angle_deg}");
+                    v.push(entry(&label, Stimulus::Edge { angle_deg, speed, intensity }, window(0, 0)));
+                }
+            }
+        }
+        BatteryLayout::new(v).unwrap()
+    }
+
+    /// Edge peaks over `b`'s edges: `f(intensity, speed, angle, type)`.
+    fn edge_peaks_for(b: &BatteryLayout, types: &[&str], f: impl Fn(u8, f64, u16, usize) -> f64) -> EdgePeaks {
+        let rows = b
+            .stimuli()
+            .iter()
+            .filter_map(|(_, s, _)| match *s {
+                Stimulus::Edge { angle_deg, speed, intensity } => {
+                    Some((0..types.len()).map(|t| f(intensity, speed, angle_deg, t)).collect::<Vec<f64>>())
+                }
+                Stimulus::Flash { .. } => None,
+            })
+            .collect();
+        EdgePeaks::new(types.iter().map(|t| t.to_string()).collect(), Precision::F64, rows).unwrap()
+    }
+
+    fn close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * b.abs().max(1.0)
+    }
+
+    #[test]
+    fn edge_peaks_are_the_clipped_window_maximum() {
+        let b = BatteryLayout::new(vec![
+            entry("flash", Stimulus::Flash { radius: 6, intensity: 1 }, window(0, 3)),
+            entry("e0", Stimulus::Edge { angle_deg: 0, speed: 19.0, intensity: 1 }, window(1, 2)),
+            entry("e1", Stimulus::Edge { angle_deg: 30, speed: 19.0, intensity: 1 }, window(1, 3)),
+        ])
+        .unwrap();
+        // A: a big value outside the window is ignored. B: all negative, so +0.0.
+        let r = responses(&["A", "B"], Precision::F64, &[("flash", 4), ("e0", 4), ("e1", 4)], |s, f, t| match (s, t) {
+            (1, 0) => [9.0, 0.5, 0.25, 9.0][f],
+            (2, 0) => [9.0, 0.1, 0.7, 0.3][f],
+            (_, _) => -1.0 - f as f64,
+        });
+        let p = edge_peaks(&r, &b).unwrap();
+        assert_eq!(p.peaks(), &[vec![0.5, 0.0], vec![0.7, 0.0]]);
+        assert!(p.peaks().iter().all(|row| row[1].to_bits() == 0), "a zero peak is +0.0");
+        let renamed = BatteryLayout::new(vec![
+            entry("flash", Stimulus::Flash { radius: 6, intensity: 1 }, window(0, 3)),
+            entry("e0", Stimulus::Edge { angle_deg: 0, speed: 19.0, intensity: 1 }, window(1, 2)),
+            entry("E1", Stimulus::Edge { angle_deg: 30, speed: 19.0, intensity: 1 }, window(1, 3)),
+        ])
+        .unwrap();
+        assert!(matches!(edge_peaks(&r, &renamed), Err(IndexError::LabelMismatch { stimulus: 2, .. })));
+        let flashes_only = BatteryLayout::new(vec![entry("flash", Stimulus::Flash { radius: 6, intensity: 1 }, window(0, 3))]).unwrap();
+        let r1 = responses(&["A"], Precision::F64, &[("flash", 4)], |_, _, _| 0.0);
+        assert_eq!(edge_peaks(&r1, &flashes_only), Err(IndexError::Empty("edge stimuli")));
+    }
+
+    #[test]
+    fn the_dsi_shares_one_denominator_between_on_and_off() {
+        // ON: peak 1 at 0 and 180 degrees (vector ~0, sum of |z| 2). OFF:
+        // peak 0.5 at 0 degrees (vector 0.5). OFF's DSI is 0.5 over ON's 2.
+        let b = edge_layout(&SPEEDS);
+        let p = edge_peaks_for(&b, &["A"], |i, _, angle, _| match (i, angle) {
+            (1, 0) | (1, 180) => 1.0,
+            (0, 0) => 0.5,
+            _ => 0.0,
+        });
+        let d = dsi(&p, &b).unwrap();
+        assert!(close(d[0][0], 0.5 / (2.0 + 1e-15), 1e-15), "{}", d[0][0]);
+        assert!(d[1][0] < 1e-15, "{}", d[1][0]);
+        // Mirrored, so OFF holds the larger sum of |z|: the denominator is the
+        // max over intensity, not always ON's.
+        let p = edge_peaks_for(&b, &["A"], |i, _, angle, _| match (i, angle) {
+            (0, 0) | (0, 180) => 1.0,
+            (1, 0) => 0.5,
+            _ => 0.0,
+        });
+        let d = dsi(&p, &b).unwrap();
+        assert!(close(d[1][0], 0.5 / (2.0 + 1e-15), 1e-15), "{}", d[1][0]);
+        assert!(d[0][0] < 1e-15, "{}", d[0][0]);
+        // A peak so large that hypot overflows: the DSI is not finite, refused.
+        let huge = edge_peaks_for(&b, &["A"], |_, _, _, _| 1e308);
+        assert!(matches!(dsi(&huge, &b), Err(IndexError::NonFinite(_))));
+    }
+
+    #[test]
+    fn the_dsi_is_the_mean_over_the_six_speeds() {
+        // ON only: peak 1 at 0 degrees and a at 180, so each speed's DSI is
+        // (1 - a) / (1 + a + 1e-15).
+        let a = [0.0, 1.0 / 3.0, 0.5, 0.0, 0.0, 0.0];
+        let b = edge_layout(&SPEEDS);
+        let p = edge_peaks_for(&b, &["A"], |i, speed, angle, _| {
+            let s = SPEEDS.iter().position(|&v| v == speed).unwrap();
+            match (i, angle) {
+                (1, 0) => 1.0,
+                (1, 180) => a[s],
+                _ => 0.0,
+            }
+        });
+        let want = a.iter().map(|x| (1.0 - x) / (1.0 + x + 1e-15)).sum::<f64>() / 6.0;
+        assert!(close(dsi(&p, &b).unwrap()[1][0], want, 1e-12));
+    }
+
+    #[test]
+    fn the_preferred_direction_sums_over_speeds_unnormalised() {
+        // speed 2.4: peak 3 at 0 degrees; speed 4.8: peak 1 at 90 degrees.
+        // Unnormalised: atan2(1, 3); normalised per speed it would be pi/4.
+        let b = edge_layout(&SPEEDS);
+        let p = edge_peaks_for(&b, &["A"], |i, speed, angle, _| match (i, speed, angle) {
+            (0, 2.4, 0) => 3.0,
+            (0, 4.8, 90) => 1.0,
+            _ => 0.0,
+        });
+        let pd = preferred_direction(&p, &b).unwrap();
+        assert!(close(pd[0][0], 0.3217505543966422, 1e-12), "{}", pd[0][0]);
+        assert_eq!(pd[1][0], 0.0, "an all-zero response points at angle 0");
+    }
+
+    #[test]
+    fn tuning_keeps_the_best_speed_first_on_ties_and_a_flat_curve_scores_0() {
+        let curve: [f64; 12] = std::array::from_fn(|a| a as f64);
+        let b = edge_layout(&SPEEDS);
+        // ON: speeds 9.7 and 19 match the curve exactly (identical r); the
+        // others are scrambled. OFF: flat everywhere, so r is NaN, filled 0.
+        let p = edge_peaks_for(&b, &["T4a", "Mi1"], |i, speed, angle, _| {
+            let a = (angle / 30) as f64;
+            match i {
+                1 if speed == 9.7 || speed == 19.0 => 2.0 * a + 1.0,
+                1 => ((angle / 30) * 7 % 12) as f64,
+                _ => 0.5,
+            }
+        });
+        let t = tuning_r(&p, &b, &[("T4a", curve)]).unwrap();
+        assert_eq!(t.cell_types(), &["T4a".to_string()]);
+        assert_eq!(t.speeds(), SPEEDS);
+        let r = t.r("T4a").unwrap();
+        assert_eq!(r[0], [0.0; 6], "fillna(0) on a flat curve");
+        assert!(close(r[1][2], 1.0, 1e-12) && r[1][2] == r[1][4]);
+        let best = t.best("T4a").unwrap();
+        assert_eq!(best[0], (0.0, 0));
+        assert_eq!(best[1], (r[1][2], 2), "the first of two equal speeds");
+        assert_eq!(t.r("Mi1"), None);
+        assert_eq!(tuning_r(&p, &b, &[("T5a", curve)]), Err(IndexError::MissingCellType("T5a".into())));
+        let mut broken = curve;
+        broken[3] = f64::NAN;
+        assert!(matches!(tuning_r(&p, &b, &[("T4a", broken)]), Err(IndexError::BadKnown { .. })));
+    }
+
+    #[test]
+    fn the_edge_reductions_do_not_depend_on_the_layouts_order() {
+        let up = edge_layout(&SPEEDS);
+        let mut reversed = SPEEDS;
+        reversed.reverse();
+        let down = edge_layout(&reversed);
+        let f = |i: u8, speed: f64, angle: u16, t: usize| (speed * 0.1 + angle as f64 / 360.0 + i as f64 + t as f64).sin().abs();
+        let (pu, pd) = (edge_peaks_for(&up, &["T4a"], f), edge_peaks_for(&down, &["T4a"], f));
+        assert_eq!(dsi(&pu, &up), dsi(&pd, &down));
+        assert_eq!(preferred_direction(&pu, &up), preferred_direction(&pd, &down));
+        let curve: [f64; 12] = std::array::from_fn(|a| (a as f64).cos());
+        assert_eq!(tuning_r(&pu, &up, &[("T4a", curve)]), tuning_r(&pd, &down, &[("T4a", curve)]));
+        // Intensities 1 then 0, speeds scrambled, angles descending within
+        // each (intensity, speed) group, and a response far from symmetric
+        // in the angle: an angle taken from a row's position, or an
+        // assumed intensity order, moves the DSI and PD by far more than
+        // rounding.
+        let descending: Vec<u16> = (0..12u16).rev().map(|a| a * 30).collect();
+        let scrambled = edge_layout_in(&[1, 0], &[13.0, 2.4, 25.0, 4.8, 19.0, 9.7], &descending);
+        let g = |i: u8, speed: f64, angle: u16, _t: usize| (angle as f64 / 30.0 + 1.0) * (1.0 + speed / 100.0) + i as f64;
+        let (gu, gs) = (edge_peaks_for(&up, &["T4a"], g), edge_peaks_for(&scrambled, &["T4a"], g));
+        assert_eq!(dsi(&gu, &up), dsi(&gs, &scrambled));
+        assert_eq!(preferred_direction(&gu, &up), preferred_direction(&gs, &scrambled));
+        assert_eq!(tuning_r(&gu, &up, &[("T4a", curve)]), tuning_r(&gs, &scrambled, &[("T4a", curve)]));
+    }
+
+    #[test]
+    fn the_edge_reductions_refuse_the_wrong_battery_shape() {
+        let p_for = |b: &BatteryLayout| edge_peaks_for(b, &["A"], |_, _, _, _| 1.0);
+        let five = edge_layout(&SPEEDS[..5]);
+        assert!(matches!(dsi(&p_for(&five), &five), Err(IndexError::BatteryShape(_))));
+        let full = edge_layout(&SPEEDS);
+        // drop one angle: 143 edges
+        let short = BatteryLayout::new(full.stimuli()[1..].to_vec()).unwrap();
+        assert!(matches!(dsi(&p_for(&short), &short), Err(IndexError::BatteryShape(_))));
+        // repeat one angle in place of another
+        let mut twice = full.stimuli().to_vec();
+        twice[1].1 = Stimulus::Edge { angle_deg: 0, speed: 2.4, intensity: 0 };
+        let twice = BatteryLayout::new(twice).unwrap();
+        assert!(matches!(preferred_direction(&p_for(&twice), &twice), Err(IndexError::BatteryShape(_))));
+        // an intensity that is neither 0 nor 1
+        let mut bright = full.stimuli().to_vec();
+        bright[0].1 = Stimulus::Edge { angle_deg: 0, speed: 2.4, intensity: 2 };
+        let bright = BatteryLayout::new(bright).unwrap();
+        assert!(matches!(tuning_r(&p_for(&bright), &bright, &[]), Err(IndexError::BatteryShape(_))));
+        // peaks that do not match the layout's edge count
+        let p = p_for(&full);
+        assert_eq!(dsi(&p, &short), Err(IndexError::Length { what: "edge peaks", expected: 143, found: 144 }));
+    }
+
+    #[test]
+    fn edge_peaks_built_by_hand_are_checked() {
+        let names = || vec!["A".to_string(), "B".to_string()];
+        assert_eq!(EdgePeaks::new(names(), Precision::F64, vec![]), Err(IndexError::Empty("edge peaks")));
+        assert_eq!(
+            EdgePeaks::new(names(), Precision::F64, vec![vec![1.0]]),
+            Err(IndexError::Length { what: "edge peak row", expected: 2, found: 1 })
+        );
+        assert!(matches!(EdgePeaks::new(names(), Precision::F64, vec![vec![1.0, f64::NAN]]), Err(IndexError::NonFinite(_))));
+        assert!(matches!(EdgePeaks::new(names(), Precision::F32, vec![vec![1.0, 0.1]]), Err(IndexError::NotF32(_))));
+    }
+
+    #[test]
+    fn edge_peaks_refuse_an_f32_run_holding_non_f32_values() {
+        // 0.1 is below the window's maximum 0.5, so only a check of every
+        // window value catches it.
+        let b = BatteryLayout::new(vec![entry("e0", Stimulus::Edge { angle_deg: 0, speed: 19.0, intensity: 1 }, window(1, 2))]).unwrap();
+        let r = responses(&["A"], Precision::F32, &[("e0", 4)], |_, f, _| if f == 1 { 0.1 } else { 0.5 });
+        assert!(matches!(edge_peaks(&r, &b), Err(IndexError::NotF32(_))));
+        let ok = responses(&["A"], Precision::F32, &[("e0", 4)], |_, f, _| if f == 1 { 0.25 } else { 0.5 });
+        assert_eq!(edge_peaks(&ok, &b).unwrap().peaks(), &[vec![0.5]]);
+    }
+
+    #[test]
+    fn widened_curves_are_flyviss_decimal_literals() {
+        let w = widen_curves(&[("T4a", [0.745f32; 12])]);
+        assert_eq!(w[0].0, "T4a");
+        assert_eq!(w[0].1, [0.745f64; 12]);
+        assert_ne!(0.745f32 as f64, 0.745f64, "a plain widening would not be");
     }
 }
