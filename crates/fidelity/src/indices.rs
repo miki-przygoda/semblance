@@ -723,6 +723,304 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     (cov / n) / ((va / n).sqrt() * (vb / n).sqrt())
 }
 
+/// The paper's DSI threshold: the 99% quantile of a 100x angle-permutation
+/// null (Lappalainen et al. 2024, Methods, "DSI").
+pub const D_THRESH: f64 = 0.357;
+/// The binomial test's null rate (Methods, "Determining whether a cell type
+/// with asymmetric inputs counts as direction selective").
+pub const BINOMIAL_P0: f64 = 0.1;
+/// The binomial test's level (the same section): P < 0.05.
+pub const BINOMIAL_ALPHA: f64 = 0.05;
+/// The preferred-direction tolerance, in degrees. Borrowed: the paper uses a
+/// 45° acceptance angle in model selection (Methods, "Model selection"), not
+/// as a rule for preferred direction; this epic applies it there and the
+/// record says so.
+pub const PD_TOLERANCE_DEG: f64 = 45.0;
+
+/// How many of a known set agree, out of how many, and which did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Agreement {
+    pub count: usize,
+    pub of: usize,
+    pub misses: Vec<String>,
+}
+
+/// flyvis's `fri_correlation_to_known`: the Pearson r of the FRI against
+/// the known polarity (+1 or -1) over the known types, in `known`'s order.
+pub fn fri_correlation_to_known(fri: &[f64], types: &[String], known: &[(&str, i8)]) -> Result<f64, IndexError> {
+    let (x, y) = known_polarities(fri, types, known)?;
+    pearson_defined(&x, &y, "the FRI's correlation to the known polarities")
+}
+
+/// flyvis's `dsi_correlation_to_known`: the Pearson r, over the known DSI
+/// types in `types`' order, of the DSI maxed over intensity against 1.0 for
+/// a motion-tuned type and 0.0 otherwise.
+pub fn dsi_correlation_to_known(
+    dsi: &[Vec<f64>; 2],
+    types: &[String],
+    known_dsi_types: &[&str],
+    motion_tuning: &[&str],
+) -> Result<f64, IndexError> {
+    for d in dsi {
+        if d.len() != types.len() {
+            return Err(IndexError::Length { what: "DSI", expected: types.len(), found: d.len() });
+        }
+    }
+    if known_dsi_types.is_empty() {
+        return Err(IndexError::Empty("known DSI types"));
+    }
+    for name in known_dsi_types {
+        column(types, name)?;
+    }
+    for name in motion_tuning {
+        if !known_dsi_types.contains(name) {
+            let reason = "a motion-tuned type is not among the known DSI types".to_string();
+            return Err(IndexError::BadKnown { cell_type: name.to_string(), reason });
+        }
+    }
+    let (mut x, mut y) = (Vec::new(), Vec::new());
+    for (t, name) in types.iter().enumerate() {
+        if !known_dsi_types.contains(&name.as_str()) {
+            continue;
+        }
+        let v = dsi[0][t].max(dsi[1][t]);
+        if !v.is_finite() {
+            return Err(IndexError::NonFinite(format!("the DSI of {name}")));
+        }
+        x.push(v);
+        y.push(if motion_tuning.contains(&name.as_str()) { 1.0 } else { 0.0 });
+    }
+    pearson_defined(&x, &y, "the DSI's correlation to the known motion tuning")
+}
+
+/// flyvis's `angular_distance_to_known`: per known type, in `known`'s order,
+/// the angular distance in radians from its preferred direction (T4 types
+/// at intensity 1, T5 types at intensity 0) to the known direction.
+pub fn angular_distance_to_known(pd: &[Vec<f64>; 2], types: &[String], known: &[(&str, u16)]) -> Result<Vec<f64>, IndexError> {
+    for d in pd {
+        if d.len() != types.len() {
+            return Err(IndexError::Length { what: "preferred directions", expected: types.len(), found: d.len() });
+        }
+    }
+    if known.is_empty() {
+        return Err(IndexError::Empty("known preferred directions"));
+    }
+    known
+        .iter()
+        .map(|&(name, deg)| {
+            let v = pd[motion_intensity(name)?][column(types, name)?];
+            if !v.is_finite() {
+                return Err(IndexError::NonFinite(format!("the preferred direction of {name}")));
+            }
+            Ok(simple_angle_distance(v, known_radians(deg)))
+        })
+        .collect()
+}
+
+/// The paper's polarity rule: sign(FRI) against the known polarity over the
+/// known types, with no dead zone. An FRI of exactly 0 has no sign: a miss.
+pub fn polarity_agreement(fri: &[f64], types: &[String], known: &[(&str, i8)]) -> Result<Agreement, IndexError> {
+    let (x, y) = known_polarities(fri, types, known)?;
+    let misses: Vec<String> = known
+        .iter()
+        .zip(x.iter().zip(&y))
+        .filter(|&(_, (&v, &pol))| !((v > 0.0 && pol > 0.0) || (v < 0.0 && pol < 0.0)))
+        .map(|(&(name, _), _)| name.to_string())
+        .collect();
+    Ok(Agreement { count: known.len() - misses.len(), of: known.len(), misses })
+}
+
+/// The per-type median over models, as `np.median`: an even count averages
+/// the two middle values. Callers use all 50 models and the top 10
+/// (000 to 009, the released order).
+pub fn median_fri(per_model: &[Vec<f64>]) -> Result<Vec<f64>, IndexError> {
+    let n_types = per_model_shape(per_model)?;
+    let n = per_model.len();
+    let mut out = Vec::with_capacity(n_types);
+    for t in 0..n_types {
+        let mut col: Vec<f64> = per_model.iter().map(|v| v[t]).collect();
+        col.sort_by(f64::total_cmp);
+        out.push(if n % 2 == 1 { col[n / 2] } else { (col[n / 2 - 1] + col[n / 2]) / 2.0 });
+    }
+    Ok(out)
+}
+
+/// P(X >= k) for X ~ Binomial(n, p0), summed in f64 from i = k up, each
+/// term `C(n, i) p0^i (1 - p0)^(n - i)` with C(n, i) an exact integer
+/// rounded once.
+pub fn binomial_upper_tail(n: u32, k: u32, p0: f64) -> f64 {
+    if k == 0 {
+        return 1.0;
+    }
+    if k > n {
+        return 0.0;
+    }
+    let q = 1.0 - p0;
+    let mut sum = 0.0f64;
+    for i in k..=n {
+        sum += choose(n, i) * p0.powi(i as i32) * q.powi((n - i) as i32);
+    }
+    sum
+}
+
+/// The paper's direction-selectivity rule, per type: k = how many models'
+/// DSI exceed `d_thresh` (strictly); selective iff
+/// `binomial_upper_tail(n_models, k, p0) < alpha` (strictly).
+/// `per_model[m][t]` is model m's DSI for type t, already reduced over
+/// intensity by the caller (the gates pass the max over intensity, as
+/// `dsi_correlation_to_known` does).
+pub fn dsi_class(per_model: &[Vec<f64>], d_thresh: f64, p0: f64, alpha: f64) -> Result<Vec<bool>, IndexError> {
+    if !d_thresh.is_finite() {
+        return Err(IndexError::BadParameter { what: "d_thresh", value: d_thresh });
+    }
+    if !(0.0..=1.0).contains(&p0) {
+        return Err(IndexError::BadParameter { what: "p0", value: p0 });
+    }
+    if alpha.is_nan() || alpha <= 0.0 || alpha > 1.0 {
+        return Err(IndexError::BadParameter { what: "alpha", value: alpha });
+    }
+    let n_types = per_model_shape(per_model)?;
+    let n = per_model.len() as u32;
+    Ok((0..n_types)
+        .map(|t| {
+            let k = per_model.iter().filter(|m| m[t] > d_thresh).count() as u32;
+            binomial_upper_tail(n, k, p0) < alpha
+        })
+        .collect())
+}
+
+/// The preferred-direction rule: a known type agrees when its angular
+/// distance (`angular_distance_to_known`'s pairing) is at most
+/// `tolerance_deg` degrees.
+pub fn pd_within(pd: &[Vec<f64>; 2], types: &[String], known_deg: &[(&str, u16)], tolerance_deg: f64) -> Result<Agreement, IndexError> {
+    if !(tolerance_deg.is_finite() && tolerance_deg >= 0.0) {
+        return Err(IndexError::BadParameter { what: "tolerance in degrees", value: tolerance_deg });
+    }
+    let d = angular_distance_to_known(pd, types, known_deg)?;
+    let misses: Vec<String> = known_deg
+        .iter()
+        .zip(&d)
+        .filter(|&(_, &dist)| dist * (180.0 / std::f64::consts::PI) > tolerance_deg)
+        .map(|(&(name, _), _)| name.to_string())
+        .collect();
+    Ok(Agreement { count: d.len() - misses.len(), of: d.len(), misses })
+}
+
+/// Per known type, its FRI and its polarity as f64, after the checks.
+fn known_polarities(fri: &[f64], types: &[String], known: &[(&str, i8)]) -> Result<(Vec<f64>, Vec<f64>), IndexError> {
+    if fri.len() != types.len() {
+        return Err(IndexError::Length { what: "FRI", expected: types.len(), found: fri.len() });
+    }
+    if known.is_empty() {
+        return Err(IndexError::Empty("known polarities"));
+    }
+    let (mut x, mut y) = (Vec::with_capacity(known.len()), Vec::with_capacity(known.len()));
+    for &(name, pol) in known {
+        if pol != 1 && pol != -1 {
+            return Err(IndexError::BadKnown { cell_type: name.to_string(), reason: format!("polarity {pol} is not +1 or -1") });
+        }
+        let v = fri[column(types, name)?];
+        if !v.is_finite() {
+            return Err(IndexError::NonFinite(format!("the FRI of {name}")));
+        }
+        x.push(v);
+        y.push(pol as f64);
+    }
+    Ok((x, y))
+}
+
+/// `pearson`, refusing the NaN of a constant input.
+fn pearson_defined(a: &[f64], b: &[f64], what: &str) -> Result<f64, IndexError> {
+    let r = pearson(a, b);
+    if r.is_finite() { Ok(r) } else { Err(IndexError::NonFinite(format!("{what} (a constant input has no Pearson r)"))) }
+}
+
+/// The number of types per model, after refusing no models, an empty
+/// model, ragged models and non-finite values.
+fn per_model_shape(per_model: &[Vec<f64>]) -> Result<usize, IndexError> {
+    let first = per_model.first().ok_or(IndexError::Empty("per-model values"))?;
+    if first.is_empty() {
+        return Err(IndexError::Empty("a model's values"));
+    }
+    for (m, v) in per_model.iter().enumerate() {
+        if v.len() != first.len() {
+            return Err(IndexError::Length { what: "a model's values", expected: first.len(), found: v.len() });
+        }
+        if let Some(t) = v.iter().position(|x| !x.is_finite()) {
+            return Err(IndexError::NonFinite(format!("model {m}'s value for type {t}")));
+        }
+    }
+    Ok(first.len())
+}
+
+/// T4 types are read at intensity 1 (ON), T5 types at intensity 0 (OFF).
+fn motion_intensity(name: &str) -> Result<usize, IndexError> {
+    if name.starts_with("T4") {
+        Ok(1)
+    } else if name.starts_with("T5") {
+        Ok(0)
+    } else {
+        Err(IndexError::BadKnown { cell_type: name.to_string(), reason: "only T4 and T5 types have a known preferred direction".into() })
+    }
+}
+
+/// flyvis's known directions in radians: 0, pi/2, pi, 3 pi/2.
+fn known_radians(deg: u16) -> f64 {
+    use std::f64::consts::PI;
+    match deg {
+        0 => 0.0,
+        90 => PI / 2.0,
+        180 => PI,
+        270 => 3.0 * PI / 2.0,
+        d => d as f64 * DEG,
+    }
+}
+
+/// flyvis's `simple_angle_distance` with `upper = pi`.
+fn simple_angle_distance(a: f64, b: f64) -> f64 {
+    use std::f64::consts::PI;
+    let tau = 2.0 * PI;
+    let (a, b) = (py_mod(a, tau), py_mod(b, tau));
+    let mut y = if a >= b { a - b } else { b - a };
+    if y > PI {
+        y = tau - y;
+    }
+    y / PI * PI
+}
+
+/// numpy's `%` on floats: C's fmod, moved into the divisor's sign; a zero
+/// takes the divisor's sign.
+fn py_mod(a: f64, m: f64) -> f64 {
+    let r = a % m;
+    if r == 0.0 {
+        0.0f64.copysign(m)
+    } else if (r < 0.0) != (m < 0.0) {
+        r + m
+    } else {
+        r
+    }
+}
+
+/// C(n, i), exact as a u128 while it fits (always for n <= 128), rounded
+/// once to f64; past that, a running f64 product.
+fn choose(n: u32, i: u32) -> f64 {
+    let i = i.min(n - i);
+    let mut c: u128 = 1;
+    for j in 0..i {
+        match c.checked_mul((n - j) as u128) {
+            Some(v) => c = v / (j as u128 + 1),
+            None => {
+                let mut f = 1.0f64;
+                for j in 0..i {
+                    f = f * (n - j) as f64 / (j + 1) as f64;
+                }
+                return f;
+            }
+        }
+    }
+    c as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,5 +1550,129 @@ mod tests {
         assert_eq!(w[0].0, "T4a");
         assert_eq!(w[0].1, [0.745f64; 12]);
         assert_ne!(0.745f32 as f64, 0.745f64, "a plain widening would not be");
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn the_fri_correlation_to_known_is_pearson_over_the_known_types() {
+        let types = names(&["A", "B", "C", "D"]);
+        let r = fri_correlation_to_known(&[0.5, -0.5, 0.25, 9.0], &types, &[("A", 1), ("B", -1), ("C", 1)]).unwrap();
+        assert!(close(r, 0.970725343394151, 1e-12), "{r}");
+        assert!(matches!(fri_correlation_to_known(&[0.5, -0.5, 0.25, 9.0], &types, &[("A", 1), ("C", 1)]), Err(IndexError::NonFinite(_))));
+        assert_eq!(fri_correlation_to_known(&[0.5, -0.5, 0.25, 9.0], &types, &[("E", 1), ("A", -1)]), Err(IndexError::MissingCellType("E".into())));
+    }
+
+    #[test]
+    fn the_dsi_correlation_to_known_maxes_over_intensity_against_a_motion_label() {
+        let types = names(&["X", "T4a", "Mi1", "T5a"]);
+        let dsi = [vec![9.0, 0.2, 0.9, 0.1], vec![9.0, 0.8, 0.1, 0.7]];
+        let r = dsi_correlation_to_known(&dsi, &types, &["T5a", "Mi1", "T4a"], &["T4a", "T5a"]).unwrap();
+        assert!(close(r, -0.8660254037844385, 1e-12), "{r}");
+        let e = dsi_correlation_to_known(&dsi, &types, &["T4a", "Mi1"], &["T5a"]);
+        assert!(matches!(e, Err(IndexError::BadKnown { .. })), "{e:?}");
+        assert_eq!(dsi_correlation_to_known(&dsi, &types, &["T4b"], &[]), Err(IndexError::MissingCellType("T4b".into())));
+        assert_eq!(dsi_correlation_to_known(&dsi, &types, &[], &[]), Err(IndexError::Empty("known DSI types")));
+        let ragged = [vec![9.0, 0.2, 0.9], vec![9.0, 0.8, 0.1, 0.7]];
+        assert_eq!(
+            dsi_correlation_to_known(&ragged, &types, &["T4a"], &[]),
+            Err(IndexError::Length { what: "DSI", expected: 4, found: 3 })
+        );
+        let flat = [vec![0.5; 4], vec![0.5; 4]];
+        let e = dsi_correlation_to_known(&flat, &types, &["T5a", "Mi1", "T4a"], &["T4a", "T5a"]);
+        assert!(matches!(e, Err(IndexError::NonFinite(_))), "a constant DSI has no Pearson r: {e:?}");
+    }
+
+    #[test]
+    fn angular_distances_read_t4_at_on_and_t5_at_off_and_wrap() {
+        use std::f64::consts::PI;
+        let types = names(&["T4a", "T5b", "T4d"]);
+        // T4a at ON: -pi + 0.1 against 180 degrees. T5b at OFF: -0.05 against
+        // 0. T4d at ON: 3 pi / 2 - 0.2 against 270. The other intensity's
+        // values would be far off.
+        let pd = [vec![0.0, -0.05, 0.0], vec![-PI + 0.1, 2.0, 3.0 * PI / 2.0 - 0.2]];
+        let d = angular_distance_to_known(&pd, &types, &[("T4a", 180), ("T5b", 0), ("T4d", 270)]).unwrap();
+        assert!(close(d[0], 0.1, 1e-12) && close(d[1], 0.05, 1e-12) && close(d[2], 0.2, 1e-12), "{d:?}");
+        let e = angular_distance_to_known(&pd, &types, &[("Mi1", 0)]);
+        assert!(matches!(e, Err(IndexError::BadKnown { .. })), "{e:?}");
+        assert_eq!(angular_distance_to_known(&pd, &types, &[("T4c", 0)]), Err(IndexError::MissingCellType("T4c".into())));
+        assert_eq!(angular_distance_to_known(&pd, &types, &[]), Err(IndexError::Empty("known preferred directions")));
+        let ragged = [vec![0.0; 3], vec![0.0; 2]];
+        assert_eq!(
+            angular_distance_to_known(&ragged, &types, &[("T4a", 180)]),
+            Err(IndexError::Length { what: "preferred directions", expected: 3, found: 2 })
+        );
+        let nan = [vec![0.0; 3], vec![f64::NAN, 0.0, 0.0]];
+        assert!(matches!(angular_distance_to_known(&nan, &types, &[("T4a", 180)]), Err(IndexError::NonFinite(_))));
+    }
+
+    #[test]
+    fn polarity_agreement_has_no_dead_zone_and_zero_is_a_miss() {
+        let types = names(&["A", "B", "C", "D"]);
+        let a = polarity_agreement(&[0.5, -0.2, 0.0, 1e-9], &types, &[("A", 1), ("B", 1), ("C", -1), ("D", 1)]).unwrap();
+        assert_eq!(a, Agreement { count: 2, of: 4, misses: vec!["B".into(), "C".into()] });
+        assert!(matches!(polarity_agreement(&[0.5; 4], &types, &[("A", 0)]), Err(IndexError::BadKnown { .. })));
+        assert_eq!(polarity_agreement(&[0.5; 4], &types, &[]), Err(IndexError::Empty("known polarities")));
+        assert_eq!(
+            polarity_agreement(&[0.5; 3], &types, &[("A", 1)]),
+            Err(IndexError::Length { what: "FRI", expected: 4, found: 3 })
+        );
+        assert!(matches!(polarity_agreement(&[f64::NAN, 0.0, 0.0, 0.0], &types, &[("A", 1)]), Err(IndexError::NonFinite(_))));
+    }
+
+    #[test]
+    fn the_median_fri_is_numpys_median_per_type() {
+        assert_eq!(median_fri(&[vec![1.0, 4.0], vec![3.0, 2.0], vec![2.0, 8.0]]), Ok(vec![2.0, 4.0]));
+        assert_eq!(median_fri(&[vec![1.0], vec![2.0], vec![3.0], vec![10.0]]), Ok(vec![2.5]));
+        // the empty battery's analogue: no models is a refusal, never a score
+        assert_eq!(median_fri(&[]), Err(IndexError::Empty("per-model values")));
+        assert_eq!(median_fri(&[vec![]]), Err(IndexError::Empty("a model's values")));
+        assert_eq!(median_fri(&[vec![1.0, 2.0], vec![1.0]]), Err(IndexError::Length { what: "a model's values", expected: 2, found: 1 }));
+        assert!(matches!(median_fri(&[vec![1.0], vec![f64::INFINITY]]), Err(IndexError::NonFinite(_))));
+    }
+
+    #[test]
+    fn binomial_upper_tail_matches_hand_values() {
+        assert_eq!(binomial_upper_tail(1, 1, 0.1), 0.1);
+        assert_eq!(binomial_upper_tail(7, 0, 0.1), 1.0);
+        assert_eq!(binomial_upper_tail(3, 4, 0.1), 0.0);
+        for (n, k, want) in [(2, 1, 0.19), (2, 2, 0.01), (3, 2, 0.028), (10, 3, 0.0701908264), (10, 4, 0.0127951984)] {
+            let got = binomial_upper_tail(n, k, 0.1);
+            assert!(close(got, want, 1e-14), "n {n}, k {k}: {got}");
+        }
+        assert!(close(binomial_upper_tail(50, 9, 0.1), 0.057867205718094276, 1e-13));
+        assert!(close(binomial_upper_tail(50, 10, 0.1), 0.024537935704591455, 1e-13));
+    }
+
+    #[test]
+    fn dsi_class_is_the_papers_binomial_rule() {
+        // type 0: 10 of 50 above d_thresh (selective); type 1: 9 (not);
+        // type 2: exactly d_thresh everywhere (not: the test is strict).
+        let per_model: Vec<Vec<f64>> = (0..50)
+            .map(|m| vec![if m < 10 { 0.5 } else { 0.1 }, if m < 9 { 0.5 } else { 0.1 }, D_THRESH])
+            .collect();
+        assert_eq!(dsi_class(&per_model, D_THRESH, BINOMIAL_P0, BINOMIAL_ALPHA), Ok(vec![true, false, false]));
+        assert!(matches!(dsi_class(&per_model, D_THRESH, 1.5, BINOMIAL_ALPHA), Err(IndexError::BadParameter { what: "p0", .. })));
+        assert!(matches!(dsi_class(&per_model, D_THRESH, BINOMIAL_P0, f64::NAN), Err(IndexError::BadParameter { what: "alpha", .. })));
+        assert_eq!(dsi_class(&[], D_THRESH, BINOMIAL_P0, BINOMIAL_ALPHA), Err(IndexError::Empty("per-model values")));
+    }
+
+    #[test]
+    fn pd_within_uses_the_t4_on_t5_off_pairing_and_the_tolerance() {
+        use std::f64::consts::PI;
+        let types = names(&["T4a", "T5a"]);
+        // T4a at ON is 0.1 rad from 180 degrees; T5a at OFF is 180 degrees off.
+        let pd = [vec![0.0, 0.0], vec![PI - 0.1, PI]];
+        let a = pd_within(&pd, &types, &[("T4a", 180), ("T5a", 180)], PD_TOLERANCE_DEG).unwrap();
+        assert_eq!(a, Agreement { count: 1, of: 2, misses: vec!["T5a".into()] });
+        assert!(matches!(pd_within(&pd, &types, &[("T4a", 180)], -1.0), Err(IndexError::BadParameter { .. })));
+        assert!(matches!(pd_within(&pd, &types, &[("T4a", 180)], f64::NAN), Err(IndexError::BadParameter { .. })));
+    }
+
+    #[test]
+    fn the_rule_constants_are_the_papers() {
+        assert_eq!((D_THRESH, BINOMIAL_P0, BINOMIAL_ALPHA, PD_TOLERANCE_DEG), (0.357, 0.1, 0.05, 45.0));
     }
 }
