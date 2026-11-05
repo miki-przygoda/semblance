@@ -11,6 +11,9 @@
 //! - [`compare_behaviour`]: distance between two [`Behaviour`] recordings
 //! - [`size_fidelity_curve`]: the harness that produces your headline result — how
 //!   fidelity falls as the latent shrinks, with encode/decode timing
+//! - [`indices`]: flyvis's response indices (FRI, DSI, preferred direction,
+//!   tuning correlation), their time windows and the paper's agreement rules,
+//!   as pure functions over `semblance_sim::response::Responses`
 //!
 //! What is YOURS to fill in:
 //! - the **probe battery**: the set of stimuli you replay through both networks
@@ -22,6 +25,8 @@ use semblance_codec::{Codec, Latent};
 use semblance_connectome::Connectome;
 use semblance_sim::{Behaviour, Engine, Lif, Readout, Stimulus};
 use std::time::Instant;
+
+pub mod indices;
 
 /// Cheap structural check: L2 distance between weight vectors, assuming the two
 /// connectomes share topology/order (as they do when both come from the same
