@@ -130,7 +130,7 @@ releases (semblance, -codec, -connectome, -evo, -fidelity, -sim) were yanked on
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 594 tests, 0 failures
+cargo test --workspace          # 607 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 cargo run --release -- validate # exit 0: every parity gate and control holds
@@ -146,7 +146,7 @@ writes `data/flyvis-reference/` and also the three height-80 `_h80`
 moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "594 passed, 0 failed" whether the data is present
+the suite reports the same "607 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`,
 and even then not quite one per skipped test. Fixtures loaded once and shared
 -- the settling and trace gates' (`crates/flyvis/src/gate_support.rs`,

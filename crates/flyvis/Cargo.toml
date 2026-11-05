@@ -23,4 +23,5 @@ path = "src/lib.rs"
 
 [dependencies]
 semblance-connectome.workspace = true
+semblance-rng.workspace = true
 semblance-sim.workspace = true
