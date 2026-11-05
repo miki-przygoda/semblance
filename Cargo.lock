@@ -42,6 +42,7 @@ version = "0.3.1"
 dependencies = [
  "semblance-codec",
  "semblance-connectome",
+ "semblance-rng",
  "semblance-sim",
 ]
 
