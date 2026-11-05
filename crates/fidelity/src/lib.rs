@@ -8,7 +8,8 @@
 //! What is DONE here:
 //! - [`structural_distance`]: fast L2 over shared-topology weights (a sanity check,
 //!   not the target metric)
-//! - [`compare_behaviour`]: distance between two [`Behaviour`] recordings
+//! - [`compare_behaviour`]: distance between two [`Behaviour`] recordings; a
+//!   shape mismatch or an empty battery is a [`FidelityError`], never a score
 //! - [`size_fidelity_curve`]: the harness that produces your headline result — how
 //!   fidelity falls as the latent shrinks, with encode/decode timing
 //! - [`indices`]: flyvis's response indices (FRI, DSI, preferred direction,
@@ -32,6 +33,35 @@ use std::time::Instant;
 pub mod indices;
 pub mod similarity;
 
+/// Why two behaviours could not be compared. Each is a refusal: before
+/// 0.4.0 every one of these scored as a perfect 0 (chore defects 2 and 3).
+#[derive(Clone, Debug, PartialEq)]
+pub enum FidelityError {
+    ChannelCount { a: usize, b: usize },
+    NeuronCount { a: usize, b: usize },
+    TickCount { a: u64, b: u64 },
+    ChannelLength { channel: usize, a: usize, b: usize },
+    /// Neither recording has a channel sample or a neuron.
+    NothingCompared,
+    /// A battery with no probes.
+    EmptyBattery,
+}
+
+impl std::fmt::Display for FidelityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FidelityError::ChannelCount { a, b } => write!(f, "the recordings have {a} and {b} motor channels"),
+            FidelityError::NeuronCount { a, b } => write!(f, "the recordings have {a} and {b} neurons"),
+            FidelityError::TickCount { a, b } => write!(f, "the recordings ran {a} and {b} ticks"),
+            FidelityError::ChannelLength { channel, a, b } => write!(f, "motor channel {channel} has {a} and {b} samples"),
+            FidelityError::NothingCompared => f.write_str("the recordings have no channel samples and no neurons to compare"),
+            FidelityError::EmptyBattery => f.write_str("a battery with no probes measures nothing"),
+        }
+    }
+}
+
+impl std::error::Error for FidelityError {}
+
 /// Cheap structural check: L2 distance between weight vectors, assuming the two
 /// connectomes share topology/order (as they do when both come from the same
 /// substrate codec). Returns `f32::INFINITY` if lengths differ.
@@ -48,42 +78,59 @@ pub fn structural_distance(a: &Connectome, b: &Connectome) -> f32 {
 }
 
 /// Distance between two behaviour recordings. Combines a motor-channel term
-/// (mean squared difference over aligned channels/ticks) and a rate term
+/// (mean squared difference over channels and ticks) and a rate term
 /// (difference in per-neuron spike counts). Lower = more faithful.
 ///
-/// This is a reasonable default; tune the weighting, or swap in a metric that
-/// matches what you actually care about (timing? trajectory? final state?).
-pub fn compare_behaviour(a: &Behaviour, b: &Behaviour) -> f32 {
-    let channel_term = {
-        let nch = a.channels.len().min(b.channels.len());
+/// The recordings must have the same shape: a different channel count,
+/// neuron count, tick count or channel length is a [`FidelityError`], as is
+/// a pair with nothing to compare. Never a score.
+pub fn compare_behaviour(a: &Behaviour, b: &Behaviour) -> Result<f32, FidelityError> {
+    if a.channels.len() != b.channels.len() {
+        return Err(FidelityError::ChannelCount { a: a.channels.len(), b: b.channels.len() });
+    }
+    if a.spike_counts.len() != b.spike_counts.len() {
+        return Err(FidelityError::NeuronCount { a: a.spike_counts.len(), b: b.spike_counts.len() });
+    }
+    if a.ticks != b.ticks {
+        return Err(FidelityError::TickCount { a: a.ticks, b: b.ticks });
+    }
+    for (c, (x, y)) in a.channels.iter().zip(&b.channels).enumerate() {
+        if x.len() != y.len() {
+            return Err(FidelityError::ChannelLength { channel: c, a: x.len(), b: y.len() });
+        }
+    }
+
+    let (channel_term, count) = {
         let mut acc = 0.0f32;
         let mut count = 0usize;
-        for c in 0..nch {
-            let nt = a.channels[c].len().min(b.channels[c].len());
-            for t in 0..nt {
-                let d = a.channels[c][t] - b.channels[c][t];
+        for (x, y) in a.channels.iter().zip(&b.channels) {
+            for (p, q) in x.iter().zip(y) {
+                let d = p - q;
                 acc += d * d;
                 count += 1;
             }
         }
-        if count == 0 { 0.0 } else { acc / count as f32 }
+        (if count == 0 { 0.0 } else { acc / count as f32 }, count)
     };
+    if count == 0 && a.spike_counts.is_empty() {
+        return Err(FidelityError::NothingCompared);
+    }
 
     let rate_term = {
-        let n = a.spike_counts.len().min(b.spike_counts.len());
+        let n = a.spike_counts.len();
         if n == 0 {
             0.0
         } else {
             let mut acc = 0.0f32;
-            for i in 0..n {
-                let d = a.spike_counts[i] as f32 - b.spike_counts[i] as f32;
+            for (&p, &q) in a.spike_counts.iter().zip(&b.spike_counts) {
+                let d = p as f32 - q as f32;
                 acc += d * d;
             }
             (acc / n as f32).sqrt()
         }
     };
 
-    channel_term + 0.01 * rate_term
+    Ok(channel_term + 0.01 * rate_term)
 }
 
 /// A stimulus/readout pair to replay identically through two networks. Implement
@@ -108,18 +155,19 @@ pub fn run_probe<P: Probe>(connectome: &Connectome, probe: &P) -> Behaviour {
 }
 
 /// Behavioural fidelity of a decoded network vs the original, averaged over a
-/// battery of probes. Returns the mean [`compare_behaviour`] distance (0 = perfect).
-pub fn behavioural_distance<P: Probe>(original: &Connectome, decoded: &Connectome, battery: &[P]) -> f32 {
+/// battery of probes: the mean [`compare_behaviour`] distance (0 = perfect).
+/// An empty battery measures nothing, so it is an error, never 0.
+pub fn behavioural_distance<P: Probe>(original: &Connectome, decoded: &Connectome, battery: &[P]) -> Result<f32, FidelityError> {
     if battery.is_empty() {
-        return 0.0;
+        return Err(FidelityError::EmptyBattery);
     }
     let mut total = 0.0f32;
     for probe in battery {
         let ob = run_probe(original, probe);
         let db = run_probe(decoded, probe);
-        total += compare_behaviour(&ob, &db);
+        total += compare_behaviour(&ob, &db)?;
     }
-    total / battery.len() as f32
+    Ok(total / battery.len() as f32)
 }
 
 /// Somewhere to collect your probes. Left minimal on purpose — designing the
@@ -213,11 +261,13 @@ pub struct CurvePoint {
 ///
 /// `codecs` is boxed so you can mix schemes; timing uses a single encode/decode —
 /// average over repeats yourself if you need tighter numbers.
+///
+/// A shape mismatch or an empty battery is a [`FidelityError`].
 pub fn size_fidelity_curve<P: Probe>(
     reference: &Connectome,
     codecs: &[Box<dyn Codec>],
     battery: &[P],
-) -> Vec<CurvePoint> {
+) -> Result<Vec<CurvePoint>, FidelityError> {
     let mut points = Vec::with_capacity(codecs.len());
     for codec in codecs {
         let t0 = Instant::now();
@@ -228,7 +278,7 @@ pub fn size_fidelity_curve<P: Probe>(
         let decoded = codec.decode(&z);
         let decode_ns = t1.elapsed().as_nanos();
 
-        let bd = behavioural_distance(reference, &decoded, battery);
+        let bd = behavioural_distance(reference, &decoded, battery)?;
         points.push(CurvePoint {
             latent_dim: codec.latent_dim(reference),
             behavioural_distance: bd,
@@ -236,7 +286,7 @@ pub fn size_fidelity_curve<P: Probe>(
             decode_ns,
         });
     }
-    points
+    Ok(points)
 }
 
 #[cfg(test)]
@@ -258,8 +308,7 @@ mod tests {
         let decoded = codec.decode(&z);
 
         let battery = test_battery();
-        let bd = behavioural_distance(&c, &decoded, &battery);
-        assert_eq!(bd, 0.0, "a lossless round-trip must behave identically");
+        assert_eq!(behavioural_distance(&c, &decoded, &battery), Ok(0.0), "a lossless round-trip must behave identically");
         assert_eq!(structural_distance(&c, &decoded), 0.0);
     }
 
@@ -271,23 +320,80 @@ mod tests {
             *x += 0.5;
         }
         let perturbed = c.with_weights(&w);
-        let battery = test_battery();
-        let bd = behavioural_distance(&c, &perturbed, &battery);
+        let bd = behavioural_distance(&c, &perturbed, &test_battery()).unwrap();
         assert!(bd > 0.0, "changed dynamics should change behaviour");
     }
 
     #[test]
     fn probe_battery_collects_probes_for_behavioural_distance() {
         let c = Connectome::synthetic(80, 5, 9);
-        let codec = WeightCodec::from_connectome(&c);
-        let decoded = codec.decode(&codec.encode(&c));
-
+        let mut w = c.weights();
+        for x in w.iter_mut() {
+            *x += 0.5;
+        }
+        let different = c.with_weights(&w);
         let battery = ProbeBattery::new()
             .with(DriveProbe { k: 8, amplitude: 1.5, motor: 4, ticks: 150 })
             .with(DriveProbe { k: 4, amplitude: 2.0, motor: 4, ticks: 150 });
 
         assert_eq!(battery.len(), 2);
         assert!(!battery.is_empty());
-        assert_eq!(behavioural_distance(&c, &decoded, battery.as_slice()), 0.0);
+        let bd = behavioural_distance(&c, &different, battery.as_slice()).unwrap();
+        assert!(bd > 0.0, "a different network behaves differently: {bd}");
+        assert_eq!(behavioural_distance(&c, &c, battery.as_slice()), Ok(0.0));
+    }
+
+    /// Chore defect 2: a busy recording against an empty one scored 0.
+    #[test]
+    fn a_busy_recording_against_an_empty_one_is_an_error() {
+        let busy = Behaviour { channels: vec![vec![1.0; 50]; 4], spike_counts: vec![7; 500], ticks: 50 };
+        assert_eq!(compare_behaviour(&busy, &Behaviour::default()), Err(FidelityError::ChannelCount { a: 4, b: 0 }));
+        let mut fewer = busy.clone();
+        fewer.spike_counts.pop();
+        assert_eq!(compare_behaviour(&busy, &fewer), Err(FidelityError::NeuronCount { a: 500, b: 499 }));
+        let mut shorter = busy.clone();
+        shorter.ticks = 49;
+        assert_eq!(compare_behaviour(&busy, &shorter), Err(FidelityError::TickCount { a: 50, b: 49 }));
+        let mut ragged = busy.clone();
+        ragged.channels[2].pop();
+        assert_eq!(compare_behaviour(&busy, &ragged), Err(FidelityError::ChannelLength { channel: 2, a: 50, b: 49 }));
+        assert_eq!(compare_behaviour(&Behaviour::default(), &Behaviour::default()), Err(FidelityError::NothingCompared));
+    }
+
+    /// Equal shapes: the arithmetic is the old one.
+    #[test]
+    fn equal_shapes_score_as_before() {
+        let a = Behaviour { channels: vec![vec![1.0, 0.0]], spike_counts: vec![2], ticks: 2 };
+        let b = Behaviour { channels: vec![vec![0.0, 0.0]], spike_counts: vec![0], ticks: 2 };
+        assert_eq!(compare_behaviour(&a, &b), Ok(1.0f32 / 2.0 + 0.01 * 2.0));
+    }
+
+    /// Chore defect 3: an empty battery scored 0 against a very different network.
+    #[test]
+    fn an_empty_battery_is_an_error_not_a_perfect_score() {
+        let c = Connectome::synthetic(80, 5, 9);
+        let w: Vec<f32> = c.weights().iter().map(|x| x + 5.0).collect();
+        let shifted = c.with_weights(&w);
+        let none: Vec<DriveProbe> = Vec::new();
+        assert_eq!(behavioural_distance(&c, &shifted, &none), Err(FidelityError::EmptyBattery));
+        assert!(behavioural_distance(&c, &shifted, &test_battery()).unwrap() > 0.0);
+        let codecs: Vec<Box<dyn Codec>> = vec![Box::new(WeightCodec::from_connectome(&c))];
+        assert_eq!(size_fidelity_curve(&c, &codecs, &none).map(|v| v.len()), Err(FidelityError::EmptyBattery));
+        assert_eq!(size_fidelity_curve(&c, &codecs, &test_battery()).map(|v| v[0].behavioural_distance), Ok(0.0));
+    }
+
+    #[test]
+    fn errors_display_as_registered() {
+        let cases = [
+            (FidelityError::ChannelCount { a: 4, b: 0 }, "the recordings have 4 and 0 motor channels"),
+            (FidelityError::NeuronCount { a: 500, b: 499 }, "the recordings have 500 and 499 neurons"),
+            (FidelityError::TickCount { a: 50, b: 49 }, "the recordings ran 50 and 49 ticks"),
+            (FidelityError::ChannelLength { channel: 2, a: 50, b: 49 }, "motor channel 2 has 50 and 49 samples"),
+            (FidelityError::NothingCompared, "the recordings have no channel samples and no neurons to compare"),
+            (FidelityError::EmptyBattery, "a battery with no probes measures nothing"),
+        ];
+        for (e, want) in cases {
+            assert_eq!(e.to_string(), want);
+        }
     }
 }
