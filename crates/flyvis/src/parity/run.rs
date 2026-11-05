@@ -1,7 +1,8 @@
 //! Settling, trace playback and comparison: piece 1's and piece 2's gate
 //! machinery, moved here without changing what it computes.
 //!
-//! One core (spec R20): `settle_state` builds and settles the integrator,
+//! One core (spec R20): `settle_core` builds and settles the integrator for
+//! any parameters and `settle_state` is it for a registered run,
 //! `compare_settling` compares the settled state, and `play_from` plays
 //! sequences from a settled state. `settle`, `play` and `run` are thin over
 //! them, so the gates exercise exactly the code `validate` runs. Each entry
@@ -9,9 +10,10 @@
 //! (`RUNS`, R19), so the integrator is monomorphised in this crate.
 
 use semblance_connectome::TypedNetwork;
-use semblance_sim::graded::{Graded, GradedParams, Real};
+use semblance_sim::graded::{Graded, GradedError, GradedParams, Real};
 
 use super::{After, Fixtures, ParityError, TraceInputs, RUNS};
+use crate::ensemble::ModelParams;
 use crate::expand::{hex_coords, DEFAULT_EXTENT};
 use crate::pretrained::SYN_COUNT;
 use crate::reference::{Array, BlockKey, DtInfo, Dtype, FileInfo, ReferenceError, RunInfo};
@@ -162,7 +164,7 @@ pub(crate) const fn dtype_name(p: Dtype) -> &'static str {
     }
 }
 
-fn mismatch(m: String) -> ParityError {
+pub(super) fn mismatch(m: String) -> ParityError {
     ParityError::Mismatch(m)
 }
 
@@ -293,6 +295,29 @@ fn widen<R: Real>(values: &[R]) -> Vec<f64> {
     values.iter().map(|v| v.to_f64()).collect()
 }
 
+/// Who is settling, for the errors: a registered 0.3.0 run, or `respond`.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Ctx {
+    Run(u32),
+    Respond,
+}
+
+impl Ctx {
+    fn graded(self, e: GradedError) -> ParityError {
+        match self {
+            Ctx::Run(run) => mismatch(format!("run {run}: {e}")),
+            Ctx::Respond => ParityError::Usage(format!("network: {e}")),
+        }
+    }
+
+    fn settle_non_finite(self, node: usize, cell_type: String, step: usize) -> ParityError {
+        match self {
+            Ctx::Run(run) => ParityError::NonFinite { run, node, cell_type, after: After::SettleStep(step) },
+            Ctx::Respond => ParityError::NonFiniteSettle { node, cell_type, step },
+        }
+    }
+}
+
 /// Builds `model`'s integrator at reference run `run`'s dt and precision and
 /// settles it, as flyvis does: `n_settle` steps of grey on every
 /// photoreceptor. Returns the settled integrator and the centre values
@@ -306,6 +331,21 @@ fn settle_state<R: Precision>(
     centre: &[usize],
 ) -> Result<(Graded<R>, Vec<f64>), ParityError> {
     let p = f.ensemble.model(model).ok_or_else(|| mismatch(format!("model {model} is not in the ensemble")))?;
+    settle_core::<R>(f, p, dt.dt, dt.n_settle, counts, centre, Ctx::Run(run))
+}
+
+/// `settle_state` for any parameters: builds the integrator for `p` at `dt`
+/// and settles it for `n_settle` steps of `pre_stim_value` on every input
+/// node, recording the centre values after every step.
+pub(super) fn settle_core<R: Precision>(
+    f: &Fixtures,
+    p: &ModelParams,
+    dt: f64,
+    n_settle: usize,
+    counts: Counts,
+    centre: &[usize],
+    ctx: Ctx,
+) -> Result<(Graded<R>, Vec<f64>), ParityError> {
     let count: Vec<R> = f
         .groups
         .iter()
@@ -317,23 +357,36 @@ fn settle_state<R: Precision>(
         })
         .collect();
     let params = GradedParams { bias: &p.bias, time_const: &p.time_const, syn_strength: &p.syn_strength, edge_syn_count: &count };
-    let mut g = Graded::<R>::new(&f.net, &params, dt.dt).map_err(|e| mismatch(format!("run {run}: {e}")))?;
+    let mut g = Graded::<R>::new(&f.net, &params, dt).map_err(|e| ctx.graded(e))?;
 
     let mut input = vec![R::ZERO; f.net.num_nodes()];
     for &i in f.input_nodes.iter().flatten() {
         input[i as usize] = R::from_f64(f.manifest.pre_stim_value);
     }
     let mut rust_centre = Vec::new();
-    for step in 0..dt.n_settle {
-        g.step(&input).map_err(|e| mismatch(format!("run {run}: {e}")))?;
+    for step in 0..n_settle {
+        g.step(&input).map_err(|e| ctx.graded(e))?;
         if let Some(i) = g.state().iter().position(|v| !v.is_finite()) {
-            let cell_type = cell_type(&f.net, i).to_string();
-            return Err(ParityError::NonFinite { run, node: i, cell_type, after: After::SettleStep(step) });
+            return Err(ctx.settle_non_finite(i, cell_type(&f.net, i).to_string(), step));
         }
         // settle step `step` is the state after step + 1 Euler steps
         rust_centre.extend(centre.iter().map(|&i| g.state()[i].to_f64()));
     }
     Ok((g, rust_centre))
+}
+
+/// One playback frame: scatters `frame`'s hexal values into `input`, steps
+/// `g`, and returns the first node whose state is not finite. The error is
+/// the wiring's or the integrator's, for the caller to place.
+pub(super) fn step_frame<R: Real>(
+    f: &Fixtures,
+    g: &mut Graded<R>,
+    frame: &[R],
+    input: &mut [R],
+) -> Result<Option<usize>, String> {
+    scatter_hexals(&f.input_nodes, frame, input).map_err(|e| e.to_string())?;
+    g.step(input).map_err(|e| e.to_string())?;
+    Ok(g.state().iter().position(|v| !v.is_finite()))
 }
 
 /// Reads run `run`'s settling reference and compares the settled state and
@@ -479,9 +532,7 @@ fn play_from<R: Precision>(
             for (slot, &h) in frame.iter_mut().zip(&source) {
                 *slot = R::from_f64(row[h]);
             }
-            scatter_hexals(&f.input_nodes, &frame, &mut input).map_err(|e| mismatch(format!("run {run}: {e}")))?;
-            g.step(&input).map_err(|e| mismatch(format!("run {run}: {e}")))?;
-            if let Some(k) = g.state().iter().position(|v| !v.is_finite()) {
+            if let Some(k) = step_frame(f, g, &frame, &mut input).map_err(|e| mismatch(format!("run {run}: {e}")))? {
                 let cell_type = cell_type(&f.net, k).to_string();
                 return Err(ParityError::NonFinite { run, node: k, cell_type, after: After::Frame { frame: i, sequence: s } });
             }
