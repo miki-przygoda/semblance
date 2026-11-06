@@ -112,6 +112,48 @@ fn numbers(line: &str) -> Vec<f64> {
         .collect()
 }
 
+/// The count a line states out of `of`, written `n/of` or `n of of`: the
+/// number written right before the denominator, which must itself be a
+/// whole word (`3/80` is not out of 8). The first such count on the line.
+fn count_out_of(line: &str, of: u32) -> Option<f64> {
+    let is_num = |c: char| c.is_ascii_digit() || c == '.';
+    let mut found: Vec<(usize, f64)> = Vec::new();
+    for pat in [format!("/{of}"), format!(" of {of}")] {
+        for (i, _) in line.match_indices(pat.as_str()) {
+            let after = &line[i + pat.len()..];
+            let rest = after.strip_prefix('.').unwrap_or(after);
+            if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
+            let head = &line[..i];
+            let start = head.char_indices().rev().take_while(|&(_, c)| is_num(c)).last().map_or(i, |(k, _)| k);
+            if let Ok(n) = head[start..].parse::<f64>() {
+                found.push((start, n));
+            }
+        }
+    }
+    found.into_iter().min_by_key(|&(at, _)| at).map(|(_, n)| n)
+}
+
+/// `count_out_of` reads the count beside its denominator, never a model id,
+/// a draw count or the 45-degree tolerance elsewhere on the line.
+#[test]
+fn count_out_of_reads_the_count_beside_its_denominator() {
+    for line in [
+        "model 000: 8/8 within 45°",
+        "model 000 within 45°: 8 of 8",
+        "  model 000  8/8  (45 deg)",
+    ] {
+        assert_eq!(count_out_of(line, 8), Some(8.0), "{line}");
+    }
+    assert_eq!(count_out_of("shuffled median over 50 draws within 45°: 3/8", 8), Some(3.0));
+    assert_eq!(count_out_of("zeroed median 4.5 of 8 within 45", 8), Some(4.5));
+    assert_eq!(count_out_of("trained 50 over 18 types: 16/18", 18), Some(16.0));
+    assert_eq!(count_out_of("rewired 50 draws agree on 7 of 18", 18), Some(7.0));
+    assert_eq!(count_out_of("model 000: 3/80", 8), None);
+    assert_eq!(count_out_of("model 000 within 45", 8), None);
+}
+
 /// Gate C's lines, which must exist once verification completed.
 fn gate_c(r: &Run) -> Vec<&str> {
     assert_ne!(r.code, Some(2), "validate --ensemble verified something:\n{}", r.all());
@@ -164,7 +206,7 @@ fn controls_10_each_control_agrees_with_the_papers_binomial_classes_on_fewer_typ
     assert!(!binom.is_empty(), "gate C reports the binomial rule over the controls: {c:?}");
     let trained = lines_with(&binom, &["trained"]);
     assert!(!trained.is_empty(), "the trained 50's agreement is stated beside the controls: {binom:?}");
-    let of_18 = |l: &str| numbers(l).windows(2).find(|w| w[1] == 18.0).map(|w| w[0]);
+    let of_18 = |l: &str| count_out_of(l, 18);
     let trained_n = trained.iter().find_map(|l| of_18(l)).expect("the trained count, out of 18");
     for name in CONTROLS {
         let rows = lines_with(&binom, &[name]);
@@ -192,7 +234,7 @@ fn controls_11_each_controls_median_pd_count_is_below_model_000s() {
         })
         .collect();
     assert!(!pd.is_empty(), "gate C reports preferred directions over the controls: {c:?}");
-    let of_8 = |l: &str| numbers(l).windows(2).find(|w| w[1] == 8.0).map(|w| w[0]);
+    let of_8 = |l: &str| count_out_of(l, 8);
     let base = lines_with(&pd, &["000"]).iter().find_map(|l| of_8(l)).expect("model 000's count, out of 8");
     for name in CONTROLS {
         let rows = lines_with(&pd, &[name]);
