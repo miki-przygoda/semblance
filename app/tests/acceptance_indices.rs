@@ -90,10 +90,29 @@ fn without_indices(name: &str) -> PathBuf {
     dir
 }
 
-/// `validate` on the real data, once per test binary.
+/// Whether `data/flyvis-indices/` (fixtures-3), which gate A reads, is
+/// present; if not, a skip notice (false) or, under
+/// `SEMBLANCE_REQUIRE_FIXTURES=1`, a failure.
+fn indices_or_skip(test: &str) -> bool {
+    if real_data().join(INDICES_DIR).is_dir() {
+        return true;
+    }
+    if std::env::var("SEMBLANCE_REQUIRE_FIXTURES").is_ok_and(|v| v == "1") {
+        panic!("{test}: SEMBLANCE_REQUIRE_FIXTURES=1 but data/{INDICES_DIR}/ is missing");
+    }
+    eprintln!("skipping: {test}: data/{INDICES_DIR}/ missing under {}", real_data().display());
+    false
+}
+
+/// `validate` on the real data, once per test binary; gate A needs
+/// `flyvis-indices/` as well as 0.3.0's fixtures.
 fn full() -> Option<&'static Run> {
     static FULL: OnceLock<Option<Run>> = OnceLock::new();
-    FULL.get_or_init(|| fixtures_or_skip("validate with gate A").then(|| validate_on(&real_data(), &[]))).as_ref()
+    FULL.get_or_init(|| {
+        (fixtures_or_skip("validate with gate A") && indices_or_skip("validate with gate A"))
+            .then(|| validate_on(&real_data(), &[]))
+    })
+    .as_ref()
 }
 
 /// Gate A's lines: those naming gate A or the indices.
@@ -118,7 +137,6 @@ fn has_3e(line: &str) -> bool {
 #[test]
 #[ignore = "acceptance-failing: INDICES-16"]
 fn indices_16_gate_a_compares_models_000_and_049_at_both_precisions() {
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate A reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = full() else { return };
     assert_eq!(r.code, Some(0), "{}", r.all());
     let rows = gate_a(&r.stdout);
@@ -142,7 +160,6 @@ fn indices_16_gate_a_compares_models_000_and_049_at_both_precisions() {
 #[test]
 #[ignore = "acceptance-failing: INDICES-17"]
 fn indices_17_gate_a_control_scores_049_against_000_and_misses() {
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate A reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = full() else { return };
     let lines: Vec<&str> = r.stdout.lines().collect();
     let start = lines.iter().position(|l| l.starts_with("controls:")).expect("a controls section");
@@ -222,4 +239,15 @@ fn indices_19_validate_ensemble_adds_all_50_models_and_gate_b() {
         assert!(rows.iter().any(|l| l.contains(&model) && l.contains("f32")), "gate A for model {model} at f32:\n{}", r.stdout);
     }
     assert!(r.stdout.to_lowercase().contains("gate b"), "gate B runs:\n{}", r.stdout);
+}
+
+/// A fixture-gated test here skips without `data/flyvis-indices/`, as every
+/// fixture-gated test does: none asserts a fixture is present ahead of its
+/// skip helper, which would make it fail, not skip, in a checkout without
+/// the data.
+#[test]
+fn no_test_asserts_a_fixture_is_present_instead_of_skipping() {
+    let pat = concat!("assert!(real_data()", ".join(");
+    let hits: Vec<&str> = include_str!("acceptance_indices.rs").lines().filter(|l| l.contains(pat)).collect();
+    assert!(hits.is_empty(), "fixture presence asserted instead of skipped: {hits:?}");
 }

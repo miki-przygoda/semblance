@@ -147,7 +147,6 @@ fn lines_with<'a>(rows: &[&'a str], words: &[&str]) -> Vec<&'a str> {
 #[test]
 #[ignore = "acceptance-failing: AGREEMENT-07"]
 fn agreement_07_model_000_agrees_on_30_of_32_polarities() {
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     let pol = lines_with(&rows, &["polarity", "000"]);
@@ -162,7 +161,6 @@ fn agreement_07_model_000_agrees_on_30_of_32_polarities() {
 #[test]
 #[ignore = "acceptance-failing: AGREEMENT-08"]
 fn agreement_08_the_median_fri_agrees_on_32_of_32_over_all_50_or_the_top_10() {
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     let median = lines_with(&rows, &["median"]);
@@ -191,7 +189,6 @@ fn agreement_08_the_median_fri_agrees_on_32_of_32_over_all_50_or_the_top_10() {
 #[ignore = "acceptance-failing: AGREEMENT-09"]
 fn agreement_09_the_binomial_rule_classifies_the_18_types_as_the_paper_does() {
     assert_eq!(KNOWN_DSI_TYPES.len(), 18);
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     let class = lines_with(&rows, &["dsi"]);
@@ -210,7 +207,6 @@ fn agreement_09_the_binomial_rule_classifies_the_18_types_as_the_paper_does() {
 #[ignore = "acceptance-failing: AGREEMENT-10"]
 fn agreement_10_model_000_has_all_8_preferred_directions_within_45_degrees() {
     assert_eq!(PREFERRED_DIRECTIONS.len(), 8);
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     let pd: Vec<&str> = rows
@@ -230,7 +226,6 @@ fn agreement_10_model_000_has_all_8_preferred_directions_within_45_degrees() {
 #[test]
 #[ignore = "acceptance-failing: AGREEMENT-11"]
 fn agreement_11_tuning_r_is_printed_per_type_and_not_gated() {
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     let tuning = lines_with(&rows, &["tuning"]);
@@ -257,7 +252,6 @@ fn agreement_11_tuning_r_is_printed_per_type_and_not_gated() {
 #[test]
 #[ignore = "acceptance-failing: AGREEMENT-12"]
 fn agreement_12_the_rules_over_flyviss_values_give_rusts_counts_sets_and_verdicts() {
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     let cross: Vec<&str> = rows
@@ -282,7 +276,6 @@ fn agreement_13_gate_b_fails_rather_than_loosening_a_rule() {
     // The rules are the paper's, whatever the run finds.
     assert_eq!((D_THRESH, BINOMIAL_P0, BINOMIAL_ALPHA, PD_TOLERANCE_DEG), (0.357, 0.1, 0.05, 45.0));
 
-    assert!(real_data().join(INDICES_DIR).is_dir(), "gate B reads data/{INDICES_DIR}/ (fixtures-3)");
     let Some(r) = ensemble() else { return };
     let rows = gate_b(&r.stdout);
     assert!(!rows.is_empty(), "gate B runs under --ensemble:\n{}", r.all());
@@ -296,4 +289,15 @@ fn agreement_13_gate_b_fails_rather_than_loosening_a_rule() {
             "each failing gate B line says what was found: {failed:?}"
         );
     }
+}
+
+/// A fixture-gated test here skips without `data/flyvis-indices/`, as every
+/// fixture-gated test does: none asserts a fixture is present ahead of its
+/// skip helper, which would make it fail, not skip, in a checkout without
+/// the data.
+#[test]
+fn no_test_asserts_a_fixture_is_present_instead_of_skipping() {
+    let pat = concat!("assert!(real_data()", ".join(");
+    let hits: Vec<&str> = include_str!("acceptance_agreement.rs").lines().filter(|l| l.contains(pat)).collect();
+    assert!(hits.is_empty(), "fixture presence asserted instead of skipped: {hits:?}");
 }
