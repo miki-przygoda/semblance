@@ -141,10 +141,38 @@ For a model and precision: `respond_model` over task 2's flash and edge
 | FRI peaks, FRI, edge peaks | `==` on every value, at f32 and f64, with the trace gates' signed-zero refusal |
 | DSI, preferred direction, tuning r, the three helpers | f64: within `F64_BOUND` (1e-10). f32: within twice flyvis's own f32/f64 gap for that index, from `PROVENANCE.json` |
 
-These bounds are fixed here, before the gate runs, by 0.3.0's rule. The
-peaks are exact, so the bounded rows measure only the final reductions
-(cos/sin and summation order). Preferred directions compare as angles, by
+**Revised 2026-11-04** (owner's decision, after task 2's export ran on beast,
+whose torch differs from the Mac's in the last bits): fixtures-3 is not
+bit-equal to the torch Rust reproduces, so the first row is bounded like the
+second: f64 within `F64_BOUND`, f32 within twice flyvis's own f32/f64 gap for
+that value, from `PROVENANCE.json`. The record states this as a finding.
+Rust's exactness against flyvis is still proved by 0.3.0's gates on
+fixtures-2.
+
+These bounds are fixed here, before the gate runs, by 0.3.0's rule. As
+first written the peaks were exact, so the bounded rows measured only the
+final reductions (cos/sin and summation order); since the revision above
+the peaks are bounded too. Preferred directions compare as angles, by
 the shorter way round. Every row prints its worst difference in `{:.3e}`.
+
+**Finding, 2026-11-06** (task 2's final review, from fixtures-3's
+`PROVENANCE.json`; the rows above are unchanged pending the owner). The
+measured f32/f64 gaps are: FRI 7.1e-7, FRI peaks 6.8e-6, edge peaks 4.4e-5,
+DSI 7.7e-7, `fri_to_known` 1.6e-8, `dsi_to_known` 2.4e-7, but preferred
+direction 6.283, `pd_to_known` 0.027 and tuning r 0.033. `f32_f64_gap.pd` is
+a linear gap (`tools/export_indices.py`'s merge), so a direction that wraps
+across 0/2π reads as 2π: it must not be used as the preferred-direction
+bound. Even taken the short way round it is 1.25 rad. The 16 of 260
+model-000/049 directions that differ by more than 1e-4 rad all have DSI
+below 2e-4 (most near 1e-17), where the direction is rounding noise: model 049's T5a at OFF alone sets the
+`pd_to_known` and tuning r gaps, and every other tuning r agrees to better
+than 1e-4. For the same reason, at f64 beast's ~1e-15 trace differences can
+move such a direction by radians, so "within `F64_BOUND`" can fail with
+nothing wrong in Rust. The preferred-direction, tuning r and `pd_to_known`
+rules wait for the owner before gate A is planned (likely: circular
+distance, and only where the DSI is non-negligible). No re-export is needed:
+fixtures-3 holds pd, DSI, tuning r and the peaks at both precisions for
+models 000 and 049, so any such rule can be applied from the arrays.
 
 **Control:** model 049's responses scored against model 000's fixture
 values miss by more than `CONTROL_MISS` on the FRI and the edge peaks.

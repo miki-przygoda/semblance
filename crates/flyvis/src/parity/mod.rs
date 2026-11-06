@@ -30,6 +30,8 @@ pub use respond::{central_nodes, respond, respond_model, Battery, ReferenceBatte
 pub use run::{diff, play, run, settle, Counts, Diff, RunResult, SequenceResult, SettlingResult, Start};
 pub use validate::{validate, Controls, Coverage, Job, Options, Report};
 
+pub(crate) use inputs::{read_bytes, read_text};
+
 #[cfg(test)]
 pub(crate) use run::{cell_type, file, Precision, HEXALS, SNAPSHOTS};
 
