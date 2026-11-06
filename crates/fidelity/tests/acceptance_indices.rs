@@ -189,9 +189,8 @@ fn indices_02_the_fri_window_is_flyviss_float_expression() {
 }
 
 /// INDICES-03: at flyvis's dt the edge windows end at frames 878, 539, 367,
-/// 325, 285 and 265 for the six speeds. (The fixture-gated comparison with
-/// task 2's index manifest needs `data/flyvis-indices/`, which no build
-/// produces yet; it belongs with gate A.)
+/// 325, 285 and 265 for the six speeds. The fixture-gated half, against task
+/// 2's index manifest, is `indices_03_edge_windows_equal_the_index_manifests`.
 #[test]
 fn indices_03_edge_windows_end_where_flyviss_masks_do() {
     let table = [(2.4, 878), (4.8, 539), (9.7, 367), (13.0, 325), (19.0, 285), (25.0, 265)];
@@ -200,6 +199,105 @@ fn indices_03_edge_windows_end_where_flyviss_masks_do() {
         assert_eq!(w.last(), last, "speed {speed}");
         assert!(w.first() <= w.last());
     }
+}
+
+/// The workspace's `data/` directory.
+fn real_data() -> std::path::PathBuf {
+    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")).to_path_buf()
+}
+
+/// `data/flyvis-indices/manifest.json` (fixtures-3), or `None` after a skip
+/// notice; under `SEMBLANCE_REQUIRE_FIXTURES=1` a missing file fails.
+fn index_manifest_or_skip(test: &str) -> Option<String> {
+    let path = real_data().join("flyvis-indices").join("manifest.json");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            if std::env::var("SEMBLANCE_REQUIRE_FIXTURES").is_ok_and(|v| v == "1") {
+                panic!("{test}: SEMBLANCE_REQUIRE_FIXTURES=1 but {} is unreadable: {e}", path.display());
+            }
+            eprintln!("skipping: {test}: {} missing: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// The text after `"key"` and its colon, whitespace trimmed.
+fn after_key<'a>(obj: &'a str, key: &str) -> &'a str {
+    let quoted = format!("\"{key}\"");
+    let at = obj.find(&quoted).unwrap_or_else(|| panic!("no {quoted} in {obj}"));
+    let rest = obj[at + quoted.len()..].trim_start();
+    rest.strip_prefix(':').unwrap_or_else(|| panic!("no ':' after {quoted} in {obj}")).trim_start()
+}
+
+/// Each edge stimulus in the manifest's `batteries.edges`, as
+/// `(label, speed, (first, last))`. The manifest is written by
+/// `tools/export_indices.py`; an edge entry holds no nested object.
+fn manifest_edge_windows(manifest: &str) -> Vec<(String, f64, (usize, usize))> {
+    let mut rest = after_key(after_key(manifest, "batteries"), "edges").strip_prefix('[').expect("edges is an array");
+    let mut out = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if let Some(r) = rest.strip_prefix(',') {
+            rest = r.trim_start();
+        }
+        if rest.starts_with(']') {
+            break;
+        }
+        let body = rest.strip_prefix('{').unwrap_or_else(|| panic!("edge entry expected at {:.40}", rest));
+        let end = body.find('}').expect("edge entry closes");
+        let obj = &body[..end];
+        rest = &body[end + 1..];
+        let label = after_key(obj, "label");
+        let label = label[1..label[1..].find('"').expect("label string") + 1].to_string();
+        let speed = after_key(obj, "speed");
+        let speed: f64 = speed[..speed.find([',', '}', ' ']).unwrap_or(speed.len())].parse().expect("speed number");
+        let w = after_key(obj, "window");
+        let w = &w[1..w.find(']').expect("window array closes")];
+        let bounds: Vec<usize> = w.split(',').map(|v| v.trim().parse().expect("window frame")).collect();
+        assert_eq!(bounds.len(), 2, "{label}: window {w}");
+        out.push((label, speed, (bounds[0], bounds[1])));
+    }
+    out
+}
+
+/// INDICES-03, fixture-gated half: every edge stimulus's window in task 2's
+/// index manifest (`data/flyvis-indices/manifest.json`, read from flyvis's
+/// own masks) equals `edge_window` at its speed, first frame and last.
+/// Deferred to fidelity-gates with gate A (requirement R5): it reads
+/// fixtures-3, which no build stages yet.
+#[test]
+#[ignore = "acceptance-failing: INDICES-03"]
+fn indices_03_edge_windows_equal_the_index_manifests() {
+    let Some(manifest) = index_manifest_or_skip("INDICES-03 against the index manifest") else {
+        return;
+    };
+    let edges = manifest_edge_windows(&manifest);
+    assert_eq!(edges.len(), 2 * N_ANGLES * N_SPEEDS, "the edge battery's stimuli");
+    for speed in SPEEDS {
+        let n = edges.iter().filter(|(_, s, _)| *s == speed).count();
+        assert_eq!(n, 2 * N_ANGLES, "edges at speed {speed}");
+    }
+    for (label, speed, (first, last)) in edges {
+        let w = edge_window(speed, DT, T_PRE, EDGE_OFFSETS).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!((w.first(), w.last()), (first, last), "{label}: speed {speed}");
+    }
+}
+
+/// The scanner the fixture-gated INDICES-03 test relies on reads the
+/// manifest layout task 2's export plan fixes, so that test cannot pass by
+/// finding no edges.
+#[test]
+fn the_index_manifest_scanner_reads_every_edge_window() {
+    let sample = r#"{"format": 1, "batteries": {"flashes": [{"index": 0, "label": "flash r6 i1", "baseline": 0.5,
+        "intensity": 1, "radius": 6, "n_frames": 2, "window": [0, 1]}],
+        "edges": [{"index": 0, "label": "edge a0 i0 s2.4", "angle": 0, "intensity": 0, "speed": 2.4, "width": 80,
+        "n_frames": 3, "window": [0, 2]},{"index":1,"label":"edge a30 i1 s13","angle":30,"intensity":1,"speed":13,
+        "width":80,"n_frames":600,"window":[200,325]}]}, "files": {"edges": []}}"#;
+    assert_eq!(
+        manifest_edge_windows(sample),
+        vec![("edge a0 i0 s2.4".to_string(), 2.4, (0, 2)), ("edge a30 i1 s13".to_string(), 13.0, (200, 325))]
+    );
 }
 
 // ---------------------------------------------------------------------------
