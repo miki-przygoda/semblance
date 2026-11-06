@@ -243,7 +243,11 @@ pub fn hsic_unbiased(x: &ResponseMatrix, y: &ResponseMatrix) -> Result<f64, Simi
 
 /// Debiased linear CKA: `H(X,Y) / sqrt(H(X,X) H(Y,Y))`. `cka(x, x)` is
 /// exactly 1 (`H / sqrt(H H)` is exact in binary floating point) and
-/// `cka(a, b) == cka(b, a)` bit for bit, both by construction.
+/// `cka(a, b) == cka(b, a)` bit for bit, both by construction. All three
+/// HSICs are first multiplied by one power of two that brings
+/// `H(X,X) H(Y,Y)` near 1: exact, so it changes no bits wherever the
+/// unscaled product is in range, and keeps the product from overflowing to
+/// inf (or underflowing to 0) where it is not.
 pub fn cka(x: &ResponseMatrix, y: &ResponseMatrix) -> Result<f64, SimilarityError> {
     let hxy = hsic_unbiased(x, y)?;
     let hxx = hsic_unbiased(x, x)?;
@@ -254,11 +258,24 @@ pub fn cka(x: &ResponseMatrix, y: &ResponseMatrix) -> Result<f64, SimilarityErro
     if !(hyy.is_finite() && hyy > 0.0) {
         return Err(SimilarityError::NonPositiveHsic { which: "y", value: hyy });
     }
-    let c = hxy / (hxx * hyy).sqrt();
+    let k = (binary_exponent(hxx) + binary_exponent(hyy)) / 2;
+    let scale = |v: f64| v * pow2(-k / 2) * pow2(-(k - k / 2));
+    let c = scale(hxy) / (scale(hxx) * scale(hyy)).sqrt();
     if !c.is_finite() {
         return Err(SimilarityError::NonFinite("CKA".into()));
     }
     Ok(c)
+}
+
+/// The unbiased binary exponent of a finite `v`: -1023 for zero and
+/// subnormals, which only needs to be roughly right there.
+fn binary_exponent(v: f64) -> i32 {
+    ((v.to_bits() >> 52) & 0x7ff) as i32 - 1023
+}
+
+/// `2^e`, exactly, for `e` in -1022..=1023.
+fn pow2(e: i32) -> f64 {
+    f64::from_bits(((e + 1023) as u64) << 52)
 }
 
 /// The dot product, summed in order.
@@ -632,6 +649,23 @@ mod tests {
             let (mx, my) = (matrix(&x), matrix(&y));
             assert_eq!(cka(&mx, &mx), Ok(1.0));
             assert_eq!(cka(&mx, &my).unwrap().to_bits(), cka(&my, &mx).unwrap().to_bits());
+        }
+    }
+
+    #[test]
+    fn cka_scores_huge_and_tiny_matrices_whose_hsic_product_leaves_the_f64_range() {
+        // H(X,X) H(Y,Y) overflows to inf (or underflows to 0) although each
+        // HSIC is finite and positive: the score must still be the score
+        for scale in [1e50, 1e-60] {
+            let unit = random_rows(7, 8, 3);
+            let unit_y = related(&unit, 8, 0.7);
+            let base = cka(&matrix(&unit), &matrix(&unit_y)).unwrap();
+            let scaled = |m: &[Vec<f64>]| -> Vec<Vec<f64>> { m.iter().map(|r| r.iter().map(|v| v * scale).collect()).collect() };
+            let (mx, my) = (matrix(&scaled(&unit)), matrix(&scaled(&unit_y)));
+            assert_eq!(cka(&mx, &mx), Ok(1.0), "scale {scale:e}");
+            let (a, b) = (cka(&mx, &my).unwrap(), cka(&my, &mx).unwrap());
+            assert_eq!(a.to_bits(), b.to_bits());
+            assert!((a - base).abs() <= 1e-12, "scale {scale:e}: {a} vs {base}");
         }
     }
 
