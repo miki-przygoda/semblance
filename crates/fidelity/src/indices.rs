@@ -1002,13 +1002,18 @@ fn py_mod(a: f64, m: f64) -> f64 {
 }
 
 /// C(n, i), exact as a u128 while it fits (always for n <= 128), rounded
-/// once to f64; past that, a running f64 product.
+/// once to f64; past that, a running f64 product. Each step takes C(n, j)
+/// to C(n, j + 1) = C(n, j) (n - j) / (j + 1) with the gcd of C(n, j) and
+/// j + 1 cancelled first, so no intermediate exceeds C(n, j + 1).
 fn choose(n: u32, i: u32) -> f64 {
     let i = i.min(n - i);
     let mut c: u128 = 1;
     for j in 0..i {
-        match c.checked_mul((n - j) as u128) {
-            Some(v) => c = v / (j as u128 + 1),
+        let d = j as u128 + 1;
+        let g = gcd(c, d);
+        // (d / g) divides (n - j): it divides c (n - j) and shares nothing with c / g.
+        match (c / g).checked_mul((n - j) as u128 / (d / g)) {
+            Some(v) => c = v,
             None => {
                 let mut f = 1.0f64;
                 for j in 0..i {
@@ -1019,6 +1024,14 @@ fn choose(n: u32, i: u32) -> f64 {
         }
     }
     c as f64
+}
+
+/// Euclid's greatest common divisor.
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 #[cfg(test)]
@@ -1669,6 +1682,22 @@ mod tests {
         assert_eq!(a, Agreement { count: 1, of: 2, misses: vec!["T5a".into()] });
         assert!(matches!(pd_within(&pd, &types, &[("T4a", 180)], -1.0), Err(IndexError::BadParameter { .. })));
         assert!(matches!(pd_within(&pd, &types, &[("T4a", 180)], f64::NAN), Err(IndexError::BadParameter { .. })));
+    }
+
+    #[test]
+    fn choose_is_the_exact_integer_rounded_once_for_every_n_up_to_128() {
+        // Pascal's triangle in u128: every C(n, i) for n <= 128 fits.
+        let mut row: Vec<u128> = vec![1];
+        for n in 0..=128u32 {
+            for (i, &c) in row.iter().enumerate() {
+                assert_eq!(choose(n, i as u32), c as f64, "C({n}, {i})");
+            }
+            let mut next = vec![1u128; row.len() + 1];
+            for i in 1..row.len() {
+                next[i] = row[i - 1] + row[i];
+            }
+            row = next;
+        }
     }
 
     #[test]
