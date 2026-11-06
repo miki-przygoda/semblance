@@ -11,9 +11,10 @@ stores them with the input flyvis fed. Before it writes anything it proves:
   - every model's parameters are the ones Rust holds (ensemble.csv);
   - the input flyvis fed each stimulus is the input stored here;
   - model 000's settled state and central traces on the stimuli shared
-    with data/flyvis-reference are fixtures-2's, bit for bit (so this
-    pipeline is the one 0.3.0's gates reproduce, and this machine's torch
-    computes what the Mac's did);
+    with data/flyvis-reference are fixtures-2's, within a bound fixed
+    beforehand (1e-10 at f64; at f32, twice flyvis's own f32/f64 gap) --
+    beast's torch differs from the Mac's in the last bits, so this proves
+    the pipeline is the one 0.3.0's gates reproduce, not bit-equality;
   - the FRI window and each speed's edge window are the ones tabled here;
   - model 000's results do not depend on the thread count.
 
