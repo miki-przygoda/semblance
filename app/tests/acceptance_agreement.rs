@@ -108,9 +108,28 @@ fn gate_b(stdout: &str) -> Vec<&str> {
     out
 }
 
-/// Whether `line` states the count `n` out of `of`.
+/// Whether `line` states the count `n` out of `of`, as whole numbers:
+/// `30/32` states 30 of 32 but not 0 of 32, and not 30 of 320.
 fn states(line: &str, n: usize, of: usize) -> bool {
-    line.contains(&format!("{n}/{of}")) || line.contains(&format!("{n} of {of}"))
+    [format!("{n}/{of}"), format!("{n} of {of}")].iter().any(|pat| {
+        line.match_indices(pat.as_str()).any(|(i, _)| {
+            let before = line[..i].chars().next_back();
+            let after = line[i + pat.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
+        })
+    })
+}
+
+/// `states` reads whole counts: 30/32 states 30 of 32, and no other
+/// count, so AGREEMENT-07's "no other count" can hold on a correct line.
+#[test]
+fn states_reads_a_count_as_a_whole_number() {
+    for line in ["gate B polarity model 000: 30/32", "gate B polarity model 000: 30 of 32 agree"] {
+        assert!(states(line, 30, 32), "{line}");
+        assert!((0..=32).filter(|&n| n != 30).all(|n| !states(line, n, 32)), "{line}");
+    }
+    assert!(!states("130/32", 30, 32) && !states("30/320", 30, 32) && !states("30 of 320", 30, 32));
+    assert!(states("(30/32)", 30, 32) && states("30/32.", 30, 32));
 }
 
 /// Whether a line reports a failure.
