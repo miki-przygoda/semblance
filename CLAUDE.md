@@ -130,23 +130,24 @@ releases (semblance, -codec, -connectome, -evo, -fidelity, -sim) were yanked on
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 587 tests, 0 failures
+cargo test --workspace          # 600 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 cargo run --release -- validate # exit 0: every parity gate and control holds
 ```
 
-184 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
-`data/flyvis-stimuli/`, `data/flyvis-reference/` and
-`data/flyvis-pretrained/ensemble.csv` are absent (all five are gitignored
+186 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
+`data/flyvis-stimuli/`, `data/flyvis-reference/`, `data/flyvis-indices/` and
+`data/flyvis-pretrained/ensemble.csv` are absent (all six are gitignored
 real-data; the first is fetched per `RESOURCES.md`, the next two produced by
 `tools/export_build.py`, and `tools/export_stimuli.py` with
 `tools/export_moving_edges.py` respectively; `tools/export_reference.py`
 writes `data/flyvis-reference/` and also the three height-80 `_h80`
-moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
+moving-edge files; `ensemble.csv` comes from `tools/export_params.py`; `tools/export_indices.py`
+writes `data/flyvis-indices/`, flyvis's own index values).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "587 passed, 0 failed" whether the data is present
+the suite reports the same "600 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`,
 and even then not quite one per skipped test. Fixtures loaded once and shared
 -- the settling and trace gates' (`crates/flyvis/src/gate_support.rs`,
@@ -156,11 +157,11 @@ cache the miss, not the notice, so every test that finds one missing prints
 its own (`acceptance_traces.rs`'s
 `every_fixture_gated_acceptance_test_prints_its_own_skip_notice` holds the
 acceptance files to that). A test that reads more than one missing fixture
-prints more than one: 178 of the 184 print a notice, 192 notices in all
+prints more than one: 180 of the 186 print a notice, 194 notices in all
 under `--nocapture --test-threads=1`. The other six -- `validate_02`, `_07`,
 `_11`, `_12`, `_13` and `_20` in `app/tests/acceptance_validate.rs` -- share
 `good()`'s cached run, which prints its notice only for the first test to
-ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 184 fails
+ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 186 fails
 instead.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
@@ -174,7 +175,8 @@ is missing, and verifies every file against `ci/fixtures.sha256`. It never
 overwrites a file that fails verification. Since `fixtures-2` it also fetches
 `data/flyvis-reference/` (flyvis's reference traces, from
 `tools/export_reference.py`) and `data/flyvis-pretrained/ensemble.csv`,
-which the settling and trace gates read. CI runs the same script, then the
+which the settling and trace gates read; since `fixtures-3`, `data/flyvis-indices/`
+(flyvis's index values, from `tools/export_indices.py`). CI runs the same script, then the
 suite with `SEMBLANCE_REQUIRE_FIXTURES=1`.
 
 `roundtrip` reporting anything other than `0.000000` means a lossless round-trip
