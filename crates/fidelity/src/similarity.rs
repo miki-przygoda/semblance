@@ -314,14 +314,15 @@ pub struct Rdm {
 }
 
 impl Rdm {
-    /// Refuses fewer than 2 conditions, a length other than n * n, a
-    /// non-finite entry, and an asymmetric matrix.
+    /// Refuses fewer than 2 conditions, a length other than n * n (an n
+    /// whose n * n overflows reports `expected: usize::MAX`), a non-finite
+    /// entry, and an asymmetric matrix.
     pub fn new(n: usize, d: Vec<f64>) -> Result<Rdm, SimilarityError> {
         if n < 2 {
             return Err(SimilarityError::TooFew { what: "conditions", need: 2, found: n });
         }
-        if d.len() != n * n {
-            return Err(SimilarityError::Length { what: "RDM entries", expected: n * n, found: d.len() });
+        if n.checked_mul(n) != Some(d.len()) {
+            return Err(SimilarityError::Length { what: "RDM entries", expected: n.saturating_mul(n), found: d.len() });
         }
         if let Some(k) = d.iter().position(|v| !v.is_finite()) {
             return Err(SimilarityError::NonFinite(format!("RDM entry ({}, {})", k / n, k % n)));
@@ -823,6 +824,10 @@ mod tests {
         assert_eq!(Rdm::new(2, vec![0.0; 3]), Err(SimilarityError::Length { what: "RDM entries", expected: 4, found: 3 }));
         assert_eq!(Rdm::new(3, vec![0.0, 1.0, 2.0, 1.0, 0.0, 3.0, 2.5, 3.0, 0.0]), Err(SimilarityError::NotSymmetric { i: 0, j: 2 }));
         assert!(matches!(Rdm::new(2, vec![0.0, f64::NAN, f64::NAN, 0.0]), Err(SimilarityError::NonFinite(_))));
+        // n * n overflows usize (it would wrap to 0 and match an empty vec): a
+        // refusal, with the expected count saturated, never a panic.
+        let huge = 1usize << (usize::BITS / 2);
+        assert_eq!(Rdm::new(huge, vec![]), Err(SimilarityError::Length { what: "RDM entries", expected: usize::MAX, found: 0 }));
         let m = Rdm::mean(&[rdm3([1.0, 2.0, 3.0]), rdm3([3.0, 2.0, 1.0])]).unwrap();
         assert_eq!(m.upper(), vec![2.0, 2.0, 2.0]);
         assert_eq!(Rdm::mean(&[]), Err(SimilarityError::TooFew { what: "RDMs", need: 1, found: 0 }));
