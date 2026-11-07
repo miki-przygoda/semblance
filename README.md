@@ -16,8 +16,11 @@ does, and is gated against flyvis's own output. Around that sits the plumbing
 for the compression experiment — graph representation, a placeholder spiking
 simulator, an evolution loop, a fidelity harness, and a lossless codec
 baseline. The two parts that are actually research, **the reduced encoding**
-and **the behavioural-fidelity metric**, are not built yet. There is no
-compression result yet.
+and **the behavioural-fidelity metric**, are not finished. The metric's
+measures exist (`semblance-fidelity`'s `indices` and `similarity`: flyvis's
+response indices, the paper's agreement rules and debiased linear CKA), but
+the gates that hold them to flyvis's own index values are not built yet, and
+the reduced encoding is not started. There is no compression result yet.
 
 **0.3.0 reproduces flyvis 1.2.0's CPU reference (`fixtures-2`) bit for
 bit.** With torch's own `exp` of the synapse counts compiled in

@@ -257,8 +257,19 @@ rules from a `Responses`, emulating flyvis's dtypes operation by operation;
 `semblance_fidelity::similarity` holds debiased linear CKA and Zhou &
 Hasler's variant (reported, never gated); `semblance_flyvis::parity::controls`
 builds gate C's four controls, seeded by `control_seed`, with
-`respond_network` for the rewired one. Gates A–D, which hold these to
-flyvis's exported index values, are not built yet.
+`respond_network` for the rewired one. Gates A–D, which run these over
+flyvis's exported index values (`data/flyvis-indices/`, fixtures-3) and the
+50 trained models, are not built yet: they are the `fidelity-gates` epic's,
+and so are `validate`'s gate A rows and `validate --ensemble`. The 19
+acceptance tests that describe them are written and carry
+`#[ignore = "acceptance-failing: <ID>"]` (`INDICES-03`, `-16`–`-19`,
+`AGREEMENT-07`–`-13`, `SIMILARITY-11`–`-13`, `CONTROLS-09`–`-12`); libtest
+lists them as ignored, outside the passed count above. Un-ignore each as its
+gate lands; do not delete one to make the suite green.
+
+Gate E is built: `compare_behaviour`, `behavioural_distance` and
+`size_fidelity_curve` return `Result<_, FidelityError>` and refuse a shape
+mismatch or an empty battery instead of scoring it as a perfect 0.
 
 Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
 float comparisons, for reasons specific to each one. Most are round-trip
