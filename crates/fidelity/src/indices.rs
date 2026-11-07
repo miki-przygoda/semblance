@@ -37,7 +37,8 @@ pub enum IndexError {
     LabelMismatch { stimulus: usize, layout: String, responses: String },
     /// A window ends at or past its stimulus's last frame.
     WindowPastEnd { stimulus: usize, last: usize, n_frames: usize },
-    /// A window whose first frame is after its last.
+    /// A window whose first frame is after its last, or whose frame count
+    /// `last - first + 1` a usize cannot hold.
     BadWindow { first: usize, last: usize },
     /// A stimulus no flyvis battery could hold (a NaN speed, say).
     BadStimulus { stimulus: usize, reason: String },
@@ -74,8 +75,11 @@ impl fmt::Display for IndexError {
             IndexError::WindowPastEnd { stimulus, last, n_frames } => {
                 write!(f, "stimulus {stimulus}: its window ends at frame {last}, past its {n_frames} frames")
             }
-            IndexError::BadWindow { first, last } => {
+            IndexError::BadWindow { first, last } if first > last => {
                 write!(f, "a window from frame {first} to frame {last} ends before it starts")
+            }
+            IndexError::BadWindow { first, last } => {
+                write!(f, "a window from frame {first} to frame {last} holds more frames than a usize counts")
             }
             IndexError::BadStimulus { stimulus, reason } => write!(f, "stimulus {stimulus}: {reason}"),
             IndexError::BadDt(dt) => write!(f, "dt {dt} is not finite and positive"),
@@ -111,9 +115,10 @@ pub struct Window {
 }
 
 impl Window {
-    /// The frames `first..=last`; refused if `first > last`.
+    /// The frames `first..=last`; refused if `first > last`, or if their
+    /// count `last - first + 1` overflows a usize.
     pub fn new(first: usize, last: usize) -> Result<Window, IndexError> {
-        if first > last {
+        if last.checked_sub(first).and_then(|d| d.checked_add(1)).is_none() {
             return Err(IndexError::BadWindow { first, last });
         }
         Ok(Window { first, last })
@@ -1110,6 +1115,19 @@ mod tests {
         }
         let e = edge_window(19.0, 0.005, f64::NAN, EDGE_OFFSETS);
         assert!(matches!(e, Err(IndexError::BadParameter { what: "t_pre", .. })), "{e:?}");
+    }
+
+    #[test]
+    fn a_window_whose_frame_count_overflows_is_refused() {
+        // last - first + 1 frames: 0..=usize::MAX is one more than a usize holds
+        let e = Window::new(0, usize::MAX);
+        assert_eq!(e, Err(IndexError::BadWindow { first: 0, last: usize::MAX }));
+        assert_eq!(
+            e.unwrap_err().to_string(),
+            format!("a window from frame 0 to frame {} holds more frames than a usize counts", usize::MAX)
+        );
+        let w = Window::new(1, usize::MAX).unwrap();
+        assert_eq!(w.n_frames(), usize::MAX);
     }
 
     #[test]
