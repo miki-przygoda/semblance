@@ -847,20 +847,23 @@ pub fn median_fri(per_model: &[Vec<f64>]) -> Result<Vec<f64>, IndexError> {
 
 /// P(X >= k) for X ~ Binomial(n, p0), summed in f64 from i = k up, each
 /// term `C(n, i) p0^i (1 - p0)^(n - i)` with C(n, i) an exact integer
-/// rounded once.
-pub fn binomial_upper_tail(n: u32, k: u32, p0: f64) -> f64 {
+/// rounded once. Refuses a `p0` that is NaN or outside [0, 1].
+pub fn binomial_upper_tail(n: u32, k: u32, p0: f64) -> Result<f64, IndexError> {
+    if !(0.0..=1.0).contains(&p0) {
+        return Err(IndexError::BadParameter { what: "p0", value: p0 });
+    }
     if k == 0 {
-        return 1.0;
+        return Ok(1.0);
     }
     if k > n {
-        return 0.0;
+        return Ok(0.0);
     }
     let q = 1.0 - p0;
     let mut sum = 0.0f64;
     for i in k..=n {
         sum += choose(n, i) * p0.powi(i as i32) * q.powi((n - i) as i32);
     }
-    sum
+    Ok(sum)
 }
 
 /// The paper's direction-selectivity rule, per type: k = how many models'
@@ -881,12 +884,12 @@ pub fn dsi_class(per_model: &[Vec<f64>], d_thresh: f64, p0: f64, alpha: f64) -> 
     }
     let n_types = per_model_shape(per_model)?;
     let n = per_model.len() as u32;
-    Ok((0..n_types)
+    (0..n_types)
         .map(|t| {
             let k = per_model.iter().filter(|m| m[t] > d_thresh).count() as u32;
-            binomial_upper_tail(n, k, p0) < alpha
+            Ok(binomial_upper_tail(n, k, p0)? < alpha)
         })
-        .collect())
+        .collect()
 }
 
 /// The preferred-direction rule: a known type agrees when its angular
@@ -1648,15 +1651,29 @@ mod tests {
 
     #[test]
     fn binomial_upper_tail_matches_hand_values() {
-        assert_eq!(binomial_upper_tail(1, 1, 0.1), 0.1);
-        assert_eq!(binomial_upper_tail(7, 0, 0.1), 1.0);
-        assert_eq!(binomial_upper_tail(3, 4, 0.1), 0.0);
+        assert_eq!(binomial_upper_tail(1, 1, 0.1).unwrap(), 0.1);
+        assert_eq!(binomial_upper_tail(7, 0, 0.1).unwrap(), 1.0);
+        assert_eq!(binomial_upper_tail(3, 4, 0.1).unwrap(), 0.0);
         for (n, k, want) in [(2, 1, 0.19), (2, 2, 0.01), (3, 2, 0.028), (10, 3, 0.0701908264), (10, 4, 0.0127951984)] {
-            let got = binomial_upper_tail(n, k, 0.1);
+            let got = binomial_upper_tail(n, k, 0.1).unwrap();
             assert!(close(got, want, 1e-14), "n {n}, k {k}: {got}");
         }
-        assert!(close(binomial_upper_tail(50, 9, 0.1), 0.057867205718094276, 1e-13));
-        assert!(close(binomial_upper_tail(50, 10, 0.1), 0.024537935704591455, 1e-13));
+        assert!(close(binomial_upper_tail(50, 9, 0.1).unwrap(), 0.057867205718094276, 1e-13));
+        assert!(close(binomial_upper_tail(50, 10, 0.1).unwrap(), 0.024537935704591455, 1e-13));
+    }
+
+    #[test]
+    fn binomial_upper_tail_refuses_a_p0_that_is_nan_or_outside_0_to_1() {
+        for p0 in [f64::NAN, -0.1, 2.0] {
+            let bad = |r: Result<f64, IndexError>| matches!(r, Err(IndexError::BadParameter { what: "p0", .. }));
+            assert!(bad(binomial_upper_tail(10, 3, p0)), "p0 {p0}");
+            // the k = 0 and k > n shortcuts do not skip the check
+            assert!(bad(binomial_upper_tail(10, 0, p0)), "p0 {p0}, k 0");
+            assert!(bad(binomial_upper_tail(3, 4, p0)), "p0 {p0}, k > n");
+        }
+        // the ends of [0, 1] are rates, not refusals
+        assert_eq!(binomial_upper_tail(4, 1, 0.0), Ok(0.0));
+        assert_eq!(binomial_upper_tail(4, 1, 1.0), Ok(1.0));
     }
 
     #[test]

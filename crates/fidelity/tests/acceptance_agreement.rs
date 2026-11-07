@@ -11,7 +11,7 @@ use std::f64::consts::PI;
 
 use semblance_fidelity::indices::{
     binomial_upper_tail, dsi_class, median_fri, pd_within, polarity_agreement, Agreement, BINOMIAL_ALPHA, BINOMIAL_P0,
-    D_THRESH, PD_TOLERANCE_DEG,
+    D_THRESH, IndexError, PD_TOLERANCE_DEG,
 };
 
 const DEG: f64 = PI / 180.0;
@@ -131,21 +131,28 @@ fn agreement_03_median_fri_is_the_per_type_median_across_models() {
 #[test]
 fn agreement_04_binomial_upper_tail_is_exact_for_small_n() {
     // P(X >= 2), n = 3, p = 0.1: 3 * 0.01 * 0.9 + 0.001 = 0.028.
-    assert!(close(binomial_upper_tail(3, 2, 0.1), 0.028), "{}", binomial_upper_tail(3, 2, 0.1));
+    assert!(close(binomial_upper_tail(3, 2, 0.1).unwrap(), 0.028), "{}", binomial_upper_tail(3, 2, 0.1).unwrap());
     // P(X >= 3), n = 5, p = 0.1: 10 * 0.001 * 0.81 + 5 * 0.0001 * 0.9 + 0.00001 = 0.00856.
-    assert!(close(binomial_upper_tail(5, 3, 0.1), 0.00856), "{}", binomial_upper_tail(5, 3, 0.1));
+    assert!(close(binomial_upper_tail(5, 3, 0.1).unwrap(), 0.00856), "{}", binomial_upper_tail(5, 3, 0.1).unwrap());
     // P(X >= 1), n = 4, p = 0.5: 1 - 1/16.
-    assert_eq!(binomial_upper_tail(4, 1, 0.5), 0.9375);
+    assert_eq!(binomial_upper_tail(4, 1, 0.5).unwrap(), 0.9375);
     // P(X >= 2), n = 2, p = 0.1: 0.01.
-    assert!(close(binomial_upper_tail(2, 2, 0.1), 0.01));
+    assert!(close(binomial_upper_tail(2, 2, 0.1).unwrap(), 0.01));
     // P(X >= 0) is certain; P(X >= n + 1) is impossible.
-    assert_eq!(binomial_upper_tail(7, 0, 0.1), 1.0);
-    assert_eq!(binomial_upper_tail(7, 8, 0.1), 0.0);
+    assert_eq!(binomial_upper_tail(7, 0, 0.1).unwrap(), 1.0);
+    assert_eq!(binomial_upper_tail(7, 8, 0.1).unwrap(), 0.0);
     // P(X >= n) = p^n.
-    assert!(close(binomial_upper_tail(6, 6, 0.5), 1.0 / 64.0));
+    assert!(close(binomial_upper_tail(6, 6, 0.5).unwrap(), 1.0 / 64.0));
     // Summed in f64: a tail far below f32's range of precision survives.
-    let tiny = binomial_upper_tail(50, 50, 0.1);
+    let tiny = binomial_upper_tail(50, 50, 0.1).unwrap();
     assert!(tiny > 0.0 && close(tiny, 1e-50), "{tiny:e}");
+    // A p0 that is no probability is refused, never summed.
+    for p0 in [f64::NAN, -0.1, 2.0] {
+        assert!(
+            matches!(binomial_upper_tail(5, 3, p0), Err(IndexError::BadParameter { what: "p0", .. })),
+            "p0 {p0}"
+        );
+    }
 }
 
 /// AGREEMENT-05: a type is direction selective when the number of models
@@ -156,8 +163,8 @@ fn agreement_04_binomial_upper_tail_is_exact_for_small_n() {
 #[test]
 fn agreement_05_dsi_class_applies_the_binomial_test_to_models_above_threshold() {
     let n = 50;
-    assert!(binomial_upper_tail(n, 9, BINOMIAL_P0) >= BINOMIAL_ALPHA);
-    assert!(binomial_upper_tail(n, 10, BINOMIAL_P0) < BINOMIAL_ALPHA);
+    assert!(binomial_upper_tail(n, 9, BINOMIAL_P0).unwrap() >= BINOMIAL_ALPHA);
+    assert!(binomial_upper_tail(n, 10, BINOMIAL_P0).unwrap() < BINOMIAL_ALPHA);
 
     // Types: all above; 10 above; 9 above; 10 exactly at the threshold
     // (not above); none above.
