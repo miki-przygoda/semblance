@@ -671,9 +671,13 @@ impl TuningR {
 /// the peaks against the curve, a constant input scoring 0 (`fillna(0)`).
 /// `known` holds f64 curves equal to flyvis's literals (see
 /// [`widen_curves`]). Flyvis demeans an f32 run's peaks in f32; this runs in
-/// f64, as the spec says, and gate A's f32 rows are bounded.
+/// f64, as the spec says, and gate A's f32 rows are bounded. No known
+/// curves is refused.
 pub fn tuning_r(p: &EdgePeaks, b: &BatteryLayout, known: &[(&str, [f64; 12])]) -> Result<TuningR, IndexError> {
     let g = edge_grid(p, b)?;
+    if known.is_empty() {
+        return Err(IndexError::Empty("known tuning curves"));
+    }
     let mut cell_types = Vec::with_capacity(known.len());
     let mut r = Vec::with_capacity(known.len());
     for &(name, curve) in known {
@@ -1485,6 +1489,14 @@ mod tests {
         let mut broken = curve;
         broken[3] = f64::NAN;
         assert!(matches!(tuning_r(&p, &b, &[("T4a", broken)]), Err(IndexError::BadKnown { .. })));
+    }
+
+    #[test]
+    fn tuning_r_refuses_no_known_curves() {
+        let b = edge_layout(&SPEEDS);
+        let p = edge_peaks_for(&b, &["T4a"], |_, _, angle, _| (angle / 30) as f64);
+        // no known types is a refusal, never a score over nothing
+        assert_eq!(tuning_r(&p, &b, &[]), Err(IndexError::Empty("known tuning curves")));
     }
 
     #[test]
