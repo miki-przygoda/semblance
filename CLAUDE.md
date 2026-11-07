@@ -130,13 +130,13 @@ releases (semblance, -codec, -connectome, -evo, -fidelity, -sim) were yanked on
 
 ```bash
 cargo build --workspace
-cargo test --workspace          # 587 tests, 0 failures
+cargo test --workspace          # 715 tests, 0 failures
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --quiet -- roundtrip  # both distances must read exactly 0.000000
 cargo run --release -- validate # exit 0: every parity gate and control holds
 ```
 
-184 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
+196 of those tests skip when `data/flyvis-supplementary/`, `data/flyvis-build/`,
 `data/flyvis-stimuli/`, `data/flyvis-reference/` and
 `data/flyvis-pretrained/ensemble.csv` are absent (all five are gitignored
 real-data; the first is fetched per `RESOURCES.md`, the next two produced by
@@ -146,7 +146,7 @@ writes `data/flyvis-reference/` and also the three height-80 `_h80`
 moving-edge files; `ensemble.csv` comes from `tools/export_params.py`).
 A skip prints `eprintln!("skipping: ...")`, but libtest captures `eprintln!`
 for *passing* tests, so under plain `cargo test --workspace` those notices are invisible —
-the suite reports the same "587 passed, 0 failed" whether the data is present
+the suite reports the same "715 passed, 0 failed" whether the data is present
 or absent. They are only visible under `cargo test --workspace -- --nocapture`,
 and even then not quite one per skipped test. Fixtures loaded once and shared
 -- the settling and trace gates' (`crates/flyvis/src/gate_support.rs`,
@@ -156,11 +156,11 @@ cache the miss, not the notice, so every test that finds one missing prints
 its own (`acceptance_traces.rs`'s
 `every_fixture_gated_acceptance_test_prints_its_own_skip_notice` holds the
 acceptance files to that). A test that reads more than one missing fixture
-prints more than one: 178 of the 184 print a notice, 192 notices in all
+prints more than one: 190 of the 196 print a notice, 204 notices in all
 under `--nocapture --test-threads=1`. The other six -- `validate_02`, `_07`,
 `_11`, `_12`, `_13` and `_20` in `app/tests/acceptance_validate.rs` -- share
 `good()`'s cached run, which prints its notice only for the first test to
-ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 184 fails
+ask. Under `SEMBLANCE_REQUIRE_FIXTURES=1` every one of the 196 fails
 instead.
 
 Set `SEMBLANCE_REQUIRE_FIXTURES=1` to turn every missing-fixture skip into a
@@ -250,6 +250,26 @@ against flyvis's input: flashes exactly, edges within the geometry gate's
 those gates do and records each cell type's central response over a battery
 (`semblance_sim::response`); its own test holds it to flyvis's reference
 centre traces bit for bit.
+
+`semblance_fidelity::indices` computes flyvis's four response indices (FRI,
+DSI, preferred direction, tuning correlation) and the paper's agreement
+rules from a `Responses`, emulating flyvis's dtypes operation by operation;
+`semblance_fidelity::similarity` holds debiased linear CKA and Zhou &
+Hasler's variant (reported, never gated); `semblance_flyvis::parity::controls`
+builds gate C's four controls, seeded by `control_seed`, with
+`respond_network` for the rewired one. Gates A–D, which run these over
+flyvis's exported index values (`data/flyvis-indices/`, fixtures-3) and the
+50 trained models, are not built yet: they are the `fidelity-gates` epic's,
+and so are `validate`'s gate A rows and `validate --ensemble`. The 19
+acceptance tests that describe them are written and carry
+`#[ignore = "acceptance-failing: <ID>"]` (`INDICES-03`, `-16`–`-19`,
+`AGREEMENT-07`–`-13`, `SIMILARITY-11`–`-13`, `CONTROLS-09`–`-12`); libtest
+lists them as ignored, outside the passed count above. Un-ignore each as its
+gate lands; do not delete one to make the suite green.
+
+Gate E is built: `compare_behaviour`, `behavioural_distance` and
+`size_fidelity_curve` return `Result<_, FidelityError>` and refuse a shape
+mismatch or an empty battery instead of scoring it as a perfect 0.
 
 Elsewhere, `grep '\.abs() <' crates/*/src/*.rs` turns up other non-exact
 float comparisons, for reasons specific to each one. Most are round-trip

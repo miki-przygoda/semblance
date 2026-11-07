@@ -5,12 +5,14 @@
 //! Spec: docs/superpowers/specs/2026-11-04-graded-responses-design.md,
 //! section 2.
 
+use semblance_connectome::TypedNetwork;
 use semblance_sim::response::{Precision as Prec, Responses};
 
 use super::run::{cell_type, file, mismatch, settle_core, step_frame, Ctx, Precision, HEXALS};
 use super::{Counts, Fixtures, ParityError, TraceInputs};
 use crate::ensemble::ModelParams;
 use crate::reference::{BlockKey, Dtype};
+use crate::syn_count_torch::SYN_COUNT_TORCH_F32;
 
 /// For each cell type, in network order, its node at `(u, v) = (0, 0)`:
 /// the central column flyvis's indices read. Derived from the network, so
@@ -69,9 +71,64 @@ pub fn respond(
     counts: Counts,
     battery: &mut dyn Battery,
 ) -> Result<Responses, ParityError> {
+    respond_on(f, &f.net, &f.groups, params, dt, precision, counts, battery)
+}
+
+/// `respond` on another topology over the fixtures' nodes: gate C's rewired
+/// control, and nothing else (owner's answer Q5; decision 6 keeps `respond`
+/// on the fixed topology). `groups[e]` is edge `e`'s synapse-count group,
+/// carried from the edge it was rebuilt from, so torch's counts follow each
+/// edge and exactness is unaffected. Refuses, as `Usage`, a network whose
+/// cell types or nodes differ from the fixtures' network, groups of the
+/// wrong length, and a group past the 2355 tabled.
+#[allow(clippy::too_many_arguments)]
+pub fn respond_network(
+    f: &Fixtures,
+    net: &TypedNetwork,
+    groups: &[u32],
+    params: &ModelParams,
+    dt: f64,
+    precision: Dtype,
+    counts: Counts,
+    battery: &mut dyn Battery,
+) -> Result<Responses, ParityError> {
+    let same_nodes = net.cell_types() == f.net.cell_types()
+        && net.node_cell_type() == f.net.node_cell_type()
+        && net.node_u() == f.net.node_u()
+        && net.node_v() == f.net.node_v();
+    if !same_nodes {
+        return Err(ParityError::Usage("respond_network: the network's nodes differ from the fixtures' network".into()));
+    }
+    if groups.len() != net.num_edges() {
+        return Err(ParityError::Usage(format!(
+            "respond_network: {} synapse-count groups for {} edges",
+            groups.len(),
+            net.num_edges()
+        )));
+    }
+    if let Some((e, &g)) = groups.iter().enumerate().find(|&(_, &g)| g as usize >= SYN_COUNT_TORCH_F32.len()) {
+        return Err(ParityError::Usage(format!(
+            "respond_network: edge {e} names synapse-count group {g}, but only {} exist",
+            SYN_COUNT_TORCH_F32.len()
+        )));
+    }
+    respond_on(f, net, groups, params, dt, precision, counts, battery)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn respond_on(
+    f: &Fixtures,
+    net: &TypedNetwork,
+    groups: &[u32],
+    params: &ModelParams,
+    dt: f64,
+    precision: Dtype,
+    counts: Counts,
+    battery: &mut dyn Battery,
+) -> Result<Responses, ParityError> {
     match precision {
-        Dtype::F32 => respond_as::<f32>(f, params, dt, counts, battery),
-        Dtype::F64 => respond_as::<f64>(f, params, dt, counts, battery),
+        Dtype::F32 => respond_as::<f32>(f, net, groups, params, dt, counts, battery),
+        Dtype::F64 => respond_as::<f64>(f, net, groups, params, dt, counts, battery),
     }
 }
 
@@ -93,6 +150,8 @@ const MAX_SETTLE_STEPS: f64 = 1e6;
 
 fn respond_as<R: Precision>(
     f: &Fixtures,
+    net: &TypedNetwork,
+    groups: &[u32],
     params: &ModelParams,
     dt: f64,
     counts: Counts,
@@ -106,10 +165,10 @@ fn respond_as<R: Precision>(
         return Err(ParityError::Usage(format!("dt {dt} does not divide t_pre {t_pre} into 1 to {MAX_SETTLE_STEPS} whole settling steps")));
     }
     let centre = central_nodes(f)?;
-    let (mut g, _) = settle_core::<R>(f, params, dt, steps.round() as usize, counts, &[], Ctx::Respond)?;
+    let (mut g, _) = settle_core::<R>(f, net, groups, params, dt, steps.round() as usize, counts, &[], Ctx::Respond)?;
     let settled = g.state().to_vec();
 
-    let types: Vec<String> = centre.iter().map(|&k| cell_type(&f.net, k).to_string()).collect();
+    let types: Vec<String> = centre.iter().map(|&k| cell_type(net, k).to_string()).collect();
     let tag = match R::DTYPE {
         Dtype::F32 => Prec::F32,
         Dtype::F64 => Prec::F64,
@@ -117,7 +176,7 @@ fn respond_as<R: Precision>(
     let mut out = Responses::new(types, dt, tag).map_err(|e| mismatch(e.to_string()))?;
 
     // Zeroed once, as `play_from`: every frame overwrites the same input nodes.
-    let mut input = vec![R::ZERO; f.net.num_nodes()];
+    let mut input = vec![R::ZERO; net.num_nodes()];
     let mut frame = vec![R::ZERO; HEXALS];
     let mut frames = Vec::new();
     let mut s = 0usize;
@@ -138,7 +197,7 @@ fn respond_as<R: Precision>(
                 *slot = R::from_f64(v);
             }
             if let Some(k) = step_frame(f, &mut g, &frame, &mut input).map_err(mismatch)? {
-                let cell_type = cell_type(&f.net, k).to_string();
+                let cell_type = cell_type(net, k).to_string();
                 return Err(ParityError::NonFiniteResponse { stimulus: s, label, frame: i, node: k, cell_type });
             }
             values.extend(centre.iter().map(|&k| g.state()[k].to_f64()));
@@ -211,6 +270,8 @@ mod tests {
     use crate::reference::{parse_sequences, BlockKey, Dtype, SequenceInfo};
     use crate::test_support::{or_skip, read_fixture_bytes, read_fixture_text};
     use std::sync::OnceLock;
+    use semblance_connectome::TypedNetworkParts;
+    use crate::syn_count_torch::SYN_COUNT_TORCH_F32;
 
     /// A battery from a fixed list of frame buffers, for the error paths.
     struct Fixed {
@@ -386,6 +447,73 @@ mod tests {
         assert_eq!(nodes.len(), f.network().cell_types().len());
         for (k, c) in f.manifest().centre_nodes.iter().enumerate() {
             assert_eq!(f.network().cell_types()[f.network().node_cell_type()[nodes[k]] as usize], c.cell_type);
+        }
+    }
+
+    /// A network's parts, for building a variant of it.
+    fn parts(net: &TypedNetwork) -> TypedNetworkParts {
+        TypedNetworkParts {
+            cell_types: net.cell_types().to_vec(),
+            node_cell_type: net.node_cell_type().to_vec(),
+            node_u: net.node_u().to_vec(),
+            node_v: net.node_v().to_vec(),
+            conn_types: net.conn_types().to_vec(),
+            conn_sign: net.conn_sign().to_vec(),
+            edge_source: net.edge_source().to_vec(),
+            edge_target: net.edge_target().to_vec(),
+            edge_conn_type: net.edge_conn_type().to_vec(),
+            edge_n_syn: net.edge_n_syn().to_vec(),
+        }
+    }
+
+    /// `respond_network` on the fixtures' own network and groups is
+    /// `respond`, bit for bit, at both precisions.
+    #[test]
+    fn respond_network_on_the_fixtures_own_network_is_respond() {
+        let Some(f) = fixture() else { return };
+        let p = f.ensemble.model("000").unwrap();
+        let flash: Vec<f64> = (0..2 * HEXALS).map(|i| (i % 2) as f64).collect();
+        for precision in [Dtype::F32, Dtype::F64] {
+            let battery = || Fixed { stimuli: vec![grey(3), flash.clone()], claimed: 2, next: 0 };
+            let a = respond(f, p, 1.0 / 200.0, precision, Counts::Torch, &mut battery()).unwrap_or_else(|e| panic!("{e}"));
+            let b = respond_network(f, &f.net, &f.groups, p, 1.0 / 200.0, precision, Counts::Torch, &mut battery())
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(a.len(), b.len());
+            for s in 0..a.len() {
+                let (x, y) = (a.stimulus(s).unwrap(), b.stimulus(s).unwrap());
+                assert_eq!((x.label(), x.n_frames()), (y.label(), y.n_frames()));
+                for i in 0..x.n_frames() {
+                    let bits = |row: &[f64]| row.iter().map(|v| v.to_bits()).collect::<Vec<u64>>();
+                    assert_eq!(bits(x.frame(i).unwrap()), bits(y.frame(i).unwrap()), "{precision:?}, stimulus {s}, frame {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn respond_network_refuses_a_network_whose_nodes_differ() {
+        let Some(f) = fixture() else { return };
+        let mut q = parts(&f.net);
+        q.node_u[0] += 1;
+        let moved = TypedNetwork::new(q).unwrap();
+        let mut b = Fixed { stimuli: vec![grey(1)], claimed: 1, next: 0 };
+        let p = ModelParams::pretrained();
+        let e = respond_network(f, &moved, &f.groups, &p, 1.0 / 200.0, Dtype::F32, Counts::Torch, &mut b).unwrap_err();
+        assert!(matches!(e, ParityError::Usage(ref m) if m.contains("nodes differ")), "{e}");
+    }
+
+    #[test]
+    fn respond_network_refuses_synapse_count_groups_that_do_not_fit_without_panicking() {
+        let Some(f) = fixture() else { return };
+        let p = ModelParams::pretrained();
+        let mut short = f.groups.clone();
+        short.pop();
+        let mut past = f.groups.clone();
+        past[0] = SYN_COUNT_TORCH_F32.len() as u32;
+        for (groups, expect) in [(short, "groups for"), (past, "names synapse-count group")] {
+            let mut b = Fixed { stimuli: vec![grey(1)], claimed: 1, next: 0 };
+            let e = respond_network(f, &f.net, &groups, &p, 1.0 / 200.0, Dtype::F32, Counts::Torch, &mut b).unwrap_err();
+            assert!(matches!(e, ParityError::Usage(ref m) if m.contains(expect)), "{e}");
         }
     }
 }

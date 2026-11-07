@@ -107,7 +107,13 @@ fn cmd_roundtrip() -> ExitCode {
         DriveProbe { k: 4, amplitude: 2.0, motor: 8, ticks: 200 },
     ];
     let sd = structural_distance(&c, &decoded);
-    let bd = behavioural_distance(&c, &decoded, &battery);
+    let bd = match behavioural_distance(&c, &decoded, &battery) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("roundtrip: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     println!("codec: WeightCodec (lossless baseline)");
     println!("latent dim: {} (= num synapses)", codec.latent_dim(&c));

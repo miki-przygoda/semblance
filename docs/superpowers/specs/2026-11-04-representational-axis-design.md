@@ -90,12 +90,18 @@ O(n·p²), accumulated in f64. `cka = H(X,Y) / sqrt(H(X,X) · H(Y,Y))`.
 **Zhou & Hasler's variant** (reported only):
 
 ```rust
-pub fn peak_vectors(r: &Responses) -> Vec<[f64; 65]>;           // per condition
-pub fn cosine_rdm(v: &[[f64; 65]]) -> Rdm;                      // + 1e-10, as theirs
-pub fn spearman(a: &Rdm, b: &Rdm) -> f64;                       // upper triangle, ties averaged
-pub fn kendall_tau_a(a: &Rdm, b: &Rdm) -> f64;
-pub fn cka_biased(x: &[[f64; 65]], y: &[[f64; 65]]) -> f64;     // on ensemble means
+pub fn peak_vectors(r: &Responses) -> Result<Vec<[f64; 65]>, SimilarityError>; // per condition
+pub fn cosine_rdm(v: &[[f64; 65]]) -> Result<Rdm, SimilarityError>;            // + 1e-10, as theirs
+pub fn spearman(a: &Rdm, b: &Rdm) -> Result<f64, SimilarityError>;             // upper triangle, ties averaged
+pub fn kendall_tau_a(a: &Rdm, b: &Rdm) -> Result<f64, SimilarityError>;
+pub fn cka_biased(x: &[[f64; 65]], y: &[[f64; 65]]) -> Result<f64, SimilarityError>; // on ensemble means
 ```
+
+**Revised 2026-11-07:** these return `Result`, as the agreement rules do
+(deviation A5/A6, accepted by the owner 2026-11-05): a malformed input is a
+refusal, never a score. `peak_vectors` refuses a type count other than 65;
+the others refuse mismatched or too-small inputs, non-finite values, and an
+input with no variance (deviation A14).
 
 No Nili permutation test: their p-values are not reproduced, only their
 correlations.

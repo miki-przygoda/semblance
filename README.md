@@ -16,8 +16,11 @@ does, and is gated against flyvis's own output. Around that sits the plumbing
 for the compression experiment — graph representation, a placeholder spiking
 simulator, an evolution loop, a fidelity harness, and a lossless codec
 baseline. The two parts that are actually research, **the reduced encoding**
-and **the behavioural-fidelity metric**, are not built yet. There is no
-compression result yet.
+and **the behavioural-fidelity metric**, are not finished. The metric's
+measures exist (`semblance-fidelity`'s `indices` and `similarity`: flyvis's
+response indices, the paper's agreement rules and debiased linear CKA), but
+the gates that hold them to flyvis's own index values are not built yet, and
+the reduced encoding is not started. There is no compression result yet.
 
 **0.3.0 reproduces flyvis 1.2.0's CPU reference (`fixtures-2`) bit for
 bit.** With torch's own `exp` of the synapse counts compiled in
@@ -65,7 +68,7 @@ Everything runs on a **synthetic** connectome out of the box, so you don't need 
 download anything to see the pipeline work. Wire in real data when you're ready
 (`RESOURCES.md` → "Getting the data").
 
-**Without fixture data, 184 flyvis parity tests skip and still report
+**Without fixture data, 196 flyvis parity tests skip and still report
 green.** They are the tests that prove this workspace reproduces flyvis. They
 read gitignored files under `data/`, and when those are absent each one passes,
 and all but six print a skip notice (six validate tests share one cached run,
@@ -92,7 +95,7 @@ from flyvis itself instead (Python, PyTorch), see `tools/README.md`.
 | `sim` | graded dynamics (`semblance_sim::graded`): flyvis's passive point neurons, explicit Euler, f32 and f64, reproducing flyvis's settling and its traces under stimulus bit for bit. Also an LIF spiking path, a placeholder to be replaced | sensory encoding + motor decoding |
 | `codec` | `WeightCodec` — lossless baseline, directly evolvable | `ReducedCodec` — the actual compression (`todo!()`) |
 | `evo` | gaussian mutation + truncation selection + elitism, seedable | a real `Fitness` (environment + reward) |
-| `fidelity` | structural + behavioural distance, size-vs-fidelity curve harness | the **probe battery** design |
+| `fidelity` | flyvis's response indices and the paper's agreement rules (`indices`); debiased linear CKA and Zhou & Hasler's RDM variant (`similarity`); structural + behavioural distance and the size-vs-fidelity harness, which refuse malformed input instead of scoring it | the **probe battery** design |
 | `app` | CLI wiring the three flows together, and `validate`, which runs every parity gate and control and prints the record's table | — |
 
 The open work is `ReducedCodec` in `crates/codec/src/lib.rs`, whose `encode`

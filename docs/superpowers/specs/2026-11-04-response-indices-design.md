@@ -99,9 +99,16 @@ pub fn fri(p: &FriPeaks) -> Result<Vec<f64>, IndexError>;                       
 pub fn edge_peaks(r: &Responses, b: &BatteryLayout) -> Result<EdgePeaks, IndexError>; // [144][65]
 pub fn dsi(p: &EdgePeaks, b: &BatteryLayout) -> Result<[Vec<f64>; 2], IndexError>;   // per intensity
 pub fn preferred_direction(p: &EdgePeaks, b: &BatteryLayout) -> Result<[Vec<f64>; 2], IndexError>;
-pub fn tuning_r(p: &EdgePeaks, b: &BatteryLayout, known: &[(&str, [f32; 12])])
+pub fn tuning_r(p: &EdgePeaks, b: &BatteryLayout, known: &[(&str, [f64; 12])])
     -> Result<TuningR, IndexError>;                                                 // [8][2][6], plus best
 ```
+
+**Revised 2026-11-07:** `tuning_r` takes the known curves as `[f64; 12]`,
+not `[f32; 12]`. `groundtruth::TUNING_CURVES`' f32 values are widened
+through each value's shortest decimal string (`widen_curves`), which gives
+flyvis's f64 literals; widening the f32s directly would move r by about
+1e-8 and break gate A's 1e-10 bound at f64 (deviation A8, accepted by the
+owner 2026-11-05). No known curves is refused (`IndexError::Empty`).
 
 Cell types are found by name through `Responses::type_index`; a missing one
 is `IndexError::MissingCellType`.
@@ -113,12 +120,26 @@ describes, with the known values passed in.
 **Agreement rules (the paper's, recorded as such):**
 
 ```rust
-pub fn polarity_agreement(fri: &[f64], types: &[String], known: &[(&str, i8)]) -> Agreement; // count, of, misses
+pub fn polarity_agreement(fri: &[f64], types: &[String], known: &[(&str, i8)])
+    -> Result<Agreement, IndexError>;                                            // count, of, misses
 pub fn median_fri(per_model: &[Vec<f64>]) -> Result<Vec<f64>, IndexError>;
-pub fn binomial_upper_tail(n: u32, k: u32, p0: f64) -> f64; // exact, summed in f64
-pub fn dsi_class(per_model: &[Vec<f64>], d_thresh: f64, p0: f64, alpha: f64) -> Vec<bool>;
-pub fn pd_within(pd: &[f64], known_deg: &[(&str, u16)], tolerance_deg: f64) -> Agreement;
+pub fn binomial_upper_tail(n: u32, k: u32, p0: f64) -> Result<f64, IndexError>; // exact, summed in f64
+pub fn dsi_class(per_model: &[Vec<f64>], d_thresh: f64, p0: f64, alpha: f64)
+    -> Result<Vec<bool>, IndexError>;
+pub fn pd_within(pd: &[Vec<f64>; 2], types: &[String], known_deg: &[(&str, u16)], tolerance_deg: f64)
+    -> Result<Agreement, IndexError>;
 ```
+
+**Revised 2026-11-07:** the agreement rules return `Result`: a missing cell
+type, a length mismatch or an empty known list is a refusal, never a score.
+`pd_within` takes per-intensity preferred directions and the type names, to
+apply `angular_distance_to_known`'s pairing (T4 at intensity 1, T5 at 0)
+(deviation A5/A6, accepted by the owner 2026-11-05).
+
+**Revised 2026-11-07:** `binomial_upper_tail` returns
+`Result<f64, IndexError>` and refuses a `p0` that is NaN or outside [0, 1]
+with `IndexError::BadParameter`, as `dsi_class` does (the owner,
+2026-11-07). Values for a valid `p0` are unchanged.
 
 Constants in one place, each with its citation: `D_THRESH = 0.357`,
 `BINOMIAL_P0 = 0.1`, `BINOMIAL_ALPHA = 0.05`, `PD_TOLERANCE_DEG = 45.0`

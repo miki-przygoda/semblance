@@ -80,6 +80,22 @@ choice depends on which behaviour matters, so it is a design decision still to
 make (`ProbeBattery` is the placeholder). This is the load-bearing decision in the whole
 project — if the metric is weak, every fidelity number downstream is meaningless.
 
+For the fly visual system, 0.4.0 answers it with flyvis's own battery rather
+than a new one. `semblance_sim::response` records each cell type's central
+response to flashes and moving edges (`semblance_flyvis::parity::respond`
+produces it for any parameter set), and `semblance-fidelity` scores those
+responses two ways: `indices`, flyvis's four response indices (FRI, DSI,
+preferred direction, tuning correlation) with the paper's agreement rules, so
+a decoded network can be asked whether it still reproduces the paper's known
+biology; and `similarity`, debiased linear CKA over the response time
+courses, the representational axis, with Zhou & Hasler's peak-voltage RDM
+variant reported beside it. `semblance_flyvis::parity::controls` builds the
+four controls (zeroed, shuffled, random parameters, rewired) that a score has
+to separate from trained models before it means anything. The gates that hold
+all of this to flyvis's exported values and the 50 trained models (gates A–D)
+are still to come. `compare_behaviour` and `ProbeBattery` remain the
+spiking path's metric and placeholder.
+
 ## Crate-by-crate
 
 - **`rng`** — the workspace's one random source. SplitMix64 expands a `u64`
@@ -97,9 +113,14 @@ project — if the metric is weak, every fidelity number downstream is meaningle
   dependencies. It also expands the spec into the realised network exactly as
   flyvis builds it (a `connectome::TypedNetwork` of 45,669 neurons), carries
   flyvis's trained parameters, and renders its stimulus families; each is gated
-  against flyvis's own output. Graded dynamics that reproduce flyvis's traces
-  are the next step.
-- **`sim`** — dynamics and the loop. LIF is implemented; synapses are current-based
+  against flyvis's own output, as are the graded dynamics in `sim` that run it.
+  `parity::respond` settles any parameter set and records its central
+  responses; `parity::controls` builds the seeded controls the fidelity gates
+  compare trained models against.
+- **`sim`** — dynamics and the loop. `graded` is flyvis's non-spiking
+  integrator, and `response` holds one network's central responses to a
+  battery, the input to every fidelity index. LIF is the legacy spiking
+  path; its synapses are current-based
   with exponential decay so sparse inputs summate (without that, recurrence is
   dead and weights don't matter). `Stimulus`/`Readout` are the input/output
   interface — the crate boundary where "repurpose this brain for a different body
@@ -111,7 +132,12 @@ project — if the metric is weak, every fidelity number downstream is meaningle
   changing the trait boundary. `Fitness` is still to be written: decode → run in
   an environment → score.
 - **`fidelity`** — structural distance (fast, not the target), behavioural distance
-  (the target), and `size_fidelity_curve` (the experiment harness).
+  (the target), and `size_fidelity_curve` (the experiment harness), all of
+  which refuse malformed input with a `FidelityError`; `indices` (flyvis's
+  response indices and the paper's agreement rules) and `similarity`
+  (debiased linear CKA and Zhou & Hasler's variant), pure functions over a
+  `semblance_sim::response::Responses`. It never depends on `flyvis`: ground
+  truth arrives as arguments.
 
 ## Suggested first milestones
 

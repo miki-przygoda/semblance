@@ -42,6 +42,7 @@ version = "0.3.1"
 dependencies = [
  "semblance-codec",
  "semblance-connectome",
+ "semblance-rng",
  "semblance-sim",
 ]
 
@@ -50,6 +51,7 @@ name = "semblance-flyvis"
 version = "0.3.1"
 dependencies = [
  "semblance-connectome",
+ "semblance-rng",
  "semblance-sim",
 ]
 
