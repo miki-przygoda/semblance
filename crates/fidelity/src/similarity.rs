@@ -467,6 +467,10 @@ pub fn kendall_tau_a(a: &Rdm, b: &Rdm) -> Result<f64, SimilarityError> {
 
 /// Zhou & Hasler's linear, biased CKA, on (ensemble-mean) peak matrices:
 /// columns centred, then `|Xc'Yc|_F^2 / sqrt(|Xc'Xc|_F^2 |Yc'Yc|_F^2)`.
+/// The three squared norms are first multiplied by one power of two that
+/// brings the denominator's product near 1, as [`cka`] scales its HSICs:
+/// exact, so it changes no bits wherever the unscaled product is in range,
+/// and keeps it from underflowing to 0 or overflowing to inf where it is not.
 pub fn cka_biased(x: &[[f64; ZH_TYPES]], y: &[[f64; ZH_TYPES]]) -> Result<f64, SimilarityError> {
     if x.len() != y.len() {
         return Err(SimilarityError::RowMismatch { x: x.len(), y: y.len() });
@@ -479,11 +483,15 @@ pub fn cka_biased(x: &[[f64; ZH_TYPES]], y: &[[f64; ZH_TYPES]]) -> Result<f64, S
     }
     let (xc, yc) = (centred(x), centred(y));
     let (xy, xx, yy) = (cross(&xc, &yc), cross(&xc, &xc), cross(&yc, &yc));
-    let den = (frobenius_sq_symmetric(&xx, ZH_TYPES) * frobenius_sq_symmetric(&yy, ZH_TYPES)).sqrt();
+    let (fxy, fxx, fyy) =
+        (frobenius_sq_symmetric(&xy, ZH_TYPES), frobenius_sq_symmetric(&xx, ZH_TYPES), frobenius_sq_symmetric(&yy, ZH_TYPES));
+    let k = (binary_exponent(fxx) + binary_exponent(fyy)) / 2;
+    let scale = |v: f64| v * pow2(-k / 2) * pow2(-(k - k / 2));
+    let den = (scale(fxx) * scale(fyy)).sqrt();
     if !(den.is_finite() && den > 0.0) {
         return Err(SimilarityError::Degenerate("a peak matrix has no variance across conditions".into()));
     }
-    let c = frobenius_sq_symmetric(&xy, ZH_TYPES) / den;
+    let c = scale(fxy) / den;
     if c.is_finite() { Ok(c) } else { Err(SimilarityError::NonFinite("biased CKA".into())) }
 }
 
@@ -844,6 +852,28 @@ mod tests {
         assert!(matches!(cka_biased(&[wide(&[f64::NAN]), wide(&[1.0])], &y[..2]), Err(SimilarityError::NonFinite(_))));
         let flat = [wide(&[1.0]), wide(&[1.0]), wide(&[1.0])];
         assert!(matches!(cka_biased(&flat, &y), Err(SimilarityError::Degenerate(_))));
+    }
+
+    #[test]
+    fn biased_cka_scores_huge_and_tiny_matrices_whose_norm_product_leaves_the_f64_range() {
+        // |Xc'Xc|_F^2 |Yc'Yc|_F^2 underflows to 0 at 1e-45 and overflows to
+        // inf at 1e40 although each norm is finite: CKA is scale-invariant,
+        // so the score must still be the score
+        let x = [wide(&[1.0, 0.0, 0.5]), wide(&[0.0, 1.0, -0.25]), wide(&[-1.0, -1.0, 2.0])];
+        let y = [wide(&[1.0, 0.0, 0.0]), wide(&[0.0, 2.0, 1.0]), wide(&[-1.0, -2.0, 3.0])];
+        let base = cka_biased(&x, &y).unwrap();
+        let by = |m: &[[f64; ZH_TYPES]], k: f64| -> Vec<[f64; ZH_TYPES]> { m.iter().map(|r| r.map(|v| v * k)).collect() };
+        for k in [1e-45, 1e40] {
+            let (sx, sy) = (by(&x, k), by(&y, k));
+            assert_eq!(cka_biased(&sx, &sx), Ok(1.0), "scale {k:e}");
+            let got = cka_biased(&sx, &sy).unwrap();
+            assert!((got - base).abs() <= 1e-14 * base, "scale {k:e}: {got} vs {base}");
+        }
+        // a power of two scales every input exactly, so the score is the
+        // unscaled one bit for bit
+        for k in [2f64.powi(-150), 2f64.powi(133)] {
+            assert_eq!(cka_biased(&by(&x, k), &by(&y, k)).map(f64::to_bits), Ok(base.to_bits()), "scale {k:e}");
+        }
     }
 
     #[test]
